@@ -18,7 +18,7 @@ func TestListContainers(t *testing.T) {
 		if r.URL.Path != "/api2/json/nodes/testnode/lxc" {
 			t.Errorf("unexpected path: %s", r.URL.Path)
 		}
-		json.NewEncoder(w).Encode(response{
+		_ = json.NewEncoder(w).Encode(response{
 			Data: json.RawMessage(`[
 				{"vmid":100,"name":"template-debian","status":"stopped","cpu":0,"mem":0,"maxmem":536870912,"disk":0,"maxdisk":8589934592,"uptime":0,"template":1},
 				{"vmid":101,"name":"tenant-abc","status":"running","cpu":0.05,"mem":268435456,"maxmem":536870912,"disk":1073741824,"maxdisk":8589934592,"uptime":3600,"template":0}
@@ -68,7 +68,7 @@ func TestListContainers(t *testing.T) {
 
 func TestListContainers_Empty(t *testing.T) {
 	srv := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		json.NewEncoder(w).Encode(response{
+		_ = json.NewEncoder(w).Encode(response{
 			Data: json.RawMessage(`[]`),
 		})
 	}))
@@ -93,7 +93,7 @@ func TestGetContainerStatus(t *testing.T) {
 		if r.URL.Path != "/api2/json/nodes/testnode/lxc/101/status/current" {
 			t.Errorf("unexpected path: %s", r.URL.Path)
 		}
-		json.NewEncoder(w).Encode(response{
+		_ = json.NewEncoder(w).Encode(response{
 			Data: json.RawMessage(`{
 				"vmid":101,"name":"tenant-abc","status":"running",
 				"cpu":0.12,"cpus":2,"mem":268435456,"maxmem":536870912,
@@ -137,7 +137,7 @@ func TestGetContainerStatus(t *testing.T) {
 func TestGetContainerStatus_NotFound(t *testing.T) {
 	srv := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusInternalServerError)
-		json.NewEncoder(w).Encode(response{
+		_ = json.NewEncoder(w).Encode(response{
 			Errors: map[string]string{"vmid": "no such container"},
 		})
 	}))
@@ -167,7 +167,7 @@ func TestCloneContainer(t *testing.T) {
 		body, _ := io.ReadAll(r.Body)
 		gotParams = string(body)
 
-		json.NewEncoder(w).Encode(response{
+		_ = json.NewEncoder(w).Encode(response{
 			Data: json.RawMessage(`"UPID:testnode:001234AB:00ABCDEF:12345678:vzclone:100:root@pam:"`),
 		})
 	}))
@@ -225,7 +225,7 @@ func TestCloneContainer_MinimalOptions(t *testing.T) {
 	srv := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		body, _ := io.ReadAll(r.Body)
 		gotParams = string(body)
-		json.NewEncoder(w).Encode(response{
+		_ = json.NewEncoder(w).Encode(response{
 			Data: json.RawMessage(`"UPID:testnode:clone"`),
 		})
 	}))
@@ -258,7 +258,7 @@ func TestCloneContainer_MinimalOptions(t *testing.T) {
 func TestCloneContainer_Error(t *testing.T) {
 	srv := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusBadRequest)
-		json.NewEncoder(w).Encode(response{
+		_ = json.NewEncoder(w).Encode(response{
 			Errors: map[string]string{"newid": "VM 102 already exists"},
 		})
 	}))
@@ -280,7 +280,7 @@ func TestStartContainer(t *testing.T) {
 		if r.URL.Path != "/api2/json/nodes/testnode/lxc/101/status/start" {
 			t.Errorf("unexpected path: %s", r.URL.Path)
 		}
-		json.NewEncoder(w).Encode(response{
+		_ = json.NewEncoder(w).Encode(response{
 			Data: json.RawMessage(`"UPID:testnode:start101"`),
 		})
 	}))
@@ -302,7 +302,7 @@ func TestStopContainer(t *testing.T) {
 		if r.URL.Path != "/api2/json/nodes/testnode/lxc/101/status/stop" {
 			t.Errorf("unexpected path: %s", r.URL.Path)
 		}
-		json.NewEncoder(w).Encode(response{
+		_ = json.NewEncoder(w).Encode(response{
 			Data: json.RawMessage(`"UPID:testnode:stop101"`),
 		})
 	}))
@@ -328,7 +328,7 @@ func TestShutdownContainer(t *testing.T) {
 		}
 		body, _ := io.ReadAll(r.Body)
 		gotParams = string(body)
-		json.NewEncoder(w).Encode(response{
+		_ = json.NewEncoder(w).Encode(response{
 			Data: json.RawMessage(`"UPID:testnode:shutdown101"`),
 		})
 	}))
@@ -354,7 +354,7 @@ func TestShutdownContainer_NoTimeout(t *testing.T) {
 	srv := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		body, _ := io.ReadAll(r.Body)
 		gotParams = string(body)
-		json.NewEncoder(w).Encode(response{
+		_ = json.NewEncoder(w).Encode(response{
 			Data: json.RawMessage(`"UPID:testnode:shutdown"`),
 		})
 	}))
@@ -383,7 +383,7 @@ func TestDeleteContainer(t *testing.T) {
 		if r.URL.Query().Get("force") != "1" {
 			t.Errorf("expected force=1 query param, got %q", r.URL.RawQuery)
 		}
-		json.NewEncoder(w).Encode(response{
+		_ = json.NewEncoder(w).Encode(response{
 			Data: json.RawMessage(`"UPID:testnode:delete101"`),
 		})
 	}))
@@ -405,7 +405,7 @@ func TestDeleteContainer_NoForce(t *testing.T) {
 		if r.URL.Query().Get("force") != "" {
 			t.Errorf("force should not be set, got %q", r.URL.RawQuery)
 		}
-		json.NewEncoder(w).Encode(response{
+		_ = json.NewEncoder(w).Encode(response{
 			Data: json.RawMessage(`"UPID:testnode:del"`),
 		})
 	}))

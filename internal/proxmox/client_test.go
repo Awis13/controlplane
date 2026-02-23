@@ -51,7 +51,7 @@ func TestClient_AuthHeader(t *testing.T) {
 	var gotAuth string
 	srv := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		gotAuth = r.Header.Get("Authorization")
-		json.NewEncoder(w).Encode(response{Data: json.RawMessage(`[]`)})
+		_ = json.NewEncoder(w).Encode(response{Data: json.RawMessage(`[]`)})
 	}))
 	defer srv.Close()
 
@@ -73,7 +73,7 @@ func TestClient_Get_Success(t *testing.T) {
 		if r.URL.Path != "/api2/json/nodes" {
 			t.Errorf("unexpected path: %s", r.URL.Path)
 		}
-		json.NewEncoder(w).Encode(response{
+		_ = json.NewEncoder(w).Encode(response{
 			Data: json.RawMessage(`[{"node":"pve"}]`),
 		})
 	}))
@@ -94,7 +94,7 @@ func TestClient_Get_Success(t *testing.T) {
 func TestClient_Get_APIError(t *testing.T) {
 	srv := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusForbidden)
-		json.NewEncoder(w).Encode(response{
+		_ = json.NewEncoder(w).Encode(response{
 			Errors: map[string]string{"permission": "denied"},
 		})
 	}))
@@ -122,7 +122,7 @@ func TestClient_Get_FieldLevelErrors(t *testing.T) {
 	// Proxmox can return 200 with errors in the body
 	srv := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusOK)
-		json.NewEncoder(w).Encode(response{
+		_ = json.NewEncoder(w).Encode(response{
 			Errors: map[string]string{"newid": "VM 101 already exists"},
 		})
 	}))
@@ -153,7 +153,7 @@ func TestClient_Post_FormEncoded(t *testing.T) {
 		gotContentType = r.Header.Get("Content-Type")
 		body, _ := io.ReadAll(r.Body)
 		gotBody = string(body)
-		json.NewEncoder(w).Encode(response{
+		_ = json.NewEncoder(w).Encode(response{
 			Data: json.RawMessage(`"UPID:pve:001234AB:00ABCDEF:12345678:vzclone:100:root@pam:"`),
 		})
 	}))
@@ -185,7 +185,7 @@ func TestClient_Post_NilParams(t *testing.T) {
 	var gotContentType string
 	srv := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		gotContentType = r.Header.Get("Content-Type")
-		json.NewEncoder(w).Encode(response{
+		_ = json.NewEncoder(w).Encode(response{
 			Data: json.RawMessage(`"UPID:pve:task"`),
 		})
 	}))
@@ -210,7 +210,7 @@ func TestClient_Delete_WithParams(t *testing.T) {
 			t.Errorf("expected DELETE, got %s", r.Method)
 		}
 		gotQuery = r.URL.RawQuery
-		json.NewEncoder(w).Encode(response{
+		_ = json.NewEncoder(w).Encode(response{
 			Data: json.RawMessage(`"UPID:pve:delete"`),
 		})
 	}))
@@ -237,7 +237,7 @@ func TestClient_Delete_NilParams(t *testing.T) {
 	var gotQuery string
 	srv := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		gotQuery = r.URL.RawQuery
-		json.NewEncoder(w).Encode(response{
+		_ = json.NewEncoder(w).Encode(response{
 			Data: json.RawMessage(`"UPID:pve:del"`),
 		})
 	}))

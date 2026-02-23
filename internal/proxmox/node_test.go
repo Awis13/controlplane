@@ -13,7 +13,7 @@ func TestNodeName_Discovery(t *testing.T) {
 		if r.URL.Path != "/api2/json/nodes" {
 			t.Errorf("unexpected path: %s", r.URL.Path)
 		}
-		json.NewEncoder(w).Encode(response{
+		_ = json.NewEncoder(w).Encode(response{
 			Data: json.RawMessage(`[{"node":"proxmox-ve"}]`),
 		})
 	}))
@@ -53,7 +53,7 @@ func TestNodeName_ExplicitlySet(t *testing.T) {
 
 func TestNodeName_NoNodesFound(t *testing.T) {
 	srv := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		json.NewEncoder(w).Encode(response{
+		_ = json.NewEncoder(w).Encode(response{
 			Data: json.RawMessage(`[]`),
 		})
 	}))
@@ -71,7 +71,7 @@ func TestNodeName_DiscoveryCached(t *testing.T) {
 	callCount := 0
 	srv := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		callCount++
-		json.NewEncoder(w).Encode(response{
+		_ = json.NewEncoder(w).Encode(response{
 			Data: json.RawMessage(`[{"node":"pve"}]`),
 		})
 	}))
@@ -97,7 +97,7 @@ func TestGetNodeStatus(t *testing.T) {
 		if r.URL.Path != "/api2/json/nodes/testnode/status" {
 			t.Errorf("unexpected path: %s", r.URL.Path)
 		}
-		json.NewEncoder(w).Encode(response{
+		_ = json.NewEncoder(w).Encode(response{
 			Data: json.RawMessage(`{
 				"cpu": 0.25,
 				"memory": {"total": 17179869184, "used": 8589934592, "free": 8589934592},
@@ -142,7 +142,7 @@ func TestGetNodeStatus(t *testing.T) {
 func TestGetNodeStatus_Error(t *testing.T) {
 	srv := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusInternalServerError)
-		json.NewEncoder(w).Encode(response{})
+		_ = json.NewEncoder(w).Encode(response{})
 	}))
 	defer srv.Close()
 
@@ -162,7 +162,7 @@ func TestGetNextID(t *testing.T) {
 		if r.Method != http.MethodGet {
 			t.Errorf("expected GET, got %s", r.Method)
 		}
-		json.NewEncoder(w).Encode(response{
+		_ = json.NewEncoder(w).Encode(response{
 			Data: json.RawMessage(`105`),
 		})
 	}))
@@ -182,7 +182,7 @@ func TestGetNextID(t *testing.T) {
 func TestGetNextID_StringResponse(t *testing.T) {
 	// Proxmox returns nextid as a string (e.g. "106")
 	srv := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		json.NewEncoder(w).Encode(response{
+		_ = json.NewEncoder(w).Encode(response{
 			Data: json.RawMessage(`"106"`),
 		})
 	}))
@@ -202,7 +202,7 @@ func TestGetNextID_StringResponse(t *testing.T) {
 func TestGetNextID_Error(t *testing.T) {
 	srv := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusInternalServerError)
-		json.NewEncoder(w).Encode(response{})
+		_ = json.NewEncoder(w).Encode(response{})
 	}))
 	defer srv.Close()
 

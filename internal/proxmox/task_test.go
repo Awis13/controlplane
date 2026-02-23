@@ -13,7 +13,7 @@ import (
 
 func TestTaskWait_ImmediateSuccess(t *testing.T) {
 	srv := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		json.NewEncoder(w).Encode(response{
+		_ = json.NewEncoder(w).Encode(response{
 			Data: json.RawMessage(`{
 				"status": "stopped",
 				"exitstatus": "OK",
@@ -48,12 +48,12 @@ func TestTaskWait_PollThenSuccess(t *testing.T) {
 		n := callCount.Add(1)
 		if n < 3 {
 			// Still running
-			json.NewEncoder(w).Encode(response{
+			_ = json.NewEncoder(w).Encode(response{
 				Data: json.RawMessage(`{"status":"running","type":"vzclone","id":"101","node":"testnode","pid":1234,"starttime":1700000000}`),
 			})
 		} else {
 			// Completed
-			json.NewEncoder(w).Encode(response{
+			_ = json.NewEncoder(w).Encode(response{
 				Data: json.RawMessage(`{"status":"stopped","exitstatus":"OK","type":"vzclone","id":"101","node":"testnode","pid":1234,"starttime":1700000000}`),
 			})
 		}
@@ -85,11 +85,11 @@ func TestTaskWait_PollThenFailure(t *testing.T) {
 	srv := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		n := callCount.Add(1)
 		if n < 2 {
-			json.NewEncoder(w).Encode(response{
+			_ = json.NewEncoder(w).Encode(response{
 				Data: json.RawMessage(`{"status":"running","type":"vzstart","id":"101","node":"testnode","pid":1234,"starttime":1700000000}`),
 			})
 		} else {
-			json.NewEncoder(w).Encode(response{
+			_ = json.NewEncoder(w).Encode(response{
 				Data: json.RawMessage(`{"status":"stopped","exitstatus":"container already running","type":"vzstart","id":"101","node":"testnode","pid":1234,"starttime":1700000000}`),
 			})
 		}
@@ -124,7 +124,7 @@ func TestTaskWait_PollThenFailure(t *testing.T) {
 func TestTaskWait_Timeout(t *testing.T) {
 	srv := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		// Always return running
-		json.NewEncoder(w).Encode(response{
+		_ = json.NewEncoder(w).Encode(response{
 			Data: json.RawMessage(`{"status":"running","type":"vzclone","id":"101","node":"testnode","pid":1234,"starttime":1700000000}`),
 		})
 	}))
@@ -156,7 +156,7 @@ func TestTaskWait_Timeout(t *testing.T) {
 
 func TestTaskWait_ContextCancellation(t *testing.T) {
 	srv := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		json.NewEncoder(w).Encode(response{
+		_ = json.NewEncoder(w).Encode(response{
 			Data: json.RawMessage(`{"status":"running","type":"vzclone","id":"101","node":"testnode","pid":1234,"starttime":1700000000}`),
 		})
 	}))
@@ -196,7 +196,7 @@ func TestTaskWait_UPIDEncoding(t *testing.T) {
 		if gotPath == "" {
 			gotPath = r.URL.Path
 		}
-		json.NewEncoder(w).Encode(response{
+		_ = json.NewEncoder(w).Encode(response{
 			Data: json.RawMessage(`{"status":"stopped","exitstatus":"OK","type":"vzclone","id":"100","node":"pve","pid":1234,"starttime":1700000000}`),
 		})
 	}))
@@ -231,7 +231,7 @@ func TestTaskWait_ServerError(t *testing.T) {
 	srv := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		callCount.Add(1)
 		w.WriteHeader(http.StatusInternalServerError)
-		json.NewEncoder(w).Encode(response{})
+		_ = json.NewEncoder(w).Encode(response{})
 	}))
 	defer srv.Close()
 
