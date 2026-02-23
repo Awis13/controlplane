@@ -15,10 +15,11 @@ import (
 var migrationsFS embed.FS
 
 // Migrate runs all pending database migrations.
-// The databaseURL must use postgres:// scheme; it is converted to pgx5:// for golang-migrate.
+// The databaseURL must use postgres:// or postgresql:// scheme; it is converted to pgx5:// for golang-migrate.
 func Migrate(databaseURL string) error {
-	// golang-migrate requires pgx5:// scheme, not postgres://
-	migrateURL := strings.Replace(databaseURL, "postgres://", "pgx5://", 1)
+	// golang-migrate requires pgx5:// scheme
+	migrateURL := strings.Replace(databaseURL, "postgresql://", "pgx5://", 1)
+	migrateURL = strings.Replace(migrateURL, "postgres://", "pgx5://", 1)
 
 	source, err := iofs.New(migrationsFS, "migrations")
 	if err != nil {

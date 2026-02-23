@@ -63,7 +63,7 @@ func (s *Store) Create(ctx context.Context, req CreateNodeRequest) (*Node, error
 		`INSERT INTO nodes (name, tailscale_ip, proxmox_url, api_token_encrypted, total_ram_mb)
 		 VALUES ($1, $2, $3, $4, $5)
 		 RETURNING id, name, tailscale_ip, proxmox_url, total_ram_mb, allocated_ram_mb, status, created_at, updated_at`,
-		req.Name, req.TailscaleIP, req.ProxmoxURL, req.APITokenEncrypted, req.TotalRAMMB).
+		req.Name, req.TailscaleIP, req.ProxmoxURL, req.APIToken, req.TotalRAMMB).
 		Scan(&n.ID, &n.Name, &n.TailscaleIP, &n.ProxmoxURL,
 			&n.TotalRAMMB, &n.AllocatedRAMMB, &n.Status, &n.CreatedAt, &n.UpdatedAt)
 	if err != nil {

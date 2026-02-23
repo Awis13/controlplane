@@ -1,20 +1,35 @@
 package tenant
 
 import (
+	"context"
+	"errors"
 	"log/slog"
 	"net/http"
+	"regexp"
 
 	"github.com/go-chi/chi/v5"
+	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
 
 	"controlplane/internal/response"
 )
 
-// Handler handles tenant HTTP requests.
-type Handler struct {
-	store *Store
+// TenantStore defines the data operations for tenants.
+type TenantStore interface {
+	List(ctx context.Context) ([]Tenant, error)
+	GetByID(ctx context.Context, id string) (*Tenant, error)
+	Create(ctx context.Context, req CreateTenantRequest) (*Tenant, error)
+	Delete(ctx context.Context, id string) error
 }
 
-func NewHandler(store *Store) *Handler {
+var subdomainRegexp = regexp.MustCompile(`^[a-z0-9][a-z0-9-]*[a-z0-9]$`)
+
+// Handler handles tenant HTTP requests.
+type Handler struct {
+	store TenantStore
+}
+
+func NewHandler(store TenantStore) *Handler {
 	return &Handler{store: store}
 }
 
@@ -33,6 +48,10 @@ func (h *Handler) List(w http.ResponseWriter, r *http.Request) {
 
 func (h *Handler) Get(w http.ResponseWriter, r *http.Request) {
 	id := chi.URLParam(r, "tenantID")
+	if !response.ValidUUID(id) {
+		response.Error(w, http.StatusBadRequest, "invalid tenant ID format")
+		return
+	}
 
 	t, err := h.store.GetByID(r.Context(), id)
 	if err != nil {
@@ -58,8 +77,31 @@ func (h *Handler) Create(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Validate project_id is a valid UUID
+	if !response.ValidUUID(req.ProjectID) {
+		response.Error(w, http.StatusBadRequest, "invalid project_id format")
+		return
+	}
+
+	// Validate node_id is a valid UUID
+	if !response.ValidUUID(req.NodeID) {
+		response.Error(w, http.StatusBadRequest, "invalid node_id format")
+		return
+	}
+
+	// Validate subdomain
+	if len(req.Subdomain) > 63 || !subdomainRegexp.MatchString(req.Subdomain) {
+		response.Error(w, http.StatusBadRequest, "invalid subdomain: must be lowercase alphanumeric with hyphens, 2-63 chars")
+		return
+	}
+
 	t, err := h.store.Create(r.Context(), req)
 	if err != nil {
+		var pgErr *pgconn.PgError
+		if errors.As(err, &pgErr) && pgErr.Code == "23505" {
+			response.Error(w, http.StatusConflict, "name or subdomain already exists")
+			return
+		}
 		slog.Error("create tenant", "error", err)
 		response.Error(w, http.StatusInternalServerError, "failed to create tenant")
 		return
@@ -69,53 +111,19 @@ func (h *Handler) Create(w http.ResponseWriter, r *http.Request) {
 
 func (h *Handler) Delete(w http.ResponseWriter, r *http.Request) {
 	id := chi.URLParam(r, "tenantID")
+	if !response.ValidUUID(id) {
+		response.Error(w, http.StatusBadRequest, "invalid tenant ID format")
+		return
+	}
 
 	if err := h.store.Delete(r.Context(), id); err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			response.Error(w, http.StatusNotFound, "tenant not found")
+			return
+		}
 		slog.Error("delete tenant", "error", err)
-		response.Error(w, http.StatusNotFound, "tenant not found")
+		response.Error(w, http.StatusInternalServerError, "failed to delete tenant")
 		return
 	}
 	w.WriteHeader(http.StatusNoContent)
-}
-
-// ProjectHandler handles project HTTP requests.
-type ProjectHandler struct {
-	store *ProjectStore
-}
-
-func NewProjectHandler(store *ProjectStore) *ProjectHandler {
-	return &ProjectHandler{store: store}
-}
-
-func (h *ProjectHandler) List(w http.ResponseWriter, r *http.Request) {
-	projects, err := h.store.List(r.Context())
-	if err != nil {
-		slog.Error("list projects", "error", err)
-		response.Error(w, http.StatusInternalServerError, "failed to list projects")
-		return
-	}
-	if projects == nil {
-		projects = []Project{}
-	}
-	response.JSON(w, http.StatusOK, projects)
-}
-
-func (h *ProjectHandler) Create(w http.ResponseWriter, r *http.Request) {
-	var req CreateProjectRequest
-	if err := response.Decode(r, &req); err != nil {
-		response.Error(w, http.StatusBadRequest, "invalid request body")
-		return
-	}
-	if req.Name == "" || req.TemplateID <= 0 {
-		response.Error(w, http.StatusBadRequest, "name and template_id are required")
-		return
-	}
-
-	p, err := h.store.Create(r.Context(), req)
-	if err != nil {
-		slog.Error("create project", "error", err)
-		response.Error(w, http.StatusInternalServerError, "failed to create project")
-		return
-	}
-	response.JSON(w, http.StatusCreated, p)
 }

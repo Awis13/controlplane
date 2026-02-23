@@ -9,7 +9,8 @@ CREATE TABLE nodes (
     allocated_ram_mb INTEGER NOT NULL DEFAULT 0,
     status TEXT NOT NULL DEFAULT 'active',
     created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
-    updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+    CONSTRAINT chk_nodes_status CHECK (status IN ('active', 'maintenance', 'offline'))
 );
 
 -- projects: LXC project types (studio23, future projects)
@@ -35,5 +36,26 @@ CREATE TABLE tenants (
     status TEXT NOT NULL DEFAULT 'provisioning',
     stripe_subscription_id TEXT,
     created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
-    updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+    CONSTRAINT chk_tenants_status CHECK (status IN ('provisioning', 'active', 'suspended', 'deleted'))
 );
+
+-- Indexes on FK columns
+CREATE INDEX idx_tenants_project_id ON tenants(project_id);
+CREATE INDEX idx_tenants_node_id ON tenants(node_id);
+
+-- Trigger for auto-updating updated_at
+CREATE OR REPLACE FUNCTION update_updated_at() RETURNS TRIGGER AS $$
+BEGIN
+    NEW.updated_at = now();
+    RETURN NEW;
+END;
+$$ LANGUAGE plpgsql;
+
+CREATE TRIGGER trg_nodes_updated_at
+    BEFORE UPDATE ON nodes
+    FOR EACH ROW EXECUTE FUNCTION update_updated_at();
+
+CREATE TRIGGER trg_tenants_updated_at
+    BEFORE UPDATE ON tenants
+    FOR EACH ROW EXECUTE FUNCTION update_updated_at();

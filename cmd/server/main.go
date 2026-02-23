@@ -15,7 +15,11 @@ import (
 )
 
 func main() {
-	cfg := config.Load()
+	cfg, err := config.Load()
+	if err != nil {
+		slog.Error("failed to load config", "error", err)
+		os.Exit(1)
+	}
 
 	// Configure structured logging
 	var level slog.Level
@@ -49,7 +53,7 @@ func main() {
 	}
 
 	// Create HTTP server
-	handler := server.New(pool)
+	handler := server.New(pool, cfg)
 	srv := &http.Server{
 		Addr:         cfg.ListenAddr,
 		Handler:      handler,
@@ -58,20 +62,26 @@ func main() {
 		IdleTimeout:  60 * time.Second,
 	}
 
-	// Start server in goroutine
+	// Use error channel instead of os.Exit in goroutine
+	errCh := make(chan error, 1)
 	go func() {
 		slog.Info("server starting", "addr", cfg.ListenAddr)
 		if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
-			slog.Error("server failed", "error", err)
-			os.Exit(1)
+			errCh <- err
 		}
 	}()
 
 	// Graceful shutdown
 	quit := make(chan os.Signal, 1)
 	signal.Notify(quit, syscall.SIGINT, syscall.SIGTERM)
-	sig := <-quit
-	slog.Info("shutting down", "signal", sig.String())
+
+	select {
+	case sig := <-quit:
+		slog.Info("shutting down", "signal", sig.String())
+	case err := <-errCh:
+		slog.Error("server failed", "error", err)
+		os.Exit(1)
+	}
 
 	shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer shutdownCancel()

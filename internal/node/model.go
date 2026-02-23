@@ -18,9 +18,9 @@ type Node struct {
 }
 
 type CreateNodeRequest struct {
-	Name              string `json:"name"`
-	TailscaleIP       string `json:"tailscale_ip"`
-	ProxmoxURL        string `json:"proxmox_url"`
-	APITokenEncrypted string `json:"api_token_encrypted"`
-	TotalRAMMB        int    `json:"total_ram_mb"`
+	Name        string `json:"name"`
+	TailscaleIP string `json:"tailscale_ip"`
+	ProxmoxURL  string `json:"proxmox_url"`
+	APIToken    string `json:"api_token"`
+	TotalRAMMB  int    `json:"total_ram_mb"`
 }
