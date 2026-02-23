@@ -14,6 +14,7 @@ import (
 // ProjectStore defines the data operations for projects.
 type ProjectStore interface {
 	List(ctx context.Context) ([]Project, error)
+	GetByID(ctx context.Context, id string) (*Project, error)
 	Create(ctx context.Context, req CreateProjectRequest) (*Project, error)
 }
 
