@@ -41,8 +41,8 @@ type ProjectStore interface {
 
 // Provisioner defines the provisioning operations.
 type Provisioner interface {
-	Provision(ctx context.Context, tenantID, nodeID, projectID, subdomain string)
-	Deprovision(ctx context.Context, tenantID, nodeID, projectID string, lxcID int) error
+	Provision(tenantID, nodeID, projectID, subdomain string, ramMB int)
+	Deprovision(ctx context.Context, tenantID, nodeID string, lxcID, ramMB int) error
 }
 
 var subdomainRegexp = regexp.MustCompile(`^[a-z0-9][a-z0-9-]*[a-z0-9]$`)
@@ -196,8 +196,8 @@ func (h *Handler) Create(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Launch async provisioning
-	go h.provisioner.Provision(context.Background(), t.ID, req.NodeID, req.ProjectID, req.Subdomain)
+	// Launch async provisioning (fire-and-forget goroutine managed by Provisioner)
+	h.provisioner.Provision(t.ID, req.NodeID, req.ProjectID, req.Subdomain, proj.RAMMB)
 
 	response.JSON(w, http.StatusAccepted, t)
 }
@@ -226,23 +226,42 @@ func (h *Handler) Delete(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Get project for RAM amount
+	proj, err := h.projectStore.GetByID(r.Context(), t.ProjectID)
+	if err != nil {
+		slog.Error("get project for tenant deletion", "error", err)
+		response.Error(w, http.StatusInternalServerError, "failed to get project")
+		return
+	}
+	ramMB := 0
+	if proj != nil {
+		ramMB = proj.RAMMB
+	}
+
 	// If tenant has an LXC ID, deprovision the container
 	if t.LXCID != nil {
-		if err := h.provisioner.Deprovision(r.Context(), t.ID, t.NodeID, t.ProjectID, *t.LXCID); err != nil {
+		if err := h.provisioner.Deprovision(r.Context(), t.ID, t.NodeID, *t.LXCID, ramMB); err != nil {
+			if errors.Is(err, ErrStateConflict) {
+				response.Error(w, http.StatusConflict, "tenant is already being deleted")
+				return
+			}
 			slog.Error("deprovision tenant", "error", err, "tenant_id", t.ID)
 			response.Error(w, http.StatusInternalServerError, "failed to deprovision tenant")
 			return
 		}
 	} else {
-		// No LXC container — just mark as deleted and release RAM
-		proj, err := h.projectStore.GetByID(r.Context(), t.ProjectID)
-		if err != nil {
-			slog.Error("get project for tenant deletion", "error", err)
-			response.Error(w, http.StatusInternalServerError, "failed to get project")
+		// No LXC container — atomically transition to deleting, then deleted + release RAM
+		if err := h.store.SetDeleting(r.Context(), t.ID); err != nil {
+			if errors.Is(err, ErrStateConflict) {
+				response.Error(w, http.StatusConflict, "tenant is already being deleted")
+				return
+			}
+			slog.Error("set tenant deleting", "error", err)
+			response.Error(w, http.StatusInternalServerError, "failed to delete tenant")
 			return
 		}
-		if proj != nil {
-			if err := h.nodeStore.ReleaseRAM(r.Context(), t.NodeID, proj.RAMMB); err != nil {
+		if ramMB > 0 {
+			if err := h.nodeStore.ReleaseRAM(r.Context(), t.NodeID, ramMB); err != nil {
 				slog.Error("release ram on tenant deletion", "error", err)
 			}
 		}

@@ -20,11 +20,11 @@ import (
 // --- Mock tenant store ---
 
 type mockTenantStore struct {
-	tenants       map[string]*Tenant
-	createErr     error
-	deleteErr     error
-	setActiveErr  error
-	setErrorErr   error
+	tenants        map[string]*Tenant
+	createErr      error
+	deleteErr      error
+	setActiveErr   error
+	setErrorErr    error
 	setDeletingErr error
 	setDeletedErr  error
 }
@@ -179,7 +179,7 @@ func newMockProvisioner() *mockProvisioner {
 	}
 }
 
-func (m *mockProvisioner) Provision(_ context.Context, _, _, _, _ string) {
+func (m *mockProvisioner) Provision(_, _, _, _ string, _ int) {
 	m.mu.Lock()
 	m.provisionCalled = true
 	m.mu.Unlock()
@@ -189,7 +189,7 @@ func (m *mockProvisioner) Provision(_ context.Context, _, _, _, _ string) {
 	}
 }
 
-func (m *mockProvisioner) Deprovision(_ context.Context, _, _, _ string, _ int) error {
+func (m *mockProvisioner) Deprovision(_ context.Context, _, _ string, _, _ int) error {
 	m.mu.Lock()
 	m.deprovisionCalled = true
 	m.mu.Unlock()
@@ -637,6 +637,7 @@ func TestDelete_DeprovisionError(t *testing.T) {
 		CreatedAt: time.Now(),
 		UpdatedAt: time.Now(),
 	}
+	ps.projects[validProjectID] = testProjectObj()
 
 	h := NewHandler(ts, ns, ps, prov)
 	r := testRouter(h)
@@ -647,6 +648,41 @@ func TestDelete_DeprovisionError(t *testing.T) {
 
 	if w.Code != http.StatusInternalServerError {
 		t.Errorf("expected 500, got %d: %s", w.Code, w.Body.String())
+	}
+}
+
+func TestDelete_ConcurrentDeleteReturns409(t *testing.T) {
+	ts := newMockTenantStore()
+	ns := newMockNodeStore()
+	ps := newMockProjectStore()
+	prov := newMockProvisioner()
+
+	// Simulate state conflict (tenant already being deleted)
+	prov.deprovisionErr = ErrStateConflict
+
+	lxcID := 105
+	ts.tenants[validTenantID] = &Tenant{
+		ID:        validTenantID,
+		Name:      "test",
+		ProjectID: validProjectID,
+		NodeID:    validNodeID,
+		LXCID:     &lxcID,
+		Subdomain: "myapp",
+		Status:    "active",
+		CreatedAt: time.Now(),
+		UpdatedAt: time.Now(),
+	}
+	ps.projects[validProjectID] = testProjectObj()
+
+	h := NewHandler(ts, ns, ps, prov)
+	r := testRouter(h)
+
+	req := httptest.NewRequest("DELETE", "/tenants/"+validTenantID, nil)
+	w := httptest.NewRecorder()
+	r.ServeHTTP(w, req)
+
+	if w.Code != http.StatusConflict {
+		t.Errorf("expected 409, got %d: %s", w.Code, w.Body.String())
 	}
 }
 

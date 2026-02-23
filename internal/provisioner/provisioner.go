@@ -2,6 +2,7 @@ package provisioner
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"sync"
@@ -11,15 +12,18 @@ import (
 	"controlplane/internal/node"
 	"controlplane/internal/project"
 	"controlplane/internal/proxmox"
+	"controlplane/internal/tenant"
 )
 
-const provisionTimeout = 10 * time.Minute
+const (
+	provisionTimeout  = 10 * time.Minute
+	maxConcurrentJobs = 10
+)
 
 // NodeStore defines what the provisioner needs from the node store.
 type NodeStore interface {
 	GetByID(ctx context.Context, id string) (*node.Node, error)
 	GetEncryptedTokenByID(ctx context.Context, id string) (string, error)
-	ReserveRAM(ctx context.Context, nodeID string, ramMB int) error
 	ReleaseRAM(ctx context.Context, nodeID string, ramMB int) error
 }
 
@@ -95,6 +99,8 @@ type Provisioner struct {
 	clientFactory ClientFactory
 	clients       map[string]ProxmoxClient // keyed by node ID, lazy-initialized
 	mu            sync.RWMutex             // guards clients map
+	sem           chan struct{}             // bounded concurrency for provision goroutines
+	wg            sync.WaitGroup           // tracks in-flight provisions for graceful shutdown
 }
 
 // New creates a new Provisioner.
@@ -106,12 +112,18 @@ func New(nodeStore NodeStore, tenantStore TenantStore, projectStore ProjectStore
 		encryptionKey: encryptionKey,
 		clientFactory: defaultClientFactory,
 		clients:       make(map[string]ProxmoxClient),
+		sem:           make(chan struct{}, maxConcurrentJobs),
 	}
 }
 
 // WithClientFactory sets a custom client factory (used for testing).
 func (p *Provisioner) WithClientFactory(f ClientFactory) {
 	p.clientFactory = f
+}
+
+// Shutdown waits for all in-flight provisioning goroutines to complete.
+func (p *Provisioner) Shutdown() {
+	p.wg.Wait()
 }
 
 // getClient returns a cached or newly created Proxmox client for the given node.
@@ -159,32 +171,46 @@ func (p *Provisioner) getClient(ctx context.Context, nodeID string) (ProxmoxClie
 }
 
 // Provision creates an LXC container for a tenant asynchronously.
-// This method is designed to be called as a goroutine.
-// It uses context.Background() with a timeout, NOT the HTTP request context.
-func (p *Provisioner) Provision(ctx context.Context, tenantID, nodeID, projectID, subdomain string) {
-	ctx, cancel := context.WithTimeout(ctx, provisionTimeout)
+// This method is designed to be called as a goroutine — it creates its own
+// background context with a timeout, independent of the caller's context.
+func (p *Provisioner) Provision(tenantID, nodeID, projectID, subdomain string, ramMB int) {
+	p.wg.Add(1)
+	go func() {
+		defer p.wg.Done()
+
+		// Acquire semaphore slot (bounded concurrency)
+		p.sem <- struct{}{}
+		defer func() { <-p.sem }()
+
+		p.doProvision(tenantID, nodeID, projectID, subdomain, ramMB)
+	}()
+}
+
+func (p *Provisioner) doProvision(tenantID, nodeID, projectID, subdomain string, ramMB int) {
+	ctx, cancel := context.WithTimeout(context.Background(), provisionTimeout)
 	defer cancel()
 
 	log := slog.With("tenant_id", tenantID, "node_id", nodeID, "project_id", projectID)
 
-	// Get project for template_id and ram_mb
+	// Get project for template_id
 	proj, err := p.projectStore.GetByID(ctx, projectID)
 	if err != nil {
 		log.Error("provision: get project", "error", err)
-		p.setError(ctx, tenantID, nodeID, proj, fmt.Sprintf("get project: %v", err))
+		p.setError(ctx, tenantID, nodeID, ramMB, "provisioning failed: project lookup error")
 		return
 	}
 	if proj == nil {
 		log.Error("provision: project not found")
-		p.setError(ctx, tenantID, nodeID, nil, "project not found")
+		p.setError(ctx, tenantID, nodeID, ramMB, "provisioning failed: project not found")
 		return
 	}
+	templateID := proj.TemplateID
 
 	// Get Proxmox client
 	client, err := p.getClient(ctx, nodeID)
 	if err != nil {
 		log.Error("provision: get client", "error", err)
-		p.setError(ctx, tenantID, nodeID, proj, fmt.Sprintf("get proxmox client: %v", err))
+		p.setError(ctx, tenantID, nodeID, ramMB, "provisioning failed: node connection error")
 		return
 	}
 
@@ -192,27 +218,27 @@ func (p *Provisioner) Provision(ctx context.Context, tenantID, nodeID, projectID
 	newID, err := client.GetNextID(ctx)
 	if err != nil {
 		log.Error("provision: get next id", "error", err)
-		p.setError(ctx, tenantID, nodeID, proj, fmt.Sprintf("get next id: %v", err))
+		p.setError(ctx, tenantID, nodeID, ramMB, "provisioning failed: could not allocate container ID")
 		return
 	}
 	log = log.With("lxc_id", newID)
 
 	// Clone container
-	log.Info("provision: cloning container", "template_id", proj.TemplateID)
-	cloneTask, err := client.CloneContainer(ctx, proj.TemplateID, proxmox.CloneOptions{
+	log.Info("provision: cloning container", "template_id", templateID)
+	cloneTask, err := client.CloneContainer(ctx, templateID, proxmox.CloneOptions{
 		NewID:    newID,
 		Hostname: subdomain,
 		Full:     true,
 	})
 	if err != nil {
 		log.Error("provision: clone container", "error", err)
-		p.setError(ctx, tenantID, nodeID, proj, fmt.Sprintf("clone container: %v", err))
+		p.setError(ctx, tenantID, nodeID, ramMB, "provisioning failed: clone error")
 		return
 	}
 
 	if err := cloneTask.Wait(ctx); err != nil {
 		log.Error("provision: wait for clone", "error", err)
-		p.setError(ctx, tenantID, nodeID, proj, fmt.Sprintf("clone task failed: %v", err))
+		p.setError(ctx, tenantID, nodeID, ramMB, "provisioning failed: clone did not complete")
 		return
 	}
 
@@ -221,19 +247,22 @@ func (p *Provisioner) Provision(ctx context.Context, tenantID, nodeID, projectID
 	startTask, err := client.StartContainer(ctx, newID)
 	if err != nil {
 		log.Error("provision: start container", "error", err)
-		p.cleanupAndError(ctx, client, tenantID, nodeID, proj, newID, fmt.Sprintf("start container: %v", err))
+		p.cleanupAndError(ctx, client, tenantID, nodeID, ramMB, newID, "provisioning failed: start error")
 		return
 	}
 
 	if err := startTask.Wait(ctx); err != nil {
 		log.Error("provision: wait for start", "error", err)
-		p.cleanupAndError(ctx, client, tenantID, nodeID, proj, newID, fmt.Sprintf("start task failed: %v", err))
+		p.cleanupAndError(ctx, client, tenantID, nodeID, ramMB, newID, "provisioning failed: start did not complete")
 		return
 	}
 
 	// Mark as active
 	if err := p.tenantStore.SetActive(ctx, tenantID, newID); err != nil {
 		log.Error("provision: set active", "error", err)
+		// Container is running but DB update failed — clean up the container
+		// to avoid orphans, and mark as error
+		p.cleanupAndError(ctx, client, tenantID, nodeID, ramMB, newID, "provisioning failed: could not update status")
 		return
 	}
 
@@ -241,25 +270,22 @@ func (p *Provisioner) Provision(ctx context.Context, tenantID, nodeID, projectID
 }
 
 // Deprovision removes an LXC container for a tenant synchronously.
-func (p *Provisioner) Deprovision(ctx context.Context, tenantID, nodeID, projectID string, lxcID int) error {
+// ramMB is passed by the caller (from the project) so we don't need to re-fetch the project.
+func (p *Provisioner) Deprovision(ctx context.Context, tenantID, nodeID string, lxcID, ramMB int) error {
 	log := slog.With("tenant_id", tenantID, "node_id", nodeID, "lxc_id", lxcID)
 
-	// Mark as deleting
+	// Atomically transition to deleting — prevents concurrent delete requests
 	if err := p.tenantStore.SetDeleting(ctx, tenantID); err != nil {
+		if errors.Is(err, tenant.ErrStateConflict) {
+			return tenant.ErrStateConflict
+		}
 		return fmt.Errorf("set deleting: %w", err)
-	}
-
-	// Get project for RAM amount
-	proj, err := p.projectStore.GetByID(ctx, projectID)
-	if err != nil {
-		p.tenantStore.SetError(ctx, tenantID, fmt.Sprintf("get project: %v", err)) //nolint:errcheck
-		return fmt.Errorf("get project: %w", err)
 	}
 
 	// Get Proxmox client
 	client, err := p.getClient(ctx, nodeID)
 	if err != nil {
-		p.tenantStore.SetError(ctx, tenantID, fmt.Sprintf("get proxmox client: %v", err)) //nolint:errcheck
+		_ = p.tenantStore.SetError(ctx, tenantID, "deprovision failed: node connection error")
 		return fmt.Errorf("get proxmox client: %w", err)
 	}
 
@@ -278,18 +304,18 @@ func (p *Provisioner) Deprovision(ctx context.Context, tenantID, nodeID, project
 	log.Info("deprovision: deleting container")
 	deleteTask, err := client.DeleteContainer(ctx, lxcID, true)
 	if err != nil {
-		p.tenantStore.SetError(ctx, tenantID, fmt.Sprintf("delete container: %v", err)) //nolint:errcheck
+		_ = p.tenantStore.SetError(ctx, tenantID, "deprovision failed: container delete error")
 		return fmt.Errorf("delete container: %w", err)
 	}
 
 	if err := deleteTask.Wait(ctx); err != nil {
-		p.tenantStore.SetError(ctx, tenantID, fmt.Sprintf("delete task failed: %v", err)) //nolint:errcheck
+		_ = p.tenantStore.SetError(ctx, tenantID, "deprovision failed: container delete did not complete")
 		return fmt.Errorf("delete task failed: %w", err)
 	}
 
 	// Release RAM
-	if proj != nil {
-		if err := p.nodeStore.ReleaseRAM(ctx, nodeID, proj.RAMMB); err != nil {
+	if ramMB > 0 {
+		if err := p.nodeStore.ReleaseRAM(ctx, nodeID, ramMB); err != nil {
 			log.Error("deprovision: release ram", "error", err)
 		}
 	}
@@ -303,20 +329,20 @@ func (p *Provisioner) Deprovision(ctx context.Context, tenantID, nodeID, project
 	return nil
 }
 
-// setError marks a tenant as errored and releases RAM.
-func (p *Provisioner) setError(ctx context.Context, tenantID, nodeID string, proj *project.Project, errMsg string) {
+// setError marks a tenant as errored (sanitized message) and releases RAM.
+func (p *Provisioner) setError(ctx context.Context, tenantID, nodeID string, ramMB int, errMsg string) {
 	if err := p.tenantStore.SetError(ctx, tenantID, errMsg); err != nil {
 		slog.Error("provision: failed to set error status", "tenant_id", tenantID, "error", err)
 	}
-	if proj != nil {
-		if err := p.nodeStore.ReleaseRAM(ctx, nodeID, proj.RAMMB); err != nil {
+	if ramMB > 0 {
+		if err := p.nodeStore.ReleaseRAM(ctx, nodeID, ramMB); err != nil {
 			slog.Error("provision: failed to release ram", "tenant_id", tenantID, "error", err)
 		}
 	}
 }
 
 // cleanupAndError attempts to delete the created container, then marks error and releases RAM.
-func (p *Provisioner) cleanupAndError(ctx context.Context, client ProxmoxClient, tenantID, nodeID string, proj *project.Project, lxcID int, errMsg string) {
+func (p *Provisioner) cleanupAndError(ctx context.Context, client ProxmoxClient, tenantID, nodeID string, ramMB, lxcID int, errMsg string) {
 	slog.Info("provision: attempting cleanup", "tenant_id", tenantID, "lxc_id", lxcID)
 	deleteTask, err := client.DeleteContainer(ctx, lxcID, true)
 	if err != nil {
@@ -326,5 +352,5 @@ func (p *Provisioner) cleanupAndError(ctx context.Context, client ProxmoxClient,
 			slog.Error("provision: cleanup delete wait failed", "tenant_id", tenantID, "error", err)
 		}
 	}
-	p.setError(ctx, tenantID, nodeID, proj, errMsg)
+	p.setError(ctx, tenantID, nodeID, ramMB, errMsg)
 }
