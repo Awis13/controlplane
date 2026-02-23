@@ -1,4 +1,4 @@
-FROM golang:1.25-alpine AS builder
+FROM golang:1.24-alpine AS builder
 
 WORKDIR /build
 
@@ -10,7 +10,8 @@ RUN CGO_ENABLED=0 GOOS=linux go build -trimpath -ldflags="-s -w" -o /controlplan
 
 FROM alpine:3.21
 
-RUN addgroup -S app && adduser -S app -G app
+RUN apk --no-cache add ca-certificates tzdata && \
+    addgroup -S app && adduser -S app -G app
 
 COPY --from=builder /controlplane /usr/local/bin/controlplane
 
