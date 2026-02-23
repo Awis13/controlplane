@@ -14,6 +14,7 @@ import (
 	"controlplane/internal/health"
 	"controlplane/internal/node"
 	"controlplane/internal/project"
+	"controlplane/internal/provisioner"
 	"controlplane/internal/response"
 	"controlplane/internal/tenant"
 )
@@ -53,9 +54,12 @@ func New(pool *pgxpool.Pool, cfg *config.Config) http.Handler {
 			r.Post("/", projectHandler.Create)
 		})
 
-		// Tenants
+		// Provisioner
 		tenantStore := tenant.NewStore(pool)
-		tenantHandler := tenant.NewHandler(tenantStore)
+		prov := provisioner.New(nodeStore, tenantStore, projectStore, cfg.EncryptionKey)
+
+		// Tenants
+		tenantHandler := tenant.NewHandler(tenantStore, nodeStore, projectStore, prov)
 		r.Route("/tenants", func(r chi.Router) {
 			r.Get("/", tenantHandler.List)
 			r.Post("/", tenantHandler.Create)

@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 
+	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
@@ -39,6 +40,22 @@ func (s *Store) List(ctx context.Context) ([]Project, error) {
 	}
 
 	return projects, nil
+}
+
+func (s *Store) GetByID(ctx context.Context, id string) (*Project, error) {
+	var p Project
+	err := s.pool.QueryRow(ctx,
+		`SELECT id, name, template_id, ports, stripe_price_id, health_path, ram_mb, created_at
+		 FROM projects WHERE id = $1`, id).
+		Scan(&p.ID, &p.Name, &p.TemplateID, &p.Ports,
+			&p.StripePriceID, &p.HealthPath, &p.RAMMB, &p.CreatedAt)
+	if err != nil {
+		if err == pgx.ErrNoRows {
+			return nil, nil
+		}
+		return nil, fmt.Errorf("query project: %w", err)
+	}
+	return &p, nil
 }
 
 func (s *Store) Create(ctx context.Context, req CreateProjectRequest) (*Project, error) {

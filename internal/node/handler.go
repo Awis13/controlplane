@@ -24,6 +24,8 @@ type NodeStore interface {
 	GetEncryptedTokenByID(ctx context.Context, id string) (string, error)
 	Create(ctx context.Context, req CreateNodeRequest) (*Node, error)
 	Delete(ctx context.Context, id string) error
+	ReserveRAM(ctx context.Context, nodeID string, ramMB int) error
+	ReleaseRAM(ctx context.Context, nodeID string, ramMB int) error
 }
 
 var nameRegexp = regexp.MustCompile(`^[a-z0-9][a-z0-9._-]*[a-z0-9]$`)

@@ -2,11 +2,15 @@ package node
 
 import (
 	"context"
+	"errors"
 	"fmt"
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
+
+// ErrInsufficientCapacity is returned when a node does not have enough RAM.
+var ErrInsufficientCapacity = errors.New("insufficient capacity on node")
 
 type Store struct {
 	pool *pgxpool.Pool
@@ -93,6 +97,33 @@ func (s *Store) Delete(ctx context.Context, id string) error {
 	}
 	if tag.RowsAffected() == 0 {
 		return pgx.ErrNoRows
+	}
+	return nil
+}
+
+// ReserveRAM atomically increments allocated_ram_mb if capacity is available.
+// Returns ErrInsufficientCapacity if not enough RAM.
+func (s *Store) ReserveRAM(ctx context.Context, nodeID string, ramMB int) error {
+	tag, err := s.pool.Exec(ctx,
+		`UPDATE nodes SET allocated_ram_mb = allocated_ram_mb + $2
+		 WHERE id = $1 AND total_ram_mb - allocated_ram_mb >= $2`,
+		nodeID, ramMB)
+	if err != nil {
+		return fmt.Errorf("reserve ram: %w", err)
+	}
+	if tag.RowsAffected() == 0 {
+		return ErrInsufficientCapacity
+	}
+	return nil
+}
+
+// ReleaseRAM decrements allocated_ram_mb (floored at 0).
+func (s *Store) ReleaseRAM(ctx context.Context, nodeID string, ramMB int) error {
+	_, err := s.pool.Exec(ctx,
+		`UPDATE nodes SET allocated_ram_mb = GREATEST(allocated_ram_mb - $2, 0) WHERE id = $1`,
+		nodeID, ramMB)
+	if err != nil {
+		return fmt.Errorf("release ram: %w", err)
 	}
 	return nil
 }
