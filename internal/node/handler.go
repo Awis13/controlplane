@@ -21,6 +21,7 @@ import (
 type NodeStore interface {
 	List(ctx context.Context) ([]Node, error)
 	GetByID(ctx context.Context, id string) (*Node, error)
+	GetEncryptedTokenByID(ctx context.Context, id string) (string, error)
 	Create(ctx context.Context, req CreateNodeRequest) (*Node, error)
 	Delete(ctx context.Context, id string) error
 }

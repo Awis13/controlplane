@@ -72,6 +72,17 @@ func (s *Store) Create(ctx context.Context, req CreateNodeRequest) (*Node, error
 	return &n, nil
 }
 
+func (s *Store) GetEncryptedTokenByID(ctx context.Context, id string) (string, error) {
+	var token string
+	err := s.pool.QueryRow(ctx,
+		`SELECT api_token_encrypted FROM nodes WHERE id = $1`, id).
+		Scan(&token)
+	if err != nil {
+		return "", fmt.Errorf("query node token: %w", err)
+	}
+	return token, nil
+}
+
 func (s *Store) Delete(ctx context.Context, id string) error {
 	tag, err := s.pool.Exec(ctx, `DELETE FROM nodes WHERE id = $1`, id)
 	if err != nil {
