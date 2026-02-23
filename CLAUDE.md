@@ -31,7 +31,9 @@ controlplane/
     server/server.go           # chi router setup with all routes
     response/response.go       # JSON response helpers (JSON, Error, Decode)
     node/                      # Node CRUD (model, store, handler)
-    tenant/                    # Tenant + Project CRUD (model, store, handler)
+    project/                   # Project CRUD (model, store, handler)
+    tenant/                    # Tenant CRUD (model, store, handler)
+    proxmox/                   # Proxmox VE API client (LXC lifecycle, node status, task polling)
     health/                    # Health check endpoint with DB ping
   docker-compose.yml           # PostgreSQL + controlplane services
   Dockerfile                   # Multi-stage build (golang:1.24-alpine -> alpine:3.21)
@@ -66,3 +68,6 @@ controlplane/
 - Graceful shutdown on SIGINT/SIGTERM
 - Migrations auto-run on startup
 - API token field excluded from JSON responses (`json:"-"`)
+- Proxmox API client uses InsecureSkipVerify (self-signed certs over Tailscale)
+- POST to Proxmox uses `application/x-www-form-urlencoded` (not JSON)
+- Async Proxmox operations return Task with Wait() for polling
