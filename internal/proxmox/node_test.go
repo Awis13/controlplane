@@ -5,7 +5,10 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"sync"
+	"sync/atomic"
 	"testing"
+	"time"
 )
 
 func TestNodeName_Discovery(t *testing.T) {
@@ -211,5 +214,53 @@ func TestGetNextID_Error(t *testing.T) {
 	_, err := c.GetNextID(context.Background())
 	if err == nil {
 		t.Fatal("expected error")
+	}
+}
+
+func TestNodeName_ConcurrentDiscovery(t *testing.T) {
+	var callCount atomic.Int32
+	srv := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		callCount.Add(1)
+		// Simulate slow response to increase chance of concurrent access
+		time.Sleep(10 * time.Millisecond)
+		_ = json.NewEncoder(w).Encode(response{
+			Data: json.RawMessage(`[{"node":"pve-concurrent"}]`),
+		})
+	}))
+	defer srv.Close()
+
+	c := NewClient(srv.URL, "token", WithHTTPClient(srv.Client()))
+
+	const goroutines = 20
+	var wg sync.WaitGroup
+	wg.Add(goroutines)
+
+	errs := make([]error, goroutines)
+	names := make([]string, goroutines)
+
+	for i := 0; i < goroutines; i++ {
+		go func(idx int) {
+			defer wg.Done()
+			name, err := c.NodeName(context.Background())
+			names[idx] = name
+			errs[idx] = err
+		}(i)
+	}
+
+	wg.Wait()
+
+	for i := 0; i < goroutines; i++ {
+		if errs[i] != nil {
+			t.Errorf("goroutine %d: unexpected error: %v", i, errs[i])
+		}
+		if names[i] != "pve-concurrent" {
+			t.Errorf("goroutine %d: expected 'pve-concurrent', got %q", i, names[i])
+		}
+	}
+
+	// Should have made very few HTTP calls (ideally 1, at most a few due to race timing)
+	count := callCount.Load()
+	if count > 3 {
+		t.Errorf("expected at most a few HTTP calls, got %d (lock not working)", count)
 	}
 }

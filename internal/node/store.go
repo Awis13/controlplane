@@ -78,6 +78,9 @@ func (s *Store) GetEncryptedTokenByID(ctx context.Context, id string) (string, e
 		`SELECT api_token_encrypted FROM nodes WHERE id = $1`, id).
 		Scan(&token)
 	if err != nil {
+		if err == pgx.ErrNoRows {
+			return "", nil
+		}
 		return "", fmt.Errorf("query node token: %w", err)
 	}
 	return token, nil

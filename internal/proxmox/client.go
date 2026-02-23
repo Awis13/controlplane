@@ -19,7 +19,7 @@ type Client struct {
 	apiToken   string       // full "PVEAPIToken=user@realm!tokenid=secret"
 	httpClient *http.Client
 	nodeName   string       // Proxmox node name (e.g. "proxmox-ve"), discovered or set
-	mu         sync.Mutex   // guards lazy node name discovery
+	mu         sync.RWMutex // guards lazy node name discovery
 }
 
 // Option configures a Client.
@@ -93,7 +93,7 @@ func (c *Client) get(ctx context.Context, path string, out any) error {
 // Returns the response data as a raw string (often a UPID for async tasks).
 func (c *Client) post(ctx context.Context, path string, params url.Values) (string, error) {
 	var body io.Reader
-	if params != nil {
+	if len(params) > 0 {
 		body = strings.NewReader(params.Encode())
 	}
 
@@ -102,7 +102,7 @@ func (c *Client) post(ctx context.Context, path string, params url.Values) (stri
 		return "", fmt.Errorf("create request: %w", err)
 	}
 	req.Header.Set("Authorization", c.apiToken)
-	if params != nil {
+	if len(params) > 0 {
 		req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
 	}
 
@@ -123,7 +123,7 @@ func (c *Client) post(ctx context.Context, path string, params url.Values) (stri
 // Returns the response data as a raw string (often a UPID for async tasks).
 func (c *Client) delete(ctx context.Context, path string, params url.Values) (string, error) {
 	reqURL := c.apiURL(path)
-	if params != nil {
+	if len(params) > 0 {
 		reqURL += "?" + params.Encode()
 	}
 
@@ -148,7 +148,8 @@ func (c *Client) delete(ctx context.Context, path string, params url.Values) (st
 
 // decodeResponse parses the Proxmox response envelope and extracts data into out.
 func (c *Client) decodeResponse(resp *http.Response, out any) error {
-	bodyBytes, err := io.ReadAll(resp.Body)
+	const maxResponseSize = 10 * 1024 * 1024 // 10MB
+	bodyBytes, err := io.ReadAll(io.LimitReader(resp.Body, maxResponseSize))
 	if err != nil {
 		return fmt.Errorf("read response body: %w", err)
 	}
@@ -194,10 +195,21 @@ func (c *Client) decodeResponse(resp *http.Response, out any) error {
 }
 
 // resolveNode returns the node name, discovering it lazily if needed.
+// Uses double-checked locking with RWMutex to avoid blocking concurrent
+// callers after the initial discovery.
 func (c *Client) resolveNode(ctx context.Context) (string, error) {
+	c.mu.RLock()
+	if c.nodeName != "" {
+		name := c.nodeName
+		c.mu.RUnlock()
+		return name, nil
+	}
+	c.mu.RUnlock()
+
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
+	// Re-check after acquiring write lock (another goroutine may have discovered).
 	if c.nodeName != "" {
 		return c.nodeName, nil
 	}

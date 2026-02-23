@@ -418,3 +418,22 @@ func TestDeleteContainer_NoForce(t *testing.T) {
 		t.Fatalf("unexpected error: %v", err)
 	}
 }
+
+func TestCloneContainer_InvalidNewID(t *testing.T) {
+	c := NewClient("https://host:8006", "token", WithNodeName("testnode"))
+
+	// NewID = 0 (zero value)
+	_, err := c.CloneContainer(context.Background(), 100, CloneOptions{NewID: 0})
+	if err == nil {
+		t.Fatal("expected error for NewID=0")
+	}
+	if !strings.Contains(err.Error(), "NewID must be >= 100") {
+		t.Errorf("unexpected error message: %v", err)
+	}
+
+	// NewID = 99 (below minimum)
+	_, err = c.CloneContainer(context.Background(), 100, CloneOptions{NewID: 99})
+	if err == nil {
+		t.Fatal("expected error for NewID=99")
+	}
+}

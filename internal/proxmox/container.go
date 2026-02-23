@@ -38,6 +38,10 @@ func (c *Client) GetContainerStatus(ctx context.Context, vmid int) (*ContainerSt
 // CloneContainer clones an LXC template/container to create a new container.
 // Returns a Task that can be used to wait for the clone operation to complete.
 func (c *Client) CloneContainer(ctx context.Context, templateID int, opts CloneOptions) (*Task, error) {
+	if opts.NewID < 100 {
+		return nil, fmt.Errorf("clone container: NewID must be >= 100, got %d", opts.NewID)
+	}
+
 	node, err := c.resolveNode(ctx)
 	if err != nil {
 		return nil, err
