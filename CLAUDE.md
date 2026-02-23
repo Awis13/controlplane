@@ -32,8 +32,10 @@ controlplane/
     response/response.go       # JSON response helpers (JSON, Error, Decode)
     node/                      # Node CRUD (model, store, handler)
     project/                   # Project CRUD (model, store, handler)
-    tenant/                    # Tenant CRUD (model, store, handler)
+    tenant/                    # Tenant CRUD (model, store, handler, handler_test)
+    provisioner/               # Async LXC provisioning/deprovisioning (bounded concurrency, state machine)
     proxmox/                   # Proxmox VE API client (LXC lifecycle, node status, task polling)
+    crypto/                    # AES-256-GCM encryption for API tokens
     health/                    # Health check endpoint with DB ping
   docker-compose.yml           # PostgreSQL + controlplane services
   Dockerfile                   # Multi-stage build (golang:1.24-alpine -> alpine:3.21)
@@ -51,9 +53,9 @@ controlplane/
 | GET | `/api/v1/projects` | List project types |
 | POST | `/api/v1/projects` | Create a project type |
 | GET | `/api/v1/tenants` | List tenants |
-| POST | `/api/v1/tenants` | Create a tenant |
+| POST | `/api/v1/tenants` | Create a tenant (returns 202, provisions async) |
 | GET | `/api/v1/tenants/{tenantID}` | Get a single tenant |
-| DELETE | `/api/v1/tenants/{tenantID}` | Remove a tenant |
+| DELETE | `/api/v1/tenants/{tenantID}` | Deprovision and delete a tenant |
 
 ## Dependencies
 
@@ -65,9 +67,14 @@ controlplane/
 
 - No ORM, raw SQL via pgx
 - Structured logging with `log/slog` (JSON output)
-- Graceful shutdown on SIGINT/SIGTERM
+- Graceful shutdown on SIGINT/SIGTERM (TODO: wire Provisioner.Shutdown())
 - Migrations auto-run on startup
 - API token field excluded from JSON responses (`json:"-"`)
 - Proxmox API client uses InsecureSkipVerify (self-signed certs over Tailscale)
 - POST to Proxmox uses `application/x-www-form-urlencoded` (not JSON)
 - Async Proxmox operations return Task with Wait() for polling
+- Tenant provisioning: async goroutine with 10-max concurrency semaphore
+- Tenant state machine: provisioning → active/error, active/error → deleting → deleted
+- State transitions enforced at SQL level (WHERE status = expected) for CAS safety
+- Atomic RAM reservation on nodes (`allocated_ram_mb + N <= total_ram_mb`)
+- Error messages in tenant records are sanitized (no internal details)
