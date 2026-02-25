@@ -1,0 +1,168 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Login — Control Plane</title>
+  <link rel="stylesheet" href="/admin/static/style.css">
+  <style>
+    .login-wrap {
+      min-height: 100vh;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+    }
+    .login-card {
+      background: var(--bg-card);
+      border: 1px solid var(--border);
+      border-radius: 12px;
+      padding: 40px;
+      width: 360px;
+      text-align: center;
+    }
+    .login-card h1 {
+      font-size: 18px;
+      margin-bottom: 8px;
+    }
+    .login-card p {
+      color: var(--text-muted);
+      font-size: 13px;
+      margin-bottom: 24px;
+    }
+    .login-card button {
+      width: 100%;
+      padding: 12px;
+      font-size: 14px;
+    }
+    .login-card .error {
+      color: var(--red);
+      font-size: 13px;
+      margin-top: 12px;
+    }
+    .login-card .logo {
+      font-weight: 700;
+      font-size: 14px;
+      color: var(--accent);
+      letter-spacing: 0.5px;
+      margin-bottom: 24px;
+      display: block;
+    }
+  </style>
+</head>
+<body>
+  <div class="login-wrap">
+    <div class="login-card">
+      <span class="logo">CONTROL PLANE</span>
+      {{if .HasCredentials}}
+        <h1>Welcome back</h1>
+        <p>Authenticate with Touch ID to continue</p>
+        <button id="loginBtn" onclick="doLogin()">Login with Touch ID</button>
+      {{else}}
+        <h1>Setup</h1>
+        <p>Register a passkey to secure your admin panel</p>
+        <button id="registerBtn" onclick="doRegister()">Set up Touch ID</button>
+      {{end}}
+      <div id="error" class="error"></div>
+    </div>
+  </div>
+
+  <script>
+    function showError(msg) {
+      document.getElementById('error').textContent = msg;
+    }
+
+    function bufToBase64url(buf) {
+      const bytes = new Uint8Array(buf);
+      let s = '';
+      for (const b of bytes) s += String.fromCharCode(b);
+      return btoa(s).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
+    }
+
+    function base64urlToBuf(s) {
+      s = s.replace(/-/g, '+').replace(/_/g, '/');
+      while (s.length % 4) s += '=';
+      const bin = atob(s);
+      const buf = new Uint8Array(bin.length);
+      for (let i = 0; i < bin.length; i++) buf[i] = bin.charCodeAt(i);
+      return buf.buffer;
+    }
+
+    async function doRegister() {
+      const btn = document.getElementById('registerBtn');
+      btn.disabled = true;
+      showError('');
+      try {
+        const beginResp = await fetch('/admin/webauthn/register/begin', {method: 'POST'});
+        if (!beginResp.ok) { showError((await beginResp.json()).error || 'Failed'); btn.disabled = false; return; }
+        const opts = await beginResp.json();
+
+        opts.publicKey.challenge = base64urlToBuf(opts.publicKey.challenge);
+        opts.publicKey.user.id = base64urlToBuf(opts.publicKey.user.id);
+        if (opts.publicKey.excludeCredentials) {
+          opts.publicKey.excludeCredentials = opts.publicKey.excludeCredentials.map(c => ({...c, id: base64urlToBuf(c.id)}));
+        }
+
+        const cred = await navigator.credentials.create(opts);
+        const body = JSON.stringify({
+          id: cred.id,
+          rawId: bufToBase64url(cred.rawId),
+          type: cred.type,
+          response: {
+            attestationObject: bufToBase64url(cred.response.attestationObject),
+            clientDataJSON: bufToBase64url(cred.response.clientDataJSON),
+          },
+        });
+
+        const finishResp = await fetch('/admin/webauthn/register/finish', {
+          method: 'POST', headers: {'Content-Type': 'application/json'}, body,
+        });
+        if (!finishResp.ok) { showError((await finishResp.json()).error || 'Registration failed'); btn.disabled = false; return; }
+
+        window.location.href = '/admin/';
+      } catch (e) {
+        showError(e.message || 'Registration cancelled');
+        btn.disabled = false;
+      }
+    }
+
+    async function doLogin() {
+      const btn = document.getElementById('loginBtn');
+      btn.disabled = true;
+      showError('');
+      try {
+        const beginResp = await fetch('/admin/webauthn/login/begin', {method: 'POST'});
+        if (!beginResp.ok) { showError((await beginResp.json()).error || 'Failed'); btn.disabled = false; return; }
+        const opts = await beginResp.json();
+
+        opts.publicKey.challenge = base64urlToBuf(opts.publicKey.challenge);
+        if (opts.publicKey.allowCredentials) {
+          opts.publicKey.allowCredentials = opts.publicKey.allowCredentials.map(c => ({...c, id: base64urlToBuf(c.id)}));
+        }
+
+        const assertion = await navigator.credentials.get(opts);
+        const body = JSON.stringify({
+          id: assertion.id,
+          rawId: bufToBase64url(assertion.rawId),
+          type: assertion.type,
+          response: {
+            authenticatorData: bufToBase64url(assertion.response.authenticatorData),
+            clientDataJSON: bufToBase64url(assertion.response.clientDataJSON),
+            signature: bufToBase64url(assertion.response.signature),
+            userHandle: assertion.response.userHandle ? bufToBase64url(assertion.response.userHandle) : '',
+          },
+        });
+
+        const finishResp = await fetch('/admin/webauthn/login/finish', {
+          method: 'POST', headers: {'Content-Type': 'application/json'}, body,
+        });
+        if (!finishResp.ok) { showError((await finishResp.json()).error || 'Login failed'); btn.disabled = false; return; }
+
+        window.location.href = '/admin/';
+      } catch (e) {
+        showError(e.message || 'Authentication cancelled');
+        btn.disabled = false;
+      }
+    }
+  </script>
+</body>
+</html>

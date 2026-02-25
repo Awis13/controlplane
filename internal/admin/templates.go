@@ -51,7 +51,8 @@ var funcs = template.FuncMap{
 
 // Templates holds parsed page templates.
 type Templates struct {
-	pages map[string]*template.Template
+	pages      map[string]*template.Template
+	standalone map[string]*template.Template
 }
 
 // ParseTemplates parses all embedded templates and returns a Templates instance.
@@ -106,7 +107,22 @@ func ParseTemplates() (*Templates, error) {
 	}
 	pages["partials"] = partialTmpl
 
-	return &Templates{pages: pages}, nil
+	// Parse standalone pages (no layout)
+	standalone := make(map[string]*template.Template)
+	standaloneNames := []string{"login"}
+	for _, name := range standaloneNames {
+		data, err := fs.ReadFile(templateFS, "templates/"+name+".html")
+		if err != nil {
+			return nil, fmt.Errorf("read standalone %s: %w", name, err)
+		}
+		t, err := template.New(name).Funcs(funcs).Parse(string(data))
+		if err != nil {
+			return nil, fmt.Errorf("parse standalone %s: %w", name, err)
+		}
+		standalone[name] = t
+	}
+
+	return &Templates{pages: pages, standalone: standalone}, nil
 }
 
 // RenderPage renders a full page into the response writer.
@@ -136,6 +152,23 @@ func (t *Templates) RenderPartial(w http.ResponseWriter, name string, data any) 
 	var buf bytes.Buffer
 	if err := tmpl.ExecuteTemplate(&buf, name, data); err != nil {
 		return fmt.Errorf("execute partial %s: %w", name, err)
+	}
+
+	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	_, err := buf.WriteTo(w)
+	return err
+}
+
+// RenderStandalone renders a standalone page (no layout) into the response writer.
+func (t *Templates) RenderStandalone(w http.ResponseWriter, name string, data any) error {
+	tmpl, ok := t.standalone[name]
+	if !ok {
+		return fmt.Errorf("unknown standalone page: %s", name)
+	}
+
+	var buf bytes.Buffer
+	if err := tmpl.Execute(&buf, data); err != nil {
+		return fmt.Errorf("execute standalone %s: %w", name, err)
 	}
 
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")

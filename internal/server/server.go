@@ -9,6 +9,7 @@ import (
 
 	"github.com/go-chi/chi/v5"
 	"github.com/go-chi/chi/v5/middleware"
+	"github.com/go-webauthn/webauthn/webauthn"
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"controlplane/internal/admin"
@@ -40,8 +41,28 @@ func New(pool *pgxpool.Pool, cfg *config.Config) (http.Handler, error) {
 	healthHandler := health.NewHandler(pool)
 	r.Get("/healthz", healthHandler.Healthz)
 
-	// Admin UI (no auth — access via Tailscale only)
-	adminHandler, err := admin.NewHandler(nodeStore, projectStore, tenantStore, prov, cfg.EncryptionKey)
+	// WebAuthn setup
+	rpID := cfg.WebAuthnRPID
+	if rpID == "" {
+		rpID = "localhost"
+	}
+	rpOrigin := cfg.WebAuthnOrigin
+	if rpOrigin == "" {
+		rpOrigin = "https://" + rpID
+	}
+
+	wa, err := webauthn.New(&webauthn.Config{
+		RPID:          rpID,
+		RPDisplayName: "Control Plane",
+		RPOrigins:     []string{rpOrigin},
+	})
+	if err != nil {
+		return nil, fmt.Errorf("webauthn: %w", err)
+	}
+	waStore := admin.NewWebAuthnStore(pool)
+
+	// Admin UI (auth via WebAuthn)
+	adminHandler, err := admin.NewHandler(nodeStore, projectStore, tenantStore, prov, cfg.EncryptionKey, wa, waStore)
 	if err != nil {
 		return nil, fmt.Errorf("admin handler: %w", err)
 	}

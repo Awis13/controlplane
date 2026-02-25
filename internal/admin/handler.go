@@ -12,6 +12,7 @@ import (
 	"strings"
 
 	"github.com/go-chi/chi/v5"
+	"github.com/go-webauthn/webauthn/webauthn"
 	"github.com/jackc/pgx/v5/pgconn"
 
 	"controlplane/internal/crypto"
@@ -52,27 +53,33 @@ type Provisioner interface {
 
 // Handler serves the admin UI.
 type Handler struct {
-	tmpl          *Templates
-	nodes         NodeStore
-	projects      ProjectStore
-	tenants       TenantStore
-	provisioner   Provisioner
-	encryptionKey string
+	tmpl             *Templates
+	nodes            NodeStore
+	projects         ProjectStore
+	tenants          TenantStore
+	provisioner      Provisioner
+	encryptionKey    string
+	webauthn         *webauthn.WebAuthn
+	webauthnStore    *WebAuthnStore
+	webauthnSessions *webauthnSessions
 }
 
 // NewHandler creates a new admin Handler. Returns error if templates fail to parse.
-func NewHandler(nodes NodeStore, projects ProjectStore, tenants TenantStore, provisioner Provisioner, encryptionKey string) (*Handler, error) {
+func NewHandler(nodes NodeStore, projects ProjectStore, tenants TenantStore, provisioner Provisioner, encryptionKey string, wa *webauthn.WebAuthn, waStore *WebAuthnStore) (*Handler, error) {
 	tmpl, err := ParseTemplates()
 	if err != nil {
 		return nil, err
 	}
 	return &Handler{
-		tmpl:          tmpl,
-		nodes:         nodes,
-		projects:      projects,
-		tenants:       tenants,
-		provisioner:   provisioner,
-		encryptionKey: encryptionKey,
+		tmpl:             tmpl,
+		nodes:            nodes,
+		projects:         projects,
+		tenants:          tenants,
+		provisioner:      provisioner,
+		encryptionKey:    encryptionKey,
+		webauthn:         wa,
+		webauthnStore:    waStore,
+		webauthnSessions: newWebAuthnSessions(),
 	}, nil
 }
 
@@ -80,21 +87,32 @@ func NewHandler(nodes NodeStore, projects ProjectStore, tenants TenantStore, pro
 func (h *Handler) Routes() chi.Router {
 	r := chi.NewRouter()
 
-	// Static files
+	// Public routes (no auth)
 	r.Handle("/static/*", http.StripPrefix("/admin/static/", http.FileServer(StaticFS())))
+	r.Get("/login", h.loginPage)
+	r.Post("/logout", h.logout)
+	r.Post("/webauthn/register/begin", h.registerBegin)
+	r.Post("/webauthn/register/finish", h.registerFinish)
+	r.Post("/webauthn/login/begin", h.loginBegin)
+	r.Post("/webauthn/login/finish", h.loginFinish)
 
-	// Pages
-	r.Get("/", h.dashboard)
-	r.Get("/nodes", h.nodesList)
-	r.Get("/projects", h.projectsList)
-	r.Get("/tenants", h.tenantsList)
+	// Protected routes (require auth)
+	r.Group(func(r chi.Router) {
+		r.Use(requireAuth(h.encryptionKey))
 
-	// Actions
-	r.Post("/nodes", h.createNode)
-	r.Post("/projects", h.createProject)
-	r.Post("/tenants", h.createTenant)
-	r.Delete("/tenants/{id}", h.deleteTenant)
-	r.Get("/tenants/{id}/row", h.tenantRow)
+		// Pages
+		r.Get("/", h.dashboard)
+		r.Get("/nodes", h.nodesList)
+		r.Get("/projects", h.projectsList)
+		r.Get("/tenants", h.tenantsList)
+
+		// Actions
+		r.Post("/nodes", h.createNode)
+		r.Post("/projects", h.createProject)
+		r.Post("/tenants", h.createTenant)
+		r.Delete("/tenants/{id}", h.deleteTenant)
+		r.Get("/tenants/{id}/row", h.tenantRow)
+	})
 
 	return r
 }
