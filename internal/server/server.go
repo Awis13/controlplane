@@ -2,6 +2,7 @@ package server
 
 import (
 	"crypto/subtle"
+	"fmt"
 	"log/slog"
 	"net/http"
 	"strings"
@@ -10,6 +11,7 @@ import (
 	"github.com/go-chi/chi/v5/middleware"
 	"github.com/jackc/pgx/v5/pgxpool"
 
+	"controlplane/internal/admin"
 	"controlplane/internal/config"
 	"controlplane/internal/health"
 	"controlplane/internal/node"
@@ -20,7 +22,7 @@ import (
 )
 
 // New creates and configures the HTTP server with all routes.
-func New(pool *pgxpool.Pool, cfg *config.Config) http.Handler {
+func New(pool *pgxpool.Pool, cfg *config.Config) (http.Handler, error) {
 	r := chi.NewRouter()
 
 	r.Use(middleware.RequestID)
@@ -28,16 +30,28 @@ func New(pool *pgxpool.Pool, cfg *config.Config) http.Handler {
 	r.Use(middleware.Logger)
 	r.Use(middleware.Recoverer)
 
+	// Shared stores
+	nodeStore := node.NewStore(pool)
+	projectStore := project.NewStore(pool)
+	tenantStore := tenant.NewStore(pool)
+	prov := provisioner.New(nodeStore, tenantStore, projectStore, cfg.EncryptionKey)
+
 	// Health (public, no auth)
 	healthHandler := health.NewHandler(pool)
 	r.Get("/healthz", healthHandler.Healthz)
+
+	// Admin UI (no auth — access via Tailscale only)
+	adminHandler, err := admin.NewHandler(nodeStore, projectStore, tenantStore, prov, cfg.EncryptionKey)
+	if err != nil {
+		return nil, fmt.Errorf("admin handler: %w", err)
+	}
+	r.Mount("/admin", adminHandler.Routes())
 
 	// API v1 (protected by Bearer token auth)
 	r.Route("/api/v1", func(r chi.Router) {
 		r.Use(bearerAuth(cfg.APIToken))
 
 		// Nodes
-		nodeStore := node.NewStore(pool)
 		nodeHandler := node.NewHandler(nodeStore, cfg.EncryptionKey)
 		r.Route("/nodes", func(r chi.Router) {
 			r.Get("/", nodeHandler.List)
@@ -47,16 +61,11 @@ func New(pool *pgxpool.Pool, cfg *config.Config) http.Handler {
 		})
 
 		// Projects
-		projectStore := project.NewStore(pool)
 		projectHandler := project.NewHandler(projectStore)
 		r.Route("/projects", func(r chi.Router) {
 			r.Get("/", projectHandler.List)
 			r.Post("/", projectHandler.Create)
 		})
-
-		// Provisioner
-		tenantStore := tenant.NewStore(pool)
-		prov := provisioner.New(nodeStore, tenantStore, projectStore, cfg.EncryptionKey)
 
 		// Tenants
 		tenantHandler := tenant.NewHandler(tenantStore, nodeStore, projectStore, prov)
@@ -69,7 +78,7 @@ func New(pool *pgxpool.Pool, cfg *config.Config) http.Handler {
 	})
 
 	slog.Info("routes registered")
-	return r
+	return r, nil
 }
 
 // bearerAuth returns middleware that validates Authorization: Bearer <token> header.

@@ -53,7 +53,11 @@ func main() {
 	}
 
 	// Create HTTP server
-	handler := server.New(pool, cfg)
+	handler, err := server.New(pool, cfg)
+	if err != nil {
+		slog.Error("failed to create server", "error", err)
+		os.Exit(1)
+	}
 	srv := &http.Server{
 		Addr:         cfg.ListenAddr,
 		Handler:      handler,
