@@ -1,0 +1,55 @@
+{{define "content"}}
+<h1>Projects</h1>
+
+<div class="form-card">
+  <h2>Add Project</h2>
+  <form hx-post="/admin/projects" hx-target="#project-list" hx-swap="afterbegin"
+    hx-on::after-request="if(event.detail.successful){ this.reset(); document.querySelector('#project-list .empty-row')?.remove(); document.getElementById('flash').innerHTML=''; }">
+    <div class="form-grid">
+      <div>
+        <label for="name">Name</label>
+        <input type="text" id="name" name="name" placeholder="studio23" required>
+      </div>
+      <div>
+        <label for="template_id">Template ID</label>
+        <input type="number" id="template_id" name="template_id" placeholder="100" required>
+      </div>
+      <div>
+        <label for="ports">Ports (comma-separated)</label>
+        <input type="text" id="ports" name="ports" placeholder="80,443,8080">
+      </div>
+      <div>
+        <label for="health_path">Health Path</label>
+        <input type="text" id="health_path" name="health_path" placeholder="/api/health">
+      </div>
+      <div>
+        <label for="ram_mb">RAM per Instance (MB)</label>
+        <input type="number" id="ram_mb" name="ram_mb" placeholder="1536">
+      </div>
+      <div>
+        <button type="submit">Add Project</button>
+      </div>
+    </div>
+  </form>
+</div>
+
+<table>
+  <thead>
+    <tr>
+      <th>Name</th>
+      <th>Template ID</th>
+      <th>Ports</th>
+      <th>Health Path</th>
+      <th>RAM (MB)</th>
+      <th>Created</th>
+    </tr>
+  </thead>
+  <tbody id="project-list">
+    {{range .Projects}}
+    {{template "project_row" .}}
+    {{else}}
+    <tr class="empty-row"><td colspan="6">No projects yet</td></tr>
+    {{end}}
+  </tbody>
+</table>
+{{end}}

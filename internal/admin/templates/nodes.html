@@ -1,0 +1,55 @@
+{{define "content"}}
+<h1>Nodes</h1>
+
+<div class="form-card">
+  <h2>Add Node</h2>
+  <form hx-post="/admin/nodes" hx-target="#node-list" hx-swap="afterbegin"
+    hx-on::after-request="if(event.detail.successful){ this.reset(); document.querySelector('#node-list .empty-row')?.remove(); document.getElementById('flash').innerHTML=''; }">
+    <div class="form-grid">
+      <div>
+        <label for="name">Name</label>
+        <input type="text" id="name" name="name" placeholder="node-01" required>
+      </div>
+      <div>
+        <label for="tailscale_ip">Tailscale IP</label>
+        <input type="text" id="tailscale_ip" name="tailscale_ip" placeholder="100.x.x.x" required>
+      </div>
+      <div>
+        <label for="proxmox_url">Proxmox URL</label>
+        <input type="text" id="proxmox_url" name="proxmox_url" placeholder="https://10.10.10.1:8006" required>
+      </div>
+      <div>
+        <label for="api_token">API Token</label>
+        <input type="text" id="api_token" name="api_token" placeholder="user@pam!token=..." required>
+      </div>
+      <div>
+        <label for="total_ram_mb">Total RAM (MB)</label>
+        <input type="number" id="total_ram_mb" name="total_ram_mb" placeholder="32768" required>
+      </div>
+      <div>
+        <button type="submit">Add Node</button>
+      </div>
+    </div>
+  </form>
+</div>
+
+<table>
+  <thead>
+    <tr>
+      <th>Name</th>
+      <th>Tailscale IP</th>
+      <th>Proxmox URL</th>
+      <th>Status</th>
+      <th>RAM (Allocated / Total)</th>
+      <th>Created</th>
+    </tr>
+  </thead>
+  <tbody id="node-list">
+    {{range .Nodes}}
+    {{template "node_row" .}}
+    {{else}}
+    <tr class="empty-row"><td colspan="6">No nodes yet</td></tr>
+    {{end}}
+  </tbody>
+</table>
+{{end}}

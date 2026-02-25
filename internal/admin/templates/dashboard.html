@@ -1,0 +1,77 @@
+{{define "content"}}
+<h1>Dashboard</h1>
+<div class="stats">
+  <div class="stat-card">
+    <div class="label">Nodes</div>
+    <div class="value">{{len .Nodes}}</div>
+  </div>
+  <div class="stat-card">
+    <div class="label">Projects</div>
+    <div class="value">{{len .Projects}}</div>
+  </div>
+  <div class="stat-card">
+    <div class="label">Tenants</div>
+    <div class="value">{{len .Tenants}}</div>
+  </div>
+  <div class="stat-card">
+    <div class="label">Total RAM</div>
+    <div class="value">{{.TotalRAM}} <span class="text-muted" style="font-size:14px">MB</span></div>
+  </div>
+  <div class="stat-card">
+    <div class="label">Allocated RAM</div>
+    <div class="value">{{.AllocatedRAM}} <span class="text-muted" style="font-size:14px">MB</span></div>
+  </div>
+  <div class="stat-card">
+    <div class="label">Free RAM</div>
+    <div class="value">{{sub .TotalRAM .AllocatedRAM}} <span class="text-muted" style="font-size:14px">MB</span></div>
+  </div>
+</div>
+
+{{if .Nodes}}
+<h1>Nodes</h1>
+<table>
+  <thead>
+    <tr>
+      <th>Name</th>
+      <th>Tailscale IP</th>
+      <th>Status</th>
+      <th>RAM</th>
+    </tr>
+  </thead>
+  <tbody>
+    {{range .Nodes}}
+    <tr>
+      <td>{{.Name}}</td>
+      <td class="mono">{{.TailscaleIP}}</td>
+      <td><span class="badge badge-{{.Status}}">{{.Status}}</span></td>
+      <td>{{.AllocatedRAMMB}} / {{.TotalRAMMB}} MB</td>
+    </tr>
+    {{end}}
+  </tbody>
+</table>
+{{end}}
+
+{{if .RecentTenants}}
+<h1 class="mt-16">Recent Tenants</h1>
+<table>
+  <thead>
+    <tr>
+      <th>Name</th>
+      <th>Project</th>
+      <th>Node</th>
+      <th>Status</th>
+    </tr>
+  </thead>
+  <tbody>
+    {{range .RecentTenants}}
+    <tr>
+      <td>{{.Name}}</td>
+      <td>{{.ProjectName}}</td>
+      <td>{{.NodeName}}</td>
+      <td><span class="badge badge-{{.Status}}">{{.Status}}</span></td>
+    </tr>
+    {{end}}
+  </tbody>
+</table>
+{{end}}
+{{end}}
