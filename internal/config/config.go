@@ -3,6 +3,7 @@ package config
 import (
 	"fmt"
 	"os"
+	"strings"
 )
 
 type Config struct {
@@ -13,7 +14,9 @@ type Config struct {
 	EncryptionKey  string
 	WebAuthnRPID   string
 	WebAuthnOrigin string
-	SetupToken     string // optional: required for first WebAuthn registration
+	SetupToken     string   // optional: required for first WebAuthn registration
+	JWTSecret      string   // required: HMAC-SHA256 secret for user JWT tokens
+	CORSOrigins    []string // optional: allowed CORS origins (default: localhost dev ports)
 }
 
 // Load reads configuration from environment variables.
@@ -31,6 +34,12 @@ func Load() (*Config, error) {
 	if err != nil {
 		return nil, err
 	}
+	jwtSecret, err := requireEnv("JWT_SECRET")
+	if err != nil {
+		return nil, err
+	}
+
+	corsOrigins := parseCORSOrigins(os.Getenv("CORS_ORIGINS"))
 
 	return &Config{
 		DatabaseURL:    dbURL,
@@ -41,6 +50,8 @@ func Load() (*Config, error) {
 		WebAuthnRPID:   os.Getenv("WEBAUTHN_RPID"),
 		WebAuthnOrigin: os.Getenv("WEBAUTHN_ORIGIN"),
 		SetupToken:     os.Getenv("SETUP_TOKEN"),
+		JWTSecret:      jwtSecret,
+		CORSOrigins:    corsOrigins,
 	}, nil
 }
 
@@ -57,4 +68,23 @@ func getEnv(key, fallback string) string {
 		return v
 	}
 	return fallback
+}
+
+// parseCORSOrigins parses CORS_ORIGINS env var (comma-separated).
+// Falls back to localhost dev ports if not set.
+func parseCORSOrigins(raw string) []string {
+	if raw == "" {
+		return []string{
+			"http://localhost:5173",
+			"http://localhost:5174",
+		}
+	}
+	var origins []string
+	for _, o := range strings.Split(raw, ",") {
+		o = strings.TrimSpace(o)
+		if o != "" {
+			origins = append(origins, o)
+		}
+	}
+	return origins
 }
