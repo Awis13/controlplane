@@ -13,16 +13,20 @@ import (
 	"github.com/go-chi/httprate"
 	"github.com/go-webauthn/webauthn/webauthn"
 	"github.com/jackc/pgx/v5/pgxpool"
+	"github.com/rs/cors"
 
 	"controlplane/internal/admin"
 	"controlplane/internal/audit"
+	"controlplane/internal/auth"
 	"controlplane/internal/config"
 	"controlplane/internal/health"
 	"controlplane/internal/node"
 	"controlplane/internal/project"
 	"controlplane/internal/provisioner"
 	"controlplane/internal/response"
+	"controlplane/internal/station"
 	"controlplane/internal/tenant"
+	"controlplane/internal/user"
 )
 
 // New creates and configures the HTTP server with all routes.
@@ -33,12 +37,20 @@ func New(pool *pgxpool.Pool, cfg *config.Config) (http.Handler, *provisioner.Pro
 	r.Use(middleware.RequestID)
 	r.Use(middleware.Logger)
 	r.Use(middleware.Recoverer)
+	r.Use(cors.New(cors.Options{
+		AllowedOrigins: cfg.CORSOrigins,
+		AllowedMethods: []string{"GET", "POST", "PUT", "DELETE", "OPTIONS"},
+		AllowedHeaders: []string{"Authorization", "Content-Type"},
+		MaxAge:         300,
+	}).Handler)
 	r.Use(securityHeaders)
 
 	// Shared stores
 	nodeStore := node.NewStore(pool)
 	projectStore := project.NewStore(pool)
 	tenantStore := tenant.NewStore(pool)
+	stationStore := station.NewStore(pool)
+	userStore := user.NewStore(pool)
 	auditStore := audit.NewStore(pool)
 	prov := provisioner.New(nodeStore, tenantStore, projectStore, cfg.EncryptionKey)
 
@@ -73,6 +85,38 @@ func New(pool *pgxpool.Pool, cfg *config.Config) (http.Handler, *provisioner.Pro
 		return nil, nil, fmt.Errorf("admin handler: %w", err)
 	}
 	r.Mount("/admin", adminHandler.Routes())
+
+	// Stations — public read endpoints (no auth)
+	stationHandler := station.NewHandler(stationStore, auditStore)
+	r.Route("/api/v1/stations", func(r chi.Router) {
+		r.Use(httprate.LimitByIP(100, time.Minute))
+
+		// Public (no auth)
+		r.Get("/", stationHandler.List)
+		r.Get("/{slug}", stationHandler.GetBySlug)
+
+		// Protected (auth required)
+		r.Group(func(r chi.Router) {
+			r.Use(bearerAuth(cfg.APIToken))
+			r.Post("/", stationHandler.Create)
+			r.Put("/{stationID}", stationHandler.Update)
+			r.Delete("/{stationID}", stationHandler.Delete)
+		})
+	})
+
+	// User auth (JWT-based, separate from admin WebAuthn and API Bearer token)
+	authHandler := auth.NewHandler(userStore, cfg.JWTSecret)
+	r.Route("/api/v1/auth", func(r chi.Router) {
+		r.Use(httprate.LimitByIP(10, time.Minute))
+		r.Post("/register", authHandler.Register)
+		r.Post("/login", authHandler.Login)
+
+		// Protected by JWT
+		r.Group(func(r chi.Router) {
+			r.Use(auth.JWTAuth(userStore, cfg.JWTSecret))
+			r.Get("/me", authHandler.Me)
+		})
+	})
 
 	// API v1 (protected by Bearer token auth)
 	r.Route("/api/v1", func(r chi.Router) {
@@ -112,7 +156,7 @@ func New(pool *pgxpool.Pool, cfg *config.Config) (http.Handler, *provisioner.Pro
 		})
 	})
 
-	slog.Info("routes registered")
+	slog.Info("routes registered", "cors_origins", cfg.CORSOrigins)
 	return r, prov, nil
 }
 
