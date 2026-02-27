@@ -14,6 +14,7 @@ type Tenant struct {
 	Subdomain            string     `json:"subdomain"`
 	Status               string     `json:"status"`
 	ErrorMessage         *string    `json:"error_message,omitempty"`
+	OwnerID              *string    `json:"owner_id,omitempty"`
 	StripeSubscriptionID *string    `json:"stripe_subscription_id,omitempty"`
 	StripeCustomerID     *string    `json:"stripe_customer_id,omitempty"`
 	HealthStatus         string     `json:"health_status"`
