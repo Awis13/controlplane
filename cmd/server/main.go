@@ -53,7 +53,11 @@ func main() {
 	}
 
 	// Create HTTP server
-	handler := server.New(pool, cfg)
+	handler, prov, err := server.New(pool, cfg)
+	if err != nil {
+		slog.Error("failed to create server", "error", err)
+		os.Exit(1)
+	}
 	srv := &http.Server{
 		Addr:         cfg.ListenAddr,
 		Handler:      handler,
@@ -83,8 +87,22 @@ func main() {
 		os.Exit(1)
 	}
 
-	shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), 10*time.Second)
+	shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), 15*time.Second)
 	defer shutdownCancel()
+
+	// Wait for in-flight provisioning goroutines (with timeout)
+	slog.Info("waiting for provisioner to finish")
+	provDone := make(chan struct{})
+	go func() {
+		prov.Shutdown()
+		close(provDone)
+	}()
+	select {
+	case <-provDone:
+		slog.Info("provisioner finished")
+	case <-time.After(10 * time.Second):
+		slog.Warn("provisioner shutdown timed out after 10s, proceeding with server shutdown")
+	}
 
 	if err := srv.Shutdown(shutdownCtx); err != nil {
 		slog.Error("forced shutdown", "error", err)

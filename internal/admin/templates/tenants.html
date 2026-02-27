@@ -1,0 +1,100 @@
+{{define "content"}}
+<h1>Tenants</h1>
+
+<div class="form-card">
+  <h2>Create Tenant</h2>
+  <form hx-post="/admin/tenants" hx-target="#tenant-list" hx-swap="afterbegin"
+    hx-on::after-request="if(event.detail.successful){ this.reset(); document.querySelector('#tenant-list .empty-row')?.remove(); document.getElementById('flash').innerHTML=''; }">
+    <div class="form-grid">
+      <div>
+        <label for="name">Name</label>
+        <input type="text" id="name" name="name" placeholder="my-tenant" required>
+      </div>
+      <div>
+        <label for="subdomain">Subdomain</label>
+        <input type="text" id="subdomain" name="subdomain" placeholder="my-tenant" required>
+      </div>
+      <div>
+        <label for="project_id">Project</label>
+        <select id="project_id" name="project_id" required>
+          <option value="">Select project...</option>
+          {{range .Projects}}
+          <option value="{{.ID}}">{{.Name}}</option>
+          {{end}}
+        </select>
+      </div>
+      <div>
+        <label for="node_id">Node</label>
+        <select id="node_id" name="node_id" required>
+          <option value="">Select node...</option>
+          {{range .Nodes}}
+          <option value="{{.ID}}">{{.Name}} ({{freeRAM .}} MB free)</option>
+          {{end}}
+        </select>
+      </div>
+      <div>
+        <button type="submit">Create Tenant</button>
+      </div>
+    </div>
+  </form>
+</div>
+
+<!-- Filters -->
+<div class="filter-bar" id="tenant-filters">
+  <select name="status"
+    hx-get="/admin/tenants"
+    hx-target="body"
+    hx-push-url="true"
+    hx-include="#tenant-filters select">
+    <option value="">All Statuses</option>
+    <option value="provisioning" {{if eq .FilterStatus "provisioning"}}selected{{end}}>Provisioning</option>
+    <option value="active" {{if eq .FilterStatus "active"}}selected{{end}}>Active</option>
+    <option value="suspended" {{if eq .FilterStatus "suspended"}}selected{{end}}>Suspended</option>
+    <option value="error" {{if eq .FilterStatus "error"}}selected{{end}}>Error</option>
+    <option value="deleting" {{if eq .FilterStatus "deleting"}}selected{{end}}>Deleting</option>
+    <option value="deleted" {{if eq .FilterStatus "deleted"}}selected{{end}}>Deleted</option>
+  </select>
+  <select name="project_id"
+    hx-get="/admin/tenants"
+    hx-target="body"
+    hx-push-url="true"
+    hx-include="#tenant-filters select">
+    <option value="">All Projects</option>
+    {{range .Projects}}
+    <option value="{{.ID}}" {{if eq $.FilterProject .ID}}selected{{end}}>{{.Name}}</option>
+    {{end}}
+  </select>
+  <select name="node_id"
+    hx-get="/admin/tenants"
+    hx-target="body"
+    hx-push-url="true"
+    hx-include="#tenant-filters select">
+    <option value="">All Nodes</option>
+    {{range .Nodes}}
+    <option value="{{.ID}}" {{if eq $.FilterNode .ID}}selected{{end}}>{{.Name}}</option>
+    {{end}}
+  </select>
+  <span class="text-muted" style="font-size:12px">{{len .Tenants}} of {{.TotalCount}} tenants</span>
+</div>
+
+<table>
+  <thead>
+    <tr>
+      <th>Name</th>
+      <th>Subdomain</th>
+      <th>Project</th>
+      <th>Node</th>
+      <th>LXC ID</th>
+      <th>Status</th>
+      <th></th>
+    </tr>
+  </thead>
+  <tbody id="tenant-list">
+    {{range .Tenants}}
+    {{template "tenant_row" .}}
+    {{else}}
+    <tr class="empty-row"><td colspan="7">No tenants match filters</td></tr>
+    {{end}}
+  </tbody>
+</table>
+{{end}}

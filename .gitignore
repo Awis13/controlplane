@@ -2,4 +2,6 @@
 *.exe
 vendor/
 tmp/
-server
+/server
+Taper_Top_Masonry_Ledge_texts.xlsx
+~$*

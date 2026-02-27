@@ -1,0 +1,10 @@
+{{define "node_row"}}
+<tr>
+  <td><a href="/admin/nodes/{{.ID}}">{{.Name}}</a></td>
+  <td class="mono">{{.TailscaleIP}}</td>
+  <td class="mono">{{.ProxmoxURL}}</td>
+  <td><span class="badge badge-{{.Status}}">{{.Status}}</span></td>
+  <td>{{.AllocatedRAMMB}} / {{.TotalRAMMB}} MB</td>
+  <td class="text-muted">{{fmtTime .CreatedAt}}</td>
+</tr>
+{{end}}

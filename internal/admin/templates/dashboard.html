@@ -1,0 +1,110 @@
+{{define "content"}}
+<h1>Dashboard</h1>
+
+<!-- Summary Cards -->
+<div class="stats">
+  <div class="stat-card">
+    <div class="label">Nodes</div>
+    <div class="value">{{len .Nodes}}</div>
+  </div>
+  <div class="stat-card">
+    <div class="label">Projects</div>
+    <div class="value">{{len .Projects}}</div>
+  </div>
+  <div class="stat-card">
+    <div class="label">Active Tenants</div>
+    <div class="value" style="color: var(--green)">{{.ActiveTenants}} <span class="text-muted" style="font-size:14px">/ {{len .Tenants}}</span></div>
+  </div>
+  <div class="stat-card">
+    <div class="label">RAM Usage</div>
+    <div class="value">{{.AllocatedRAM}} <span class="text-muted" style="font-size:14px">/ {{.TotalRAM}} MB</span></div>
+  </div>
+  <div class="stat-card">
+    <div class="label">Free RAM</div>
+    <div class="value">{{sub .TotalRAM .AllocatedRAM}} <span class="text-muted" style="font-size:14px">MB</span></div>
+  </div>
+  <div class="stat-card">
+    <div class="label">Health</div>
+    <div class="value" style="font-size:14px;margin-top:8px">
+      {{if .HealthyCount}}<span class="badge badge-healthy">{{.HealthyCount}} healthy</span> {{end}}
+      {{if .UnhealthyCount}}<span class="badge badge-unhealthy">{{.UnhealthyCount}} unhealthy</span> {{end}}
+      {{if .UnknownHealthCount}}<span class="badge badge-unknown">{{.UnknownHealthCount}} unknown</span>{{end}}
+      {{if and (not .HealthyCount) (not .UnhealthyCount) (not .UnknownHealthCount)}}<span class="text-muted">No active tenants</span>{{end}}
+    </div>
+  </div>
+</div>
+
+{{if .SuspendedTenants}}
+<div class="flash flash-error" style="margin-bottom:16px">{{.SuspendedTenants}} suspended tenant(s) — {{.ErrorTenants}} in error state</div>
+{{end}}
+
+<!-- RAM per Node -->
+{{if .Nodes}}
+<h2 class="mb-16">Nodes</h2>
+<div class="node-grid">
+  {{range .Nodes}}
+  <div class="detail-card">
+    <div class="flex-between mb-16">
+      <a href="/admin/nodes/{{.ID}}" style="font-weight:600">{{.Name}}</a>
+      <span class="badge badge-{{.Status}}">{{.Status}}</span>
+    </div>
+    <div style="display:flex;justify-content:space-between;font-size:12px;color:var(--text-muted);margin-bottom:4px">
+      <span>{{.AllocatedRAMMB}} / {{.TotalRAMMB}} MB</span>
+      <span>{{ramPercent .}}%</span>
+    </div>
+    <div class="progress-bar">
+      <div class="progress-bar-fill {{ramColor .}}" style="width: {{ramPercent .}}%"></div>
+    </div>
+  </div>
+  {{end}}
+</div>
+{{end}}
+
+<!-- Recent Tenants -->
+{{if .RecentTenants}}
+<h2 class="mt-24 mb-16">Recent Tenants</h2>
+<table>
+  <thead>
+    <tr>
+      <th>Name</th>
+      <th>Project</th>
+      <th>Node</th>
+      <th>Status</th>
+    </tr>
+  </thead>
+  <tbody>
+    {{range .RecentTenants}}
+    <tr>
+      <td><a href="/admin/tenants/{{.ID}}">{{.Name}}</a></td>
+      <td>{{.ProjectName}}</td>
+      <td>{{.NodeName}}</td>
+      <td><span class="badge badge-{{.Status}}">{{.Status}}</span></td>
+    </tr>
+    {{end}}
+  </tbody>
+</table>
+{{end}}
+
+<!-- Recent Activity -->
+{{if .RecentAudit}}
+<h2 class="mt-24 mb-16">Recent Activity</h2>
+<table>
+  <thead>
+    <tr>
+      <th>Action</th>
+      <th>Entity</th>
+      <th>Time</th>
+    </tr>
+  </thead>
+  <tbody>
+    {{range .RecentAudit}}
+    <tr>
+      <td><span class="badge badge-{{.Action}}">{{.Action}}</span></td>
+      <td>{{.EntityType}}</td>
+      <td class="text-muted">{{fmtTime .CreatedAt}}</td>
+    </tr>
+    {{end}}
+  </tbody>
+</table>
+{{end}}
+{{end}}

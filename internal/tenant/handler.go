@@ -10,6 +10,7 @@ import (
 	"github.com/go-chi/chi/v5"
 	"github.com/jackc/pgx/v5/pgconn"
 
+	"controlplane/internal/audit"
 	"controlplane/internal/node"
 	"controlplane/internal/project"
 	"controlplane/internal/response"
@@ -18,13 +19,17 @@ import (
 // TenantStore defines the data operations for tenants.
 type TenantStore interface {
 	List(ctx context.Context) ([]Tenant, error)
+	ListPaginated(ctx context.Context, limit, offset int, status, nodeID, projectID string) ([]Tenant, int, error)
 	GetByID(ctx context.Context, id string) (*Tenant, error)
 	Create(ctx context.Context, req CreateTenantRequest) (*Tenant, error)
+	Update(ctx context.Context, id string, req UpdateTenantRequest) (*Tenant, error)
 	Delete(ctx context.Context, id string) error
 	SetActive(ctx context.Context, id string, lxcID int) error
 	SetError(ctx context.Context, id string, errMsg string) error
 	SetDeleting(ctx context.Context, id string) error
 	SetDeleted(ctx context.Context, id string) error
+	SetSuspended(ctx context.Context, id string) error
+	SetResumed(ctx context.Context, id string) error
 }
 
 // NodeStore defines node operations needed by the tenant handler.
@@ -43,6 +48,8 @@ type ProjectStore interface {
 type Provisioner interface {
 	Provision(tenantID, nodeID, projectID, subdomain string, ramMB int)
 	Deprovision(ctx context.Context, tenantID, nodeID string, lxcID, ramMB int) error
+	Suspend(ctx context.Context, tenantID, nodeID string, lxcID int) error
+	Resume(ctx context.Context, tenantID, nodeID string, lxcID int) error
 }
 
 var subdomainRegexp = regexp.MustCompile(`^[a-z0-9][a-z0-9-]*[a-z0-9]$`)
@@ -60,19 +67,24 @@ type Handler struct {
 	nodeStore    NodeStore
 	projectStore ProjectStore
 	provisioner  Provisioner
+	auditStore   *audit.Store
 }
 
-func NewHandler(store TenantStore, nodeStore NodeStore, projectStore ProjectStore, provisioner Provisioner) *Handler {
+func NewHandler(store TenantStore, nodeStore NodeStore, projectStore ProjectStore, provisioner Provisioner, auditStore *audit.Store) *Handler {
 	return &Handler{
 		store:        store,
 		nodeStore:    nodeStore,
 		projectStore: projectStore,
 		provisioner:  provisioner,
+		auditStore:   auditStore,
 	}
 }
 
 func (h *Handler) List(w http.ResponseWriter, r *http.Request) {
-	tenants, err := h.store.List(r.Context())
+	params := response.ParseListParams(r)
+
+	tenants, total, err := h.store.ListPaginated(r.Context(), params.Limit, params.Offset,
+		params.Status, params.NodeID, params.ProjectID)
 	if err != nil {
 		slog.Error("list tenants", "error", err)
 		response.Error(w, http.StatusInternalServerError, "failed to list tenants")
@@ -81,7 +93,13 @@ func (h *Handler) List(w http.ResponseWriter, r *http.Request) {
 	if tenants == nil {
 		tenants = []Tenant{}
 	}
-	response.JSON(w, http.StatusOK, tenants)
+	response.JSON(w, http.StatusOK, response.ListResult[Tenant]{
+		Items:   tenants,
+		Total:   total,
+		Limit:   params.Limit,
+		Offset:  params.Offset,
+		HasMore: params.Offset+len(tenants) < total,
+	})
 }
 
 func (h *Handler) Get(w http.ResponseWriter, r *http.Request) {
@@ -199,7 +217,158 @@ func (h *Handler) Create(w http.ResponseWriter, r *http.Request) {
 	// Launch async provisioning (fire-and-forget goroutine managed by Provisioner)
 	h.provisioner.Provision(t.ID, req.NodeID, req.ProjectID, req.Subdomain, proj.RAMMB)
 
+	if h.auditStore != nil {
+		h.auditStore.Log(r.Context(), "create", "tenant", t.ID, map[string]string{"name": req.Name, "subdomain": req.Subdomain})
+	}
 	response.JSON(w, http.StatusAccepted, t)
+}
+
+func (h *Handler) Update(w http.ResponseWriter, r *http.Request) {
+	id := chi.URLParam(r, "tenantID")
+	if !response.ValidUUID(id) {
+		response.Error(w, http.StatusBadRequest, "invalid tenant ID format")
+		return
+	}
+
+	var req UpdateTenantRequest
+	if err := response.Decode(r, &req); err != nil {
+		response.Error(w, http.StatusBadRequest, "invalid request body")
+		return
+	}
+
+	t, err := h.store.Update(r.Context(), id, req)
+	if err != nil {
+		if errors.Is(err, ErrNoUpdate) {
+			response.Error(w, http.StatusBadRequest, "no fields to update")
+			return
+		}
+		var pgErr *pgconn.PgError
+		if errors.As(err, &pgErr) && pgErr.Code == "23505" {
+			response.Error(w, http.StatusConflict, "name already exists")
+			return
+		}
+		slog.Error("update tenant", "error", err)
+		response.Error(w, http.StatusInternalServerError, "failed to update tenant")
+		return
+	}
+	if t == nil {
+		response.Error(w, http.StatusNotFound, "tenant not found")
+		return
+	}
+	if h.auditStore != nil {
+		h.auditStore.Log(r.Context(), "update", "tenant", t.ID, nil)
+	}
+	response.JSON(w, http.StatusOK, t)
+}
+
+func (h *Handler) Suspend(w http.ResponseWriter, r *http.Request) {
+	id := chi.URLParam(r, "tenantID")
+	if !response.ValidUUID(id) {
+		response.Error(w, http.StatusBadRequest, "invalid tenant ID format")
+		return
+	}
+
+	t, err := h.store.GetByID(r.Context(), id)
+	if err != nil {
+		slog.Error("get tenant for suspend", "error", err)
+		response.Error(w, http.StatusInternalServerError, "failed to get tenant")
+		return
+	}
+	if t == nil {
+		response.Error(w, http.StatusNotFound, "tenant not found")
+		return
+	}
+
+	if t.Status != "active" {
+		response.Error(w, http.StatusConflict, "tenant must be active to suspend")
+		return
+	}
+
+	// Stop container if LXC ID is set
+	if t.LXCID != nil {
+		if err := h.provisioner.Suspend(r.Context(), t.ID, t.NodeID, *t.LXCID); err != nil {
+			slog.Error("suspend tenant container", "error", err)
+			response.Error(w, http.StatusInternalServerError, "failed to stop container")
+			return
+		}
+	}
+
+	if err := h.store.SetSuspended(r.Context(), id); err != nil {
+		if errors.Is(err, ErrStateConflict) {
+			response.Error(w, http.StatusConflict, "tenant is not in a suspendable state")
+			return
+		}
+		slog.Error("set tenant suspended", "error", err)
+		response.Error(w, http.StatusInternalServerError, "failed to suspend tenant")
+		return
+	}
+
+	if h.auditStore != nil {
+		h.auditStore.Log(r.Context(), "suspend", "tenant", id, nil)
+	}
+
+	t, err = h.store.GetByID(r.Context(), id)
+	if err != nil {
+		slog.Error("get tenant after suspend", "error", err)
+		response.Error(w, http.StatusInternalServerError, "failed to get tenant")
+		return
+	}
+	response.JSON(w, http.StatusOK, t)
+}
+
+func (h *Handler) Resume(w http.ResponseWriter, r *http.Request) {
+	id := chi.URLParam(r, "tenantID")
+	if !response.ValidUUID(id) {
+		response.Error(w, http.StatusBadRequest, "invalid tenant ID format")
+		return
+	}
+
+	t, err := h.store.GetByID(r.Context(), id)
+	if err != nil {
+		slog.Error("get tenant for resume", "error", err)
+		response.Error(w, http.StatusInternalServerError, "failed to get tenant")
+		return
+	}
+	if t == nil {
+		response.Error(w, http.StatusNotFound, "tenant not found")
+		return
+	}
+
+	if t.Status != "suspended" {
+		response.Error(w, http.StatusConflict, "tenant must be suspended to resume")
+		return
+	}
+
+	// Start container if LXC ID is set
+	if t.LXCID != nil {
+		if err := h.provisioner.Resume(r.Context(), t.ID, t.NodeID, *t.LXCID); err != nil {
+			slog.Error("resume tenant container", "error", err)
+			response.Error(w, http.StatusInternalServerError, "failed to start container")
+			return
+		}
+	}
+
+	if err := h.store.SetResumed(r.Context(), id); err != nil {
+		if errors.Is(err, ErrStateConflict) {
+			response.Error(w, http.StatusConflict, "tenant is not in a resumable state")
+			return
+		}
+		slog.Error("set tenant resumed", "error", err)
+		response.Error(w, http.StatusInternalServerError, "failed to resume tenant")
+		return
+	}
+
+	if h.auditStore != nil {
+		h.auditStore.Log(r.Context(), "resume", "tenant", id, nil)
+	}
+
+	t, err = h.store.GetByID(r.Context(), id)
+	if err != nil {
+		slog.Error("get tenant after resume", "error", err)
+		response.Error(w, http.StatusInternalServerError, "failed to get tenant")
+		return
+	}
+	response.JSON(w, http.StatusOK, t)
 }
 
 func (h *Handler) Delete(w http.ResponseWriter, r *http.Request) {
@@ -270,6 +439,10 @@ func (h *Handler) Delete(w http.ResponseWriter, r *http.Request) {
 			response.Error(w, http.StatusInternalServerError, "failed to delete tenant")
 			return
 		}
+	}
+
+	if h.auditStore != nil {
+		h.auditStore.Log(r.Context(), "delete", "tenant", id, nil)
 	}
 
 	// Re-read tenant to return updated state

@@ -1,0 +1,105 @@
+{{define "content"}}
+<div class="flex-between mb-16">
+  <h1 style="margin-bottom:0">Tenant: {{.Tenant.Name}}</h1>
+  <div class="actions-bar" style="margin-bottom:0">
+    {{if eq .Tenant.Status "active"}}
+    <button class="btn-warning btn-sm" hx-post="/admin/tenants/{{.Tenant.ID}}/suspend" hx-confirm="Suspend tenant {{.Tenant.Name}}?" hx-target="body">Suspend</button>
+    {{end}}
+    {{if eq .Tenant.Status "suspended"}}
+    <button class="btn-sm" hx-post="/admin/tenants/{{.Tenant.ID}}/resume" hx-confirm="Resume tenant {{.Tenant.Name}}?" hx-target="body">Resume</button>
+    {{end}}
+    {{if or (eq .Tenant.Status "active") (eq .Tenant.Status "error")}}
+    <button class="btn-danger btn-sm" hx-delete="/admin/tenants/{{.Tenant.ID}}" hx-confirm="Delete tenant {{.Tenant.Name}}? This cannot be undone." hx-target="body">Delete</button>
+    {{end}}
+  </div>
+</div>
+
+<div class="detail-grid">
+  <div class="detail-card">
+    <h2>Information</h2>
+    <div class="detail-row">
+      <span class="detail-label">ID</span>
+      <span class="detail-value mono">{{.Tenant.ID}}</span>
+    </div>
+    <div class="detail-row">
+      <span class="detail-label">Name</span>
+      <span class="detail-value">{{.Tenant.Name}}</span>
+    </div>
+    <div class="detail-row">
+      <span class="detail-label">Subdomain</span>
+      <span class="detail-value mono">{{.Tenant.Subdomain}}</span>
+    </div>
+    <div class="detail-row">
+      <span class="detail-label">LXC ID</span>
+      <span class="detail-value mono">{{if .Tenant.LXCID}}{{derefInt .Tenant.LXCID}}{{else}}—{{end}}</span>
+    </div>
+    <div class="detail-row">
+      <span class="detail-label">Status</span>
+      <span class="detail-value"><span class="badge badge-{{.Tenant.Status}}">{{.Tenant.Status}}</span></span>
+    </div>
+    {{if .Tenant.ErrorMessage}}
+    <div class="detail-row">
+      <span class="detail-label">Error</span>
+      <span class="detail-value" style="color: var(--red)">{{derefStr .Tenant.ErrorMessage}}</span>
+    </div>
+    {{end}}
+    <div class="detail-row">
+      <span class="detail-label">Project</span>
+      <span class="detail-value"><a href="/admin/projects/{{.Tenant.ProjectID}}">{{.ProjectName}}</a></span>
+    </div>
+    <div class="detail-row">
+      <span class="detail-label">Node</span>
+      <span class="detail-value"><a href="/admin/nodes/{{.Tenant.NodeID}}">{{.NodeName}}</a></span>
+    </div>
+    <div class="detail-row">
+      <span class="detail-label">Created</span>
+      <span class="detail-value">{{fmtTime .Tenant.CreatedAt}}</span>
+    </div>
+    <div class="detail-row">
+      <span class="detail-label">Updated</span>
+      <span class="detail-value">{{fmtTime .Tenant.UpdatedAt}}</span>
+    </div>
+  </div>
+
+  <div class="detail-card">
+    <h2>Billing & Health</h2>
+    <div class="detail-row">
+      <span class="detail-label">Stripe Customer ID</span>
+      <span class="detail-value mono">{{derefStr .Tenant.StripeCustomerID}}</span>
+    </div>
+    <div class="detail-row">
+      <span class="detail-label">Stripe Subscription ID</span>
+      <span class="detail-value mono">{{derefStr .Tenant.StripeSubscriptionID}}</span>
+    </div>
+    <div class="detail-row">
+      <span class="detail-label">Health Status</span>
+      <span class="detail-value"><span class="badge badge-{{.Tenant.HealthStatus}}">{{.Tenant.HealthStatus}}</span></span>
+    </div>
+    <div class="detail-row">
+      <span class="detail-label">Last Health Check</span>
+      <span class="detail-value">{{if .Tenant.HealthCheckedAt}}{{fmtTime (derefTime .Tenant.HealthCheckedAt)}}{{else}}Never{{end}}</span>
+    </div>
+  </div>
+</div>
+
+<!-- Audit log entries for this tenant -->
+{{if .AuditEntries}}
+<h2 class="mb-16">Recent Activity</h2>
+<table>
+  <thead>
+    <tr>
+      <th>Action</th>
+      <th>Time</th>
+    </tr>
+  </thead>
+  <tbody>
+    {{range .AuditEntries}}
+    <tr>
+      <td>{{.Action}}</td>
+      <td class="text-muted">{{fmtTime .CreatedAt}}</td>
+    </tr>
+    {{end}}
+  </tbody>
+</table>
+{{end}}
+{{end}}

@@ -1,0 +1,52 @@
+{{define "content"}}
+<h1>Settings</h1>
+
+<div class="detail-grid">
+  <div class="detail-card">
+    <h2>WebAuthn Credentials</h2>
+    {{if .Credentials}}
+    <table>
+      <thead>
+        <tr>
+          <th>Created</th>
+          <th>Sign Count</th>
+          <th></th>
+        </tr>
+      </thead>
+      <tbody>
+        {{range .Credentials}}
+        <tr>
+          <td class="text-muted">{{fmtTime .CreatedAt}}</td>
+          <td>{{.SignCount}}</td>
+          <td class="text-right">
+            <button class="btn-danger btn-xs" hx-delete="/admin/webauthn/credentials/{{.ID}}" hx-confirm="Delete this credential?" hx-target="body">Delete</button>
+          </td>
+        </tr>
+        {{end}}
+      </tbody>
+    </table>
+    {{else}}
+    <p class="text-muted">No credentials registered.</p>
+    {{end}}
+    <div class="mt-16">
+      <button id="register-btn" onclick="registerNewCredential()">Register New Credential</button>
+    </div>
+  </div>
+
+  <div class="detail-card">
+    <h2>System Health</h2>
+    <div class="detail-row">
+      <span class="detail-label">Database</span>
+      <span class="detail-value"><span class="badge badge-{{.DBStatus}}">{{.DBStatus}}</span></span>
+    </div>
+    <div class="detail-row">
+      <span class="detail-label">Nodes</span>
+      <span class="detail-value">{{.NodeCount}} registered</span>
+    </div>
+    <div class="detail-row">
+      <span class="detail-label">Active Tenants</span>
+      <span class="detail-value">{{.ActiveTenants}}</span>
+    </div>
+  </div>
+</div>
+{{end}}

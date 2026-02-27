@@ -28,6 +28,8 @@ services:
       LOG_LEVEL: ${LOG_LEVEL:-info}
       API_TOKEN: ${API_TOKEN}
       ENCRYPTION_KEY: ${ENCRYPTION_KEY}
+      WEBAUTHN_RPID: ${WEBAUTHN_RPID:-}
+      WEBAUTHN_ORIGIN: ${WEBAUTHN_ORIGIN:-}
     depends_on:
       postgres:
         condition: service_healthy

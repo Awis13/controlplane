@@ -3,6 +3,7 @@ package tenant
 import (
 	"context"
 	"fmt"
+	"strings"
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -18,13 +19,14 @@ func NewStore(pool *pgxpool.Pool) *Store {
 }
 
 // tenantColumns is the list of columns selected in all tenant queries.
-const tenantColumns = `id, name, project_id, node_id, lxc_id, subdomain, status, error_message, stripe_subscription_id, created_at, updated_at`
+const tenantColumns = `id, name, project_id, node_id, lxc_id, subdomain, status, error_message, stripe_subscription_id, stripe_customer_id, health_status, health_checked_at, created_at, updated_at`
 
 // scanTenant scans a single row into a Tenant struct.
 func scanTenant(row pgx.Row) (*Tenant, error) {
 	var t Tenant
 	err := row.Scan(&t.ID, &t.Name, &t.ProjectID, &t.NodeID, &t.LXCID,
-		&t.Subdomain, &t.Status, &t.ErrorMessage, &t.StripeSubscriptionID, &t.CreatedAt, &t.UpdatedAt)
+		&t.Subdomain, &t.Status, &t.ErrorMessage, &t.StripeSubscriptionID,
+		&t.StripeCustomerID, &t.HealthStatus, &t.HealthCheckedAt, &t.CreatedAt, &t.UpdatedAt)
 	if err != nil {
 		return nil, err
 	}
@@ -52,6 +54,65 @@ func (s *Store) List(ctx context.Context) ([]Tenant, error) {
 	}
 
 	return tenants, nil
+}
+
+// ListPaginated returns a filtered, paginated list of tenants.
+func (s *Store) ListPaginated(ctx context.Context, limit, offset int, status, nodeID, projectID string) ([]Tenant, int, error) {
+	whereClauses := []string{}
+	args := []any{}
+	argIdx := 1
+
+	if status != "" {
+		whereClauses = append(whereClauses, fmt.Sprintf("status = $%d", argIdx))
+		args = append(args, status)
+		argIdx++
+	}
+	if nodeID != "" {
+		whereClauses = append(whereClauses, fmt.Sprintf("node_id = $%d", argIdx))
+		args = append(args, nodeID)
+		argIdx++
+	}
+	if projectID != "" {
+		whereClauses = append(whereClauses, fmt.Sprintf("project_id = $%d", argIdx))
+		args = append(args, projectID)
+		argIdx++
+	}
+
+	where := ""
+	if len(whereClauses) > 0 {
+		where = "WHERE " + strings.Join(whereClauses, " AND ")
+	}
+
+	args = append(args, limit, offset)
+	query := fmt.Sprintf(
+		`SELECT %s, COUNT(*) OVER() AS total_count
+		 FROM tenants %s ORDER BY created_at DESC LIMIT $%d OFFSET $%d`,
+		tenantColumns, where, argIdx, argIdx+1,
+	)
+
+	rows, err := s.pool.Query(ctx, query, args...)
+	if err != nil {
+		return nil, 0, fmt.Errorf("query tenants: %w", err)
+	}
+	defer rows.Close()
+
+	var tenants []Tenant
+	var total int
+	for rows.Next() {
+		var t Tenant
+		err := rows.Scan(&t.ID, &t.Name, &t.ProjectID, &t.NodeID, &t.LXCID,
+			&t.Subdomain, &t.Status, &t.ErrorMessage, &t.StripeSubscriptionID,
+			&t.StripeCustomerID, &t.HealthStatus, &t.HealthCheckedAt, &t.CreatedAt, &t.UpdatedAt, &total)
+		if err != nil {
+			return nil, 0, fmt.Errorf("scan tenant: %w", err)
+		}
+		tenants = append(tenants, t)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, 0, fmt.Errorf("iterate tenants: %w", err)
+	}
+
+	return tenants, total, nil
 }
 
 func (s *Store) GetByID(ctx context.Context, id string) (*Tenant, error) {
@@ -89,8 +150,83 @@ func (s *Store) Delete(ctx context.Context, id string) error {
 	return nil
 }
 
+// ErrNoUpdate is returned when an update request has no fields to update.
+var ErrNoUpdate = fmt.Errorf("no fields to update")
+
 // ErrStateConflict is returned when a status transition is invalid (row was already transitioned).
 var ErrStateConflict = fmt.Errorf("tenant state conflict")
+
+// Update applies partial updates to a tenant. Only non-nil fields are updated.
+func (s *Store) Update(ctx context.Context, id string, req UpdateTenantRequest) (*Tenant, error) {
+	setClauses := []string{}
+	args := []any{}
+	argIdx := 1
+
+	if req.Name != nil {
+		setClauses = append(setClauses, fmt.Sprintf("name = $%d", argIdx))
+		args = append(args, *req.Name)
+		argIdx++
+	}
+	if req.StripeSubscriptionID != nil {
+		setClauses = append(setClauses, fmt.Sprintf("stripe_subscription_id = $%d", argIdx))
+		args = append(args, *req.StripeSubscriptionID)
+		argIdx++
+	}
+	if req.StripeCustomerID != nil {
+		setClauses = append(setClauses, fmt.Sprintf("stripe_customer_id = $%d", argIdx))
+		args = append(args, *req.StripeCustomerID)
+		argIdx++
+	}
+
+	if len(setClauses) == 0 {
+		return nil, ErrNoUpdate
+	}
+
+	args = append(args, id)
+	query := fmt.Sprintf(
+		"UPDATE tenants SET %s WHERE id = $%d RETURNING %s",
+		strings.Join(setClauses, ", "), argIdx, tenantColumns,
+	)
+
+	t, err := scanTenant(s.pool.QueryRow(ctx, query, args...))
+	if err != nil {
+		if err == pgx.ErrNoRows {
+			return nil, nil
+		}
+		return nil, fmt.Errorf("update tenant: %w", err)
+	}
+	return t, nil
+}
+
+// SetSuspended transitions a tenant from 'active' to 'suspended'.
+func (s *Store) SetSuspended(ctx context.Context, id string) error {
+	tag, err := s.pool.Exec(ctx,
+		`UPDATE tenants SET status = 'suspended'
+		 WHERE id = $1 AND status = 'active'`,
+		id)
+	if err != nil {
+		return fmt.Errorf("set tenant suspended: %w", err)
+	}
+	if tag.RowsAffected() == 0 {
+		return ErrStateConflict
+	}
+	return nil
+}
+
+// SetResumed transitions a tenant from 'suspended' to 'active'.
+func (s *Store) SetResumed(ctx context.Context, id string) error {
+	tag, err := s.pool.Exec(ctx,
+		`UPDATE tenants SET status = 'active'
+		 WHERE id = $1 AND status = 'suspended'`,
+		id)
+	if err != nil {
+		return fmt.Errorf("set tenant resumed: %w", err)
+	}
+	if tag.RowsAffected() == 0 {
+		return ErrStateConflict
+	}
+	return nil
+}
 
 // SetActive marks a tenant as active and records its LXC ID.
 // Only transitions from 'provisioning' status.

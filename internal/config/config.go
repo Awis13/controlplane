@@ -11,6 +11,8 @@ type Config struct {
 	LogLevel      string
 	APIToken      string
 	EncryptionKey string
+	WebAuthnRPID  string
+	WebAuthnOrigin string
 }
 
 // Load reads configuration from environment variables.
@@ -30,11 +32,13 @@ func Load() (*Config, error) {
 	}
 
 	return &Config{
-		DatabaseURL:   dbURL,
-		ListenAddr:    getEnv("LISTEN_ADDR", ":8080"),
-		LogLevel:      getEnv("LOG_LEVEL", "info"),
-		APIToken:      apiToken,
-		EncryptionKey: encKey,
+		DatabaseURL:    dbURL,
+		ListenAddr:     getEnv("LISTEN_ADDR", ":8080"),
+		LogLevel:       getEnv("LOG_LEVEL", "info"),
+		APIToken:       apiToken,
+		EncryptionKey:  encKey,
+		WebAuthnRPID:   os.Getenv("WEBAUTHN_RPID"),
+		WebAuthnOrigin: os.Getenv("WEBAUTHN_ORIGIN"),
 	}, nil
 }
 
