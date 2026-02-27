@@ -125,6 +125,7 @@ func New(pool *pgxpool.Pool, cfg *config.Config) (http.Handler, *provisioner.Pro
 		r.Use(auth.JWTAuth(userStore, cfg.JWTSecret))
 		r.Get("/", userTenantHandler.List)
 		r.Post("/", userTenantHandler.Create)
+		r.Get("/{tenantID}", userTenantHandler.Get)
 	})
 
 	// API v1 (protected by Bearer token auth)

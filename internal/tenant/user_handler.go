@@ -6,6 +6,7 @@ import (
 	"log/slog"
 	"net/http"
 
+	"github.com/go-chi/chi/v5"
 	"github.com/jackc/pgx/v5/pgconn"
 
 	"controlplane/internal/auth"
@@ -81,6 +82,34 @@ func (h *UserHandler) List(w http.ResponseWriter, r *http.Request) {
 		Offset:  0,
 		HasMore: false,
 	})
+}
+
+// Get returns a single tenant owned by the authenticated user.
+func (h *UserHandler) Get(w http.ResponseWriter, r *http.Request) {
+	u := auth.UserFromContext(r.Context())
+	if u == nil {
+		response.Error(w, http.StatusUnauthorized, "not authenticated")
+		return
+	}
+
+	id := chi.URLParam(r, "tenantID")
+	if !response.ValidUUID(id) {
+		response.Error(w, http.StatusBadRequest, "invalid tenant ID format")
+		return
+	}
+
+	t, err := h.store.GetByID(r.Context(), id)
+	if err != nil {
+		slog.Error("get user tenant", "error", err, "tenant_id", id)
+		response.Error(w, http.StatusInternalServerError, "failed to get tenant")
+		return
+	}
+	if t == nil || t.OwnerID == nil || *t.OwnerID != u.ID.String() {
+		response.Error(w, http.StatusNotFound, "tenant not found")
+		return
+	}
+
+	response.JSON(w, http.StatusOK, t)
 }
 
 // Create creates a tenant for the authenticated user with auto-selected project and node.
