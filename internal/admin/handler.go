@@ -77,13 +77,14 @@ type Handler struct {
 	auditStore       *audit.Store
 	provisioner      Provisioner
 	encryptionKey    string
+	setupToken       string
 	webauthn         *webauthn.WebAuthn
 	webauthnStore    *WebAuthnStore
 	webauthnSessions *webauthnSessions
 }
 
 // NewHandler creates a new admin Handler. Returns error if templates fail to parse.
-func NewHandler(nodes NodeStore, projects ProjectStore, tenants TenantStore, auditStore *audit.Store, provisioner Provisioner, encryptionKey string, wa *webauthn.WebAuthn, waStore *WebAuthnStore) (*Handler, error) {
+func NewHandler(nodes NodeStore, projects ProjectStore, tenants TenantStore, auditStore *audit.Store, provisioner Provisioner, encryptionKey string, setupToken string, wa *webauthn.WebAuthn, waStore *WebAuthnStore) (*Handler, error) {
 	tmpl, err := ParseTemplates()
 	if err != nil {
 		return nil, err
@@ -96,6 +97,7 @@ func NewHandler(nodes NodeStore, projects ProjectStore, tenants TenantStore, aud
 		auditStore:       auditStore,
 		provisioner:      provisioner,
 		encryptionKey:    encryptionKey,
+		setupToken:       setupToken,
 		webauthn:         wa,
 		webauthnStore:    waStore,
 		webauthnSessions: newWebAuthnSessions(),

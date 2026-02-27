@@ -284,15 +284,7 @@ func (h *Handler) Suspend(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Stop container if LXC ID is set
-	if t.LXCID != nil {
-		if err := h.provisioner.Suspend(r.Context(), t.ID, t.NodeID, *t.LXCID); err != nil {
-			slog.Error("suspend tenant container", "error", err)
-			response.Error(w, http.StatusInternalServerError, "failed to stop container")
-			return
-		}
-	}
-
+	// DB first: mark as suspended
 	if err := h.store.SetSuspended(r.Context(), id); err != nil {
 		if errors.Is(err, ErrStateConflict) {
 			response.Error(w, http.StatusConflict, "tenant is not in a suspendable state")
@@ -301,6 +293,19 @@ func (h *Handler) Suspend(w http.ResponseWriter, r *http.Request) {
 		slog.Error("set tenant suspended", "error", err)
 		response.Error(w, http.StatusInternalServerError, "failed to suspend tenant")
 		return
+	}
+
+	// Then stop container; rollback DB on failure
+	if t.LXCID != nil {
+		if err := h.provisioner.Suspend(r.Context(), t.ID, t.NodeID, *t.LXCID); err != nil {
+			slog.Error("suspend tenant container", "error", err)
+			// Rollback: restore active state
+			if rbErr := h.store.SetResumed(r.Context(), id); rbErr != nil {
+				slog.Error("rollback suspend: failed to restore active state", "error", rbErr)
+			}
+			response.Error(w, http.StatusInternalServerError, "failed to stop container")
+			return
+		}
 	}
 
 	if h.auditStore != nil {
@@ -339,15 +344,7 @@ func (h *Handler) Resume(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Start container if LXC ID is set
-	if t.LXCID != nil {
-		if err := h.provisioner.Resume(r.Context(), t.ID, t.NodeID, *t.LXCID); err != nil {
-			slog.Error("resume tenant container", "error", err)
-			response.Error(w, http.StatusInternalServerError, "failed to start container")
-			return
-		}
-	}
-
+	// DB first: mark as active
 	if err := h.store.SetResumed(r.Context(), id); err != nil {
 		if errors.Is(err, ErrStateConflict) {
 			response.Error(w, http.StatusConflict, "tenant is not in a resumable state")
@@ -356,6 +353,19 @@ func (h *Handler) Resume(w http.ResponseWriter, r *http.Request) {
 		slog.Error("set tenant resumed", "error", err)
 		response.Error(w, http.StatusInternalServerError, "failed to resume tenant")
 		return
+	}
+
+	// Then start container; rollback DB on failure
+	if t.LXCID != nil {
+		if err := h.provisioner.Resume(r.Context(), t.ID, t.NodeID, *t.LXCID); err != nil {
+			slog.Error("resume tenant container", "error", err)
+			// Rollback: restore suspended state
+			if rbErr := h.store.SetSuspended(r.Context(), id); rbErr != nil {
+				slog.Error("rollback resume: failed to restore suspended state", "error", rbErr)
+			}
+			response.Error(w, http.StatusInternalServerError, "failed to start container")
+			return
+		}
 	}
 
 	if h.auditStore != nil {

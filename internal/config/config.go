@@ -6,13 +6,14 @@ import (
 )
 
 type Config struct {
-	DatabaseURL   string
-	ListenAddr    string
-	LogLevel      string
-	APIToken      string
-	EncryptionKey string
-	WebAuthnRPID  string
+	DatabaseURL    string
+	ListenAddr     string
+	LogLevel       string
+	APIToken       string
+	EncryptionKey  string
+	WebAuthnRPID   string
 	WebAuthnOrigin string
+	SetupToken     string // optional: required for first WebAuthn registration
 }
 
 // Load reads configuration from environment variables.
@@ -33,12 +34,13 @@ func Load() (*Config, error) {
 
 	return &Config{
 		DatabaseURL:    dbURL,
-		ListenAddr:     getEnv("LISTEN_ADDR", ":8080"),
+		ListenAddr:     getEnv("LISTEN_ADDR", "127.0.0.1:8080"),
 		LogLevel:       getEnv("LOG_LEVEL", "info"),
 		APIToken:       apiToken,
 		EncryptionKey:  encKey,
 		WebAuthnRPID:   os.Getenv("WEBAUTHN_RPID"),
 		WebAuthnOrigin: os.Getenv("WEBAUTHN_ORIGIN"),
+		SetupToken:     os.Getenv("SETUP_TOKEN"),
 	}, nil
 }
 

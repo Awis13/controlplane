@@ -2,6 +2,7 @@ package admin
 
 import (
 	"crypto/rand"
+	"crypto/subtle"
 	"encoding/base64"
 	"encoding/json"
 	"log/slog"
@@ -121,6 +122,20 @@ func (h *Handler) registerBegin(w http.ResponseWriter, r *http.Request) {
 	if has && !isAuthenticated(r, h.encryptionKey) {
 		jsonError(w, "forbidden", 403)
 		return
+	}
+
+	if !has {
+		// First registration — require setup token
+		if h.setupToken == "" {
+			slog.Warn("admin: first registration attempted but SETUP_TOKEN not configured")
+			jsonError(w, "setup token required for first registration", 403)
+			return
+		}
+		providedToken := r.Header.Get("X-Setup-Token")
+		if subtle.ConstantTimeCompare([]byte(providedToken), []byte(h.setupToken)) != 1 {
+			jsonError(w, "invalid setup token", 403)
+			return
+		}
 	}
 
 	creds, err := h.webauthnStore.ListCredentials(ctx)
