@@ -19,7 +19,7 @@ const userContextKey contextKey = "auth_user"
 
 // JWTAuth returns middleware that validates JWT Bearer tokens and sets the user in context.
 // This is separate from the existing admin WebAuthn auth and the API Bearer token auth.
-func JWTAuth(userStore *user.Store, jwtSecret string) func(http.Handler) http.Handler {
+func JWTAuth(userStore *user.Store, tokenStore *TokenStore, jwtSecret string) func(http.Handler) http.Handler {
 	secret := []byte(jwtSecret)
 
 	return func(next http.Handler) http.Handler {
@@ -52,6 +52,20 @@ func JWTAuth(userStore *user.Store, jwtSecret string) func(http.Handler) http.Ha
 			if !ok {
 				response.Error(w, http.StatusUnauthorized, "invalid token claims")
 				return
+			}
+
+			// Проверяем отозван ли токен по jti
+			if jti, ok := claims["jti"].(string); ok && jti != "" && tokenStore != nil {
+				revoked, err := tokenStore.IsRevoked(r.Context(), jti)
+				if err != nil {
+					slog.Error("jwt middleware: check revocation", "error", err)
+					response.Error(w, http.StatusInternalServerError, "failed to verify token")
+					return
+				}
+				if revoked {
+					response.Error(w, http.StatusUnauthorized, "token has been revoked")
+					return
+				}
 			}
 
 			sub, ok := claims["sub"].(string)

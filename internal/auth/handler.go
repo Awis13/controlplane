@@ -6,6 +6,8 @@ import (
 	"log/slog"
 	"net/http"
 	"net/mail"
+	"strings"
+	"sync"
 	"time"
 
 	"github.com/golang-jwt/jwt/v5"
@@ -18,18 +20,70 @@ import (
 )
 
 const (
-	bcryptCost      = 12
-	tokenExpiration = 24 * time.Hour
-	minPasswordLen  = 12
+	bcryptCost       = 12
+	tokenExpiration  = 24 * time.Hour
+	minPasswordLen   = 12
+	maxLoginAttempts = 5
+	loginLimitWindow = 15 * time.Minute
 )
+
+// loginLimiter tracks failed login attempts per email.
+type loginLimiter struct {
+	mu      sync.Mutex
+	entries map[string]*limitEntry
+}
+
+type limitEntry struct {
+	failures int
+	lastFail time.Time
+}
+
+func (l *loginLimiter) check(email string) bool {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+
+	e := l.entries[email]
+	if e == nil {
+		return true
+	}
+	if time.Since(e.lastFail) > loginLimitWindow {
+		delete(l.entries, email)
+		return true
+	}
+	return e.failures < maxLoginAttempts
+}
+
+func (l *loginLimiter) recordFailure(email string) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+
+	if l.entries == nil {
+		l.entries = make(map[string]*limitEntry)
+	}
+	e := l.entries[email]
+	if e == nil {
+		e = &limitEntry{}
+		l.entries[email] = e
+	}
+	e.failures++
+	e.lastFail = time.Now()
+}
+
+func (l *loginLimiter) reset(email string) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	delete(l.entries, email)
+}
 
 type Handler struct {
 	userStore         *user.Store
+	tokenStore        *TokenStore
 	jwtSecret         []byte
 	registrationToken string
+	limiter           loginLimiter
 }
 
-func NewHandler(userStore *user.Store, jwtSecret, registrationToken string) *Handler {
+func NewHandler(userStore *user.Store, tokenStore *TokenStore, jwtSecret, registrationToken string) *Handler {
 	if registrationToken != "" {
 		slog.Info("registration gated by REGISTRATION_TOKEN")
 	} else {
@@ -37,6 +91,7 @@ func NewHandler(userStore *user.Store, jwtSecret, registrationToken string) *Han
 	}
 	return &Handler{
 		userStore:         userStore,
+		tokenStore:        tokenStore,
 		jwtSecret:         []byte(jwtSecret),
 		registrationToken: registrationToken,
 	}
@@ -152,6 +207,12 @@ func (h *Handler) Login(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Rate limit per email
+	if !h.limiter.check(req.Email) {
+		response.Error(w, http.StatusTooManyRequests, "too many login attempts, try again later")
+		return
+	}
+
 	u, err := h.userStore.GetByEmail(r.Context(), req.Email)
 	if err != nil {
 		slog.Error("get user by email", "error", err)
@@ -159,14 +220,19 @@ func (h *Handler) Login(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if u == nil {
+		h.limiter.recordFailure(req.Email)
 		response.Error(w, http.StatusUnauthorized, "invalid email or password")
 		return
 	}
 
 	if err := bcrypt.CompareHashAndPassword([]byte(u.PasswordHash), []byte(req.Password)); err != nil {
+		h.limiter.recordFailure(req.Email)
 		response.Error(w, http.StatusUnauthorized, "invalid email or password")
 		return
 	}
+
+	// Успешный логин — сбрасываем счётчик
+	h.limiter.reset(req.Email)
 
 	token, err := h.generateToken(u)
 	if err != nil {
@@ -179,6 +245,51 @@ func (h *Handler) Login(w http.ResponseWriter, r *http.Request) {
 		Token: token,
 		User:  toUserView(u),
 	})
+}
+
+// Logout handles POST /api/v1/auth/logout.
+func (h *Handler) Logout(w http.ResponseWriter, r *http.Request) {
+	u := UserFromContext(r.Context())
+	if u == nil {
+		response.Error(w, http.StatusUnauthorized, "not authenticated")
+		return
+	}
+
+	// Извлекаем jti из текущего токена
+	authHeader := r.Header.Get("Authorization")
+	tokenStr := strings.TrimPrefix(authHeader, "Bearer ")
+
+	token, err := jwt.Parse(tokenStr, func(t *jwt.Token) (any, error) {
+		return h.jwtSecret, nil
+	})
+	if err != nil {
+		response.Error(w, http.StatusBadRequest, "invalid token")
+		return
+	}
+
+	claims, ok := token.Claims.(jwt.MapClaims)
+	if !ok {
+		response.Error(w, http.StatusBadRequest, "invalid token claims")
+		return
+	}
+
+	jti, _ := claims["jti"].(string)
+	if jti == "" {
+		// Старый токен без jti — просто OK
+		response.JSON(w, http.StatusOK, map[string]string{"status": "logged out"})
+		return
+	}
+
+	exp, _ := claims["exp"].(float64)
+	expiresAt := time.Unix(int64(exp), 0)
+
+	if err := h.tokenStore.Revoke(r.Context(), jti, u.ID, expiresAt); err != nil {
+		slog.Error("revoke token", "error", err)
+		response.Error(w, http.StatusInternalServerError, "failed to revoke token")
+		return
+	}
+
+	response.JSON(w, http.StatusOK, map[string]string{"status": "logged out"})
 }
 
 // Me handles GET /api/v1/auth/me.
@@ -196,6 +307,7 @@ func (h *Handler) generateToken(u *user.User) (string, error) {
 	claims := jwt.MapClaims{
 		"sub":   u.ID.String(),
 		"email": u.Email,
+		"jti":   uuid.New().String(),
 		"exp":   now.Add(tokenExpiration).Unix(),
 		"iat":   now.Unix(),
 	}

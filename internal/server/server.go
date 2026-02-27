@@ -142,7 +142,8 @@ func New(pool *pgxpool.Pool, cfg *config.Config) (http.Handler, *provisioner.Pro
 	})
 
 	// User auth (JWT-based, separate from admin WebAuthn and API Bearer token)
-	authHandler := auth.NewHandler(userStore, cfg.JWTSecret, cfg.RegistrationToken)
+	tokenStore := auth.NewTokenStore(pool)
+	authHandler := auth.NewHandler(userStore, tokenStore, cfg.JWTSecret, cfg.RegistrationToken)
 	r.Route("/api/v1/auth", func(r chi.Router) {
 		r.Use(httprate.LimitByIP(10, time.Minute))
 		r.Post("/register", authHandler.Register)
@@ -150,8 +151,9 @@ func New(pool *pgxpool.Pool, cfg *config.Config) (http.Handler, *provisioner.Pro
 
 		// Protected by JWT
 		r.Group(func(r chi.Router) {
-			r.Use(auth.JWTAuth(userStore, cfg.JWTSecret))
+			r.Use(auth.JWTAuth(userStore, tokenStore, cfg.JWTSecret))
 			r.Get("/me", authHandler.Me)
+			r.Post("/logout", authHandler.Logout)
 		})
 	})
 
@@ -159,7 +161,7 @@ func New(pool *pgxpool.Pool, cfg *config.Config) (http.Handler, *provisioner.Pro
 	userTenantHandler := tenant.NewUserHandler(tenantStore, nodeStore, projectStore, prov)
 	r.Route("/api/v1/user/tenants", func(r chi.Router) {
 		r.Use(httprate.LimitByIP(20, time.Minute))
-		r.Use(auth.JWTAuth(userStore, cfg.JWTSecret))
+		r.Use(auth.JWTAuth(userStore, tokenStore, cfg.JWTSecret))
 		r.Get("/", userTenantHandler.List)
 		r.Post("/", userTenantHandler.Create)
 		r.Get("/{tenantID}", userTenantHandler.Get)
