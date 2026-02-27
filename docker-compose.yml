@@ -30,6 +30,9 @@ services:
       ENCRYPTION_KEY: ${ENCRYPTION_KEY}
       WEBAUTHN_RPID: ${WEBAUTHN_RPID:-}
       WEBAUTHN_ORIGIN: ${WEBAUTHN_ORIGIN:-}
+      WG_HUB_PUBLIC_KEY: ${WG_HUB_PUBLIC_KEY:-}
+      WG_HUB_ENDPOINT: ${WG_HUB_ENDPOINT:-}
+      WG_NETWORK_CIDR: ${WG_NETWORK_CIDR:-10.10.0.0/24}
     depends_on:
       postgres:
         condition: service_healthy

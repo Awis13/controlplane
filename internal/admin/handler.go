@@ -72,6 +72,8 @@ type Handler struct {
 	webauthn         *webauthn.WebAuthn
 	webauthnStore    *WebAuthnStore
 	webauthnSessions *webauthnSessions
+	wgService        WireGuardService
+	wgStore          WireGuardStore
 }
 
 // NewHandler creates a new admin Handler. Returns error if templates fail to parse.
@@ -93,6 +95,12 @@ func NewHandler(nodes NodeStore, projects ProjectStore, tenants TenantStore, aud
 		webauthnStore:    waStore,
 		webauthnSessions: newWebAuthnSessions(),
 	}, nil
+}
+
+// SetWireGuard подключает WireGuard сервис и хранилище к admin handler.
+func (h *Handler) SetWireGuard(svc WireGuardService, store WireGuardStore) {
+	h.wgService = svc
+	h.wgStore = store
 }
 
 // Routes returns a chi.Router with all admin routes.
@@ -159,6 +167,15 @@ func (h *Handler) Routes() chi.Router {
 		r.Post("/tenants/{id}/suspend", h.suspendTenant)
 		r.Post("/tenants/{id}/resume", h.resumeTenant)
 		r.Get("/tenants/{id}/row", h.tenantRow)
+
+		// Network (WireGuard peers)
+		r.Get("/network", h.networkPage)
+		r.Post("/network/peers", h.createPeerAdmin)
+		r.Get("/network/peers/{id}", h.peerDetail)
+		r.Put("/network/peers/{id}", h.updatePeerAdmin)
+		r.Delete("/network/peers/{id}", h.deletePeerAdmin)
+		r.Post("/network/peers/{id}/enable", h.enablePeerAdmin)
+		r.Post("/network/peers/{id}/disable", h.disablePeerAdmin)
 
 		// WebAuthn credential management
 		r.Delete("/webauthn/credentials/{id}", h.deleteCredential)

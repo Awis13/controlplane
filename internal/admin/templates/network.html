@@ -1,0 +1,89 @@
+{{define "content"}}
+<h1>Network</h1>
+
+<div class="detail-grid">
+  <div class="detail-card">
+    <h2>Peers Overview</h2>
+    <div class="detail-row">
+      <span class="detail-label">Total</span>
+      <span class="detail-value">{{.TotalCount}}</span>
+    </div>
+    <div class="detail-row">
+      <span class="detail-label">Enabled</span>
+      <span class="detail-value">{{.EnabledCount}}</span>
+    </div>
+    <div class="detail-row">
+      <span class="detail-label">Admin</span>
+      <span class="detail-value">{{.AdminCount}}</span>
+    </div>
+    <div class="detail-row">
+      <span class="detail-label">Node</span>
+      <span class="detail-value">{{.NodeCount}}</span>
+    </div>
+    <div class="detail-row">
+      <span class="detail-label">User</span>
+      <span class="detail-value">{{.UserCount}}</span>
+    </div>
+  </div>
+</div>
+
+<div class="form-card">
+  <h2>Add Peer</h2>
+  <form hx-post="/admin/network/peers" hx-target="#peer-list" hx-swap="afterbegin"
+    hx-on::after-request="if(event.detail.successful){ this.reset(); document.querySelector('#peer-list .empty-row')?.remove(); document.getElementById('flash').innerHTML=''; }">
+    <div class="form-grid">
+      <div>
+        <label for="name">Name</label>
+        <input type="text" id="name" name="name" placeholder="my-laptop" required>
+      </div>
+      <div>
+        <label for="type">Type</label>
+        <select id="type" name="type" required>
+          <option value="user">User</option>
+          <option value="node">Node</option>
+          <option value="admin">Admin</option>
+        </select>
+      </div>
+      <div>
+        <label for="endpoint">Endpoint (optional)</label>
+        <input type="text" id="endpoint" name="endpoint" placeholder="1.2.3.4:51820">
+      </div>
+      <div>
+        <label for="tenant_id">Tenant ID (optional)</label>
+        <input type="text" id="tenant_id" name="tenant_id" placeholder="UUID">
+      </div>
+      <div>
+        <button type="submit">Add Peer</button>
+      </div>
+    </div>
+  </form>
+</div>
+
+<!-- Filter -->
+<div class="mb-16">
+  <a href="/admin/network" class="btn-sm {{if eq .FilterType ""}}active{{end}}">All</a>
+  <a href="/admin/network?type=admin" class="btn-sm {{if eq .FilterType "admin"}}active{{end}}">Admin</a>
+  <a href="/admin/network?type=node" class="btn-sm {{if eq .FilterType "node"}}active{{end}}">Node</a>
+  <a href="/admin/network?type=user" class="btn-sm {{if eq .FilterType "user"}}active{{end}}">User</a>
+</div>
+
+<table>
+  <thead>
+    <tr>
+      <th>Name</th>
+      <th>Type</th>
+      <th>WG IP</th>
+      <th>Endpoint</th>
+      <th>Enabled</th>
+      <th>Created</th>
+    </tr>
+  </thead>
+  <tbody id="peer-list">
+    {{range .Peers}}
+    {{template "peer_row" .}}
+    {{else}}
+    <tr class="empty-row"><td colspan="6">No peers yet</td></tr>
+    {{end}}
+  </tbody>
+</table>
+{{end}}

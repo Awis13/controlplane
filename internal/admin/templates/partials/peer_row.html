@@ -1,0 +1,10 @@
+{{define "peer_row"}}
+<tr>
+  <td><a href="/admin/network/peers/{{.ID}}">{{.Name}}</a></td>
+  <td><span class="badge badge-{{.Type}}">{{.Type}}</span></td>
+  <td class="mono">{{.WgIP}}</td>
+  <td class="mono">{{if .Endpoint}}{{derefStr .Endpoint}}{{else}}<span class="text-muted">--</span>{{end}}</td>
+  <td>{{if .Enabled}}<span class="badge badge-active">yes</span>{{else}}<span class="badge badge-offline">no</span>{{end}}</td>
+  <td class="text-muted">{{fmtTime .CreatedAt}}</td>
+</tr>
+{{end}}

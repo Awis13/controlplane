@@ -1,0 +1,88 @@
+{{define "content"}}
+<h1>Peer: {{.Peer.Name}}</h1>
+
+<div class="detail-grid">
+  <div class="detail-card">
+    <h2>Information</h2>
+    <div class="detail-row">
+      <span class="detail-label">ID</span>
+      <span class="detail-value mono">{{.Peer.ID}}</span>
+    </div>
+    <div class="detail-row">
+      <span class="detail-label">Name</span>
+      <span class="detail-value">{{.Peer.Name}}</span>
+    </div>
+    <div class="detail-row">
+      <span class="detail-label">Type</span>
+      <span class="detail-value"><span class="badge badge-{{.Peer.Type}}">{{.Peer.Type}}</span></span>
+    </div>
+    <div class="detail-row">
+      <span class="detail-label">WG IP</span>
+      <span class="detail-value mono">{{.Peer.WgIP}}</span>
+    </div>
+    <div class="detail-row">
+      <span class="detail-label">Allowed IPs</span>
+      <span class="detail-value mono">{{.Peer.AllowedIPs}}</span>
+    </div>
+    <div class="detail-row">
+      <span class="detail-label">Endpoint</span>
+      <span class="detail-value mono">{{if .Peer.Endpoint}}{{derefStr .Peer.Endpoint}}{{else}}<span class="text-muted">--</span>{{end}}</span>
+    </div>
+    <div class="detail-row">
+      <span class="detail-label">Public Key</span>
+      <span class="detail-value mono">{{.Peer.PublicKey}}</span>
+    </div>
+    <div class="detail-row">
+      <span class="detail-label">Enabled</span>
+      <span class="detail-value">{{if .Peer.Enabled}}<span class="badge badge-active">yes</span>{{else}}<span class="badge badge-offline">no</span>{{end}}</span>
+    </div>
+    <div class="detail-row">
+      <span class="detail-label">Created</span>
+      <span class="detail-value">{{fmtTime .Peer.CreatedAt}}</span>
+    </div>
+    <div class="detail-row">
+      <span class="detail-label">Updated</span>
+      <span class="detail-value">{{fmtTime .Peer.UpdatedAt}}</span>
+    </div>
+  </div>
+
+  <div class="detail-card">
+    <h2>WireGuard Config</h2>
+    <pre class="config-block">{{.Config}}</pre>
+    {{if .QRBase64}}
+    <h3>QR Code</h3>
+    <img src="data:image/png;base64,{{.QRBase64}}" alt="WireGuard QR Code" style="max-width: 256px;">
+    {{end}}
+  </div>
+</div>
+
+<!-- Edit Form -->
+<div class="form-card">
+  <h2>Edit Peer</h2>
+  <form hx-put="/admin/network/peers/{{.Peer.ID}}" hx-target="#flash" hx-swap="innerHTML">
+    <div class="form-grid">
+      <div>
+        <label for="name">Name</label>
+        <input type="text" id="name" name="name" value="{{.Peer.Name}}">
+      </div>
+      <div>
+        <label for="endpoint">Endpoint</label>
+        <input type="text" id="endpoint" name="endpoint" value="{{if .Peer.Endpoint}}{{derefStr .Peer.Endpoint}}{{end}}">
+      </div>
+      <div>
+        <button type="submit">Save Changes</button>
+      </div>
+    </div>
+  </form>
+</div>
+
+<!-- Actions -->
+<div class="mt-24">
+  {{if .Peer.Enabled}}
+  <button class="btn-warning" hx-post="/admin/network/peers/{{.Peer.ID}}/disable" hx-confirm="Disable peer {{.Peer.Name}}?">Disable</button>
+  {{else}}
+  <button class="btn-success" hx-post="/admin/network/peers/{{.Peer.ID}}/enable" hx-confirm="Enable peer {{.Peer.Name}}?">Enable</button>
+  {{end}}
+  <button class="btn-danger" hx-delete="/admin/network/peers/{{.Peer.ID}}" hx-confirm="Delete peer {{.Peer.Name}}? This action cannot be undone.">Delete Peer</button>
+</div>
+{{end}}

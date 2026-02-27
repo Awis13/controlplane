@@ -17,6 +17,9 @@ type Config struct {
 	SetupToken     string   // optional: required for first WebAuthn registration
 	JWTSecret      string   // required: HMAC-SHA256 secret for user JWT tokens
 	CORSOrigins    []string // optional: allowed CORS origins (default: localhost dev ports)
+	WGHubPublicKey string   // optional: WireGuard hub public key
+	WGHubEndpoint  string   // optional: WireGuard hub endpoint (host:port)
+	WGNetworkCIDR  string   // optional: WireGuard network CIDR (default: 10.10.0.0/24)
 }
 
 // Load reads configuration from environment variables.
@@ -52,6 +55,9 @@ func Load() (*Config, error) {
 		SetupToken:     os.Getenv("SETUP_TOKEN"),
 		JWTSecret:      jwtSecret,
 		CORSOrigins:    corsOrigins,
+		WGHubPublicKey: os.Getenv("WG_HUB_PUBLIC_KEY"),
+		WGHubEndpoint:  os.Getenv("WG_HUB_ENDPOINT"),
+		WGNetworkCIDR:  getEnv("WG_NETWORK_CIDR", "10.10.0.0/24"),
 	}, nil
 }
 
