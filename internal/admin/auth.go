@@ -10,7 +10,7 @@ import (
 
 const (
 	sessionCookieName = "admin_session"
-	sessionMaxAge     = 7 * 24 * time.Hour
+	sessionMaxAge     = 8 * time.Hour
 )
 
 type sessionPayload struct {
