@@ -22,12 +22,13 @@ func NewStore(pool *pgxpool.Pool) *Store {
 	return &Store{pool: pool}
 }
 
-const stationColumns = `id, name, slug, genre, description, artwork_url, owner_id, tenant_id, is_public, created_at, updated_at`
+const stationColumns = `id, name, slug, genre, description, artwork_url, stream_url, owner_id, tenant_id, is_public, is_online, created_at, updated_at`
 
 func scanStation(row pgx.Row) (*Station, error) {
 	var s Station
 	err := row.Scan(&s.ID, &s.Name, &s.Slug, &s.Genre, &s.Description,
-		&s.ArtworkURL, &s.OwnerID, &s.TenantID, &s.IsPublic, &s.CreatedAt, &s.UpdatedAt)
+		&s.ArtworkURL, &s.StreamURL, &s.OwnerID, &s.TenantID, &s.IsPublic, &s.IsOnline,
+		&s.CreatedAt, &s.UpdatedAt)
 	if err != nil {
 		return nil, err
 	}
@@ -87,10 +88,10 @@ func (s *Store) GetByID(ctx context.Context, id string) (*Station, error) {
 // Create inserts a new station and returns it.
 func (s *Store) Create(ctx context.Context, req CreateStationRequest) (*Station, error) {
 	st, err := scanStation(s.pool.QueryRow(ctx,
-		`INSERT INTO stations (name, slug, genre, description, artwork_url, owner_id, tenant_id, is_public)
-		 VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+		`INSERT INTO stations (name, slug, genre, description, artwork_url, stream_url, owner_id, tenant_id, is_public)
+		 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
 		 RETURNING `+stationColumns,
-		req.Name, req.Slug, req.Genre, req.Description, req.ArtworkURL,
+		req.Name, req.Slug, req.Genre, req.Description, req.ArtworkURL, req.StreamURL,
 		req.OwnerID, req.TenantID, req.IsPublic))
 	if err != nil {
 		return nil, fmt.Errorf("insert station: %w", err)
@@ -129,9 +130,19 @@ func (s *Store) Update(ctx context.Context, id string, req UpdateStationRequest)
 		args = append(args, *req.ArtworkURL)
 		argIdx++
 	}
+	if req.StreamURL != nil {
+		setClauses = append(setClauses, fmt.Sprintf("stream_url = $%d", argIdx))
+		args = append(args, *req.StreamURL)
+		argIdx++
+	}
 	if req.IsPublic != nil {
 		setClauses = append(setClauses, fmt.Sprintf("is_public = $%d", argIdx))
 		args = append(args, *req.IsPublic)
+		argIdx++
+	}
+	if req.IsOnline != nil {
+		setClauses = append(setClauses, fmt.Sprintf("is_online = $%d", argIdx))
+		args = append(args, *req.IsOnline)
 		argIdx++
 	}
 

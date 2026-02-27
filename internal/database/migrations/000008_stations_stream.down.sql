@@ -1,0 +1,2 @@
+ALTER TABLE stations DROP COLUMN IF EXISTS is_online;
+ALTER TABLE stations DROP COLUMN IF EXISTS stream_url;

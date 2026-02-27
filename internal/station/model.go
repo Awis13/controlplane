@@ -12,9 +12,11 @@ type Station struct {
 	Genre       string    `json:"genre"`
 	Description string    `json:"description"`
 	ArtworkURL  string    `json:"artwork_url"`
+	StreamURL   string    `json:"stream_url"`
 	OwnerID     *string   `json:"owner_id,omitempty"`
 	TenantID    *string   `json:"tenant_id,omitempty"`
 	IsPublic    bool      `json:"is_public"`
+	IsOnline    bool      `json:"is_online"`
 	CreatedAt   time.Time `json:"created_at"`
 	UpdatedAt   time.Time `json:"updated_at"`
 }
@@ -25,6 +27,7 @@ type CreateStationRequest struct {
 	Genre       string  `json:"genre"`
 	Description string  `json:"description"`
 	ArtworkURL  string  `json:"artwork_url"`
+	StreamURL   string  `json:"stream_url"`
 	OwnerID     *string `json:"owner_id,omitempty"`
 	TenantID    *string `json:"tenant_id,omitempty"`
 	IsPublic    bool    `json:"is_public"`
@@ -36,5 +39,7 @@ type UpdateStationRequest struct {
 	Genre       *string `json:"genre,omitempty"`
 	Description *string `json:"description,omitempty"`
 	ArtworkURL  *string `json:"artwork_url,omitempty"`
+	StreamURL   *string `json:"stream_url,omitempty"`
 	IsPublic    *bool   `json:"is_public,omitempty"`
+	IsOnline    *bool   `json:"is_online,omitempty"`
 }
