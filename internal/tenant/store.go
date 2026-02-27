@@ -19,13 +19,13 @@ func NewStore(pool *pgxpool.Pool) *Store {
 }
 
 // tenantColumns is the list of columns selected in all tenant queries.
-const tenantColumns = `id, name, project_id, node_id, lxc_id, subdomain, status, error_message, stripe_subscription_id, stripe_customer_id, health_status, health_checked_at, created_at, updated_at`
+const tenantColumns = `id, name, project_id, node_id, lxc_id, subdomain, status, error_message, owner_id, stripe_subscription_id, stripe_customer_id, health_status, health_checked_at, created_at, updated_at`
 
 // scanTenant scans a single row into a Tenant struct.
 func scanTenant(row pgx.Row) (*Tenant, error) {
 	var t Tenant
 	err := row.Scan(&t.ID, &t.Name, &t.ProjectID, &t.NodeID, &t.LXCID,
-		&t.Subdomain, &t.Status, &t.ErrorMessage, &t.StripeSubscriptionID,
+		&t.Subdomain, &t.Status, &t.ErrorMessage, &t.OwnerID, &t.StripeSubscriptionID,
 		&t.StripeCustomerID, &t.HealthStatus, &t.HealthCheckedAt, &t.CreatedAt, &t.UpdatedAt)
 	if err != nil {
 		return nil, err
@@ -101,7 +101,7 @@ func (s *Store) ListPaginated(ctx context.Context, limit, offset int, status, no
 	for rows.Next() {
 		var t Tenant
 		err := rows.Scan(&t.ID, &t.Name, &t.ProjectID, &t.NodeID, &t.LXCID,
-			&t.Subdomain, &t.Status, &t.ErrorMessage, &t.StripeSubscriptionID,
+			&t.Subdomain, &t.Status, &t.ErrorMessage, &t.OwnerID, &t.StripeSubscriptionID,
 			&t.StripeCustomerID, &t.HealthStatus, &t.HealthCheckedAt, &t.CreatedAt, &t.UpdatedAt, &total)
 		if err != nil {
 			return nil, 0, fmt.Errorf("scan tenant: %w", err)
@@ -137,6 +137,45 @@ func (s *Store) Create(ctx context.Context, req CreateTenantRequest) (*Tenant, e
 		return nil, fmt.Errorf("insert tenant: %w", err)
 	}
 	return t, nil
+}
+
+// CreateWithOwner inserts a new tenant with an owner_id (user-created tenants).
+func (s *Store) CreateWithOwner(ctx context.Context, req CreateTenantRequest, ownerID string) (*Tenant, error) {
+	t, err := scanTenant(s.pool.QueryRow(ctx,
+		`INSERT INTO tenants (name, project_id, node_id, subdomain, owner_id)
+		 VALUES ($1, $2, $3, $4, $5)
+		 RETURNING `+tenantColumns,
+		req.Name, req.ProjectID, req.NodeID, req.Subdomain, ownerID))
+	if err != nil {
+		return nil, fmt.Errorf("insert tenant: %w", err)
+	}
+	return t, nil
+}
+
+// ListByOwnerID returns all non-deleted tenants belonging to a user.
+func (s *Store) ListByOwnerID(ctx context.Context, ownerID string) ([]Tenant, error) {
+	rows, err := s.pool.Query(ctx,
+		`SELECT `+tenantColumns+` FROM tenants
+		 WHERE owner_id = $1 AND status NOT IN ('deleted')
+		 ORDER BY created_at DESC`, ownerID)
+	if err != nil {
+		return nil, fmt.Errorf("query tenants by owner: %w", err)
+	}
+	defer rows.Close()
+
+	var tenants []Tenant
+	for rows.Next() {
+		t, err := scanTenant(rows)
+		if err != nil {
+			return nil, fmt.Errorf("scan tenant: %w", err)
+		}
+		tenants = append(tenants, *t)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("iterate tenants: %w", err)
+	}
+
+	return tenants, nil
 }
 
 func (s *Store) Delete(ctx context.Context, id string) error {
