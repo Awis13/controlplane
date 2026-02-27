@@ -5,49 +5,6 @@
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>Login — Control Plane</title>
   <link rel="stylesheet" href="/admin/static/style.css">
-  <style>
-    .login-wrap {
-      min-height: 100vh;
-      display: flex;
-      align-items: center;
-      justify-content: center;
-    }
-    .login-card {
-      background: var(--bg-card);
-      border: 1px solid var(--border);
-      border-radius: 12px;
-      padding: 40px;
-      width: 360px;
-      text-align: center;
-    }
-    .login-card h1 {
-      font-size: 18px;
-      margin-bottom: 8px;
-    }
-    .login-card p {
-      color: var(--text-muted);
-      font-size: 13px;
-      margin-bottom: 24px;
-    }
-    .login-card button {
-      width: 100%;
-      padding: 12px;
-      font-size: 14px;
-    }
-    .login-card .error {
-      color: var(--red);
-      font-size: 13px;
-      margin-top: 12px;
-    }
-    .login-card .logo {
-      font-weight: 700;
-      font-size: 14px;
-      color: var(--accent);
-      letter-spacing: 0.5px;
-      margin-bottom: 24px;
-      display: block;
-    }
-  </style>
 </head>
 <body>
   <div class="login-wrap">
@@ -60,7 +17,7 @@
       {{else}}
         <h1>Setup</h1>
         <p>Register a passkey to secure your admin panel</p>
-        <input type="text" id="setupToken" placeholder="Setup token" style="width:100%; padding:12px; font-size:14px; margin-bottom:12px; border:1px solid var(--border); border-radius:8px; background:var(--bg-card); color:var(--text); box-sizing:border-box;">
+        <input type="text" id="setupToken" placeholder="Setup token" class="setup-input">
         <button id="registerBtn" onclick="doRegister()">Set up Touch ID</button>
       {{end}}
       <div id="error" class="error"></div>

@@ -532,15 +532,33 @@ button.htmx-request {
 
 .mono { font-family: "SF Mono", "Fira Code", "JetBrains Mono", monospace; font-size: 12px; }
 .text-muted { color: var(--text-muted); }
+.text-green { color: var(--green); }
+.text-red { color: var(--red); }
+.text-danger { color: #e74c3c; }
 .text-right { text-align: right; }
+.fs-11 { font-size: 11px; }
+.fs-12 { font-size: 12px; }
+.fs-14 { font-size: 14px; }
+.fw-600 { font-weight: 600; }
 .mt-16 { margin-top: 16px; }
 .mt-24 { margin-top: 24px; }
+.mb-0 { margin-bottom: 0; }
+.mb-4 { margin-bottom: 4px; }
 .mb-16 { margin-bottom: 16px; }
+.mb-24 { margin-bottom: 24px; }
+.ml-4 { margin-left: 4px; }
 .empty-row td { text-align: center; color: var(--text-muted); padding: 24px; }
 .flex { display: flex; }
 .flex-between { display: flex; justify-content: space-between; align-items: center; }
 .gap-8 { gap: 8px; }
 .gap-12 { gap: 12px; }
+.grid-gap-12 { display: grid; gap: 12px; }
+.selectable { user-select: all; cursor: pointer; }
+.qr-image { max-width: 256px; }
+.node-meta { display: flex; justify-content: space-between; font-size: 12px; color: var(--text-muted); margin-bottom: 4px; }
+.stat-value-sm { font-size: 14px; margin-top: 8px; }
+.alert-card { border: 2px solid #e74c3c; background: #2c1a1a; margin-bottom: 24px; }
+.setup-input { width: 100%; padding: 12px; font-size: 14px; margin-bottom: 12px; border: 1px solid var(--border); border-radius: 8px; background: var(--bg-card); color: var(--text); box-sizing: border-box; }
 
 /* ===== HTMX ===== */
 
@@ -566,24 +584,50 @@ button.htmx-request {
 
 /* ===== LOGIN PAGE ===== */
 
-.login-page {
-  display: flex;
-  justify-content: center;
-  align-items: center;
+.login-wrap {
   min-height: 100vh;
+  display: flex;
+  align-items: center;
+  justify-content: center;
 }
 
 .login-card {
   background: var(--bg-card);
   border: 1px solid var(--border);
-  border-radius: 10px;
-  padding: 32px;
-  width: 100%;
-  max-width: 360px;
+  border-radius: 12px;
+  padding: 40px;
+  width: 360px;
+  text-align: center;
 }
 
 .login-card h1 {
-  text-align: center;
-  margin-bottom: 24px;
   font-size: 18px;
+  margin-bottom: 8px;
+}
+
+.login-card p {
+  color: var(--text-muted);
+  font-size: 13px;
+  margin-bottom: 24px;
+}
+
+.login-card button {
+  width: 100%;
+  padding: 12px;
+  font-size: 14px;
+}
+
+.login-card .error {
+  color: var(--red);
+  font-size: 13px;
+  margin-top: 12px;
+}
+
+.login-card .logo {
+  font-weight: 700;
+  font-size: 14px;
+  color: var(--accent);
+  letter-spacing: 0.5px;
+  margin-bottom: 24px;
+  display: block;
 }

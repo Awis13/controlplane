@@ -13,7 +13,7 @@
   <td class="mono">{{if .LXCID}}{{derefInt .LXCID}}{{else}}<span class="text-muted">—</span>{{end}}</td>
   <td>
     <span class="badge badge-{{.Status}}">{{.Status}}</span>
-    {{if .ErrorMessage}}<span class="text-muted" style="font-size:11px;margin-left:4px">{{derefStr .ErrorMessage}}</span>{{end}}
+    {{if .ErrorMessage}}<span class="text-muted fs-11 ml-4">{{derefStr .ErrorMessage}}</span>{{end}}
   </td>
   <td class="text-right">
     {{if eq .Status "active"}}

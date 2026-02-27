@@ -2,9 +2,9 @@
 <h1>Peer: {{.Peer.Name}}</h1>
 
 {{if .PrivateKey}}
-<div class="detail-card" style="border: 2px solid #e74c3c; background: #2c1a1a; margin-bottom: 24px;">
-  <h2 style="color: #e74c3c;">&#9888; Сохраните приватный ключ! Он показывается только один раз.</h2>
-  <pre class="config-block" style="user-select: all; cursor: pointer;">{{.PrivateKey}}</pre>
+<div class="detail-card alert-card">
+  <h2 class="text-danger">&#9888; Сохраните приватный ключ! Он показывается только один раз.</h2>
+  <pre class="config-block selectable">{{.PrivateKey}}</pre>
 </div>
 {{end}}
 
@@ -58,7 +58,7 @@
     <pre class="config-block">{{.Config}}</pre>
     {{if .QRBase64}}
     <h3>QR Code</h3>
-    <img src="data:image/png;base64,{{.QRBase64}}" alt="WireGuard QR Code" style="max-width: 256px;">
+    <img src="data:image/png;base64,{{.QRBase64}}" alt="WireGuard QR Code" class="qr-image">
     {{end}}
   </div>
 </div>

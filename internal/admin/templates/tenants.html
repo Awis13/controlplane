@@ -74,7 +74,7 @@
     <option value="{{.ID}}" {{if eq $.FilterNode .ID}}selected{{end}}>{{.Name}}</option>
     {{end}}
   </select>
-  <span class="text-muted" style="font-size:12px">{{len .Tenants}} of {{.TotalCount}} tenants</span>
+  <span class="text-muted fs-12">{{len .Tenants}} of {{.TotalCount}} tenants</span>
 </div>
 
 <table>

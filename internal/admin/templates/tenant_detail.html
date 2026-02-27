@@ -1,7 +1,7 @@
 {{define "content"}}
 <div class="flex-between mb-16">
-  <h1 style="margin-bottom:0">Tenant: {{.Tenant.Name}}</h1>
-  <div class="actions-bar" style="margin-bottom:0">
+  <h1 class="mb-0">Tenant: {{.Tenant.Name}}</h1>
+  <div class="actions-bar mb-0">
     {{if eq .Tenant.Status "active"}}
     <button class="btn-warning btn-sm" hx-post="/admin/tenants/{{.Tenant.ID}}/suspend" hx-confirm="Suspend tenant {{.Tenant.Name}}?" hx-target="body">Suspend</button>
     {{end}}
@@ -40,7 +40,7 @@
     {{if .Tenant.ErrorMessage}}
     <div class="detail-row">
       <span class="detail-label">Error</span>
-      <span class="detail-value" style="color: var(--red)">{{derefStr .Tenant.ErrorMessage}}</span>
+      <span class="detail-value text-red">{{derefStr .Tenant.ErrorMessage}}</span>
     </div>
     {{end}}
     <div class="detail-row">

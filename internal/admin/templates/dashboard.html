@@ -13,19 +13,19 @@
   </div>
   <div class="stat-card">
     <div class="label">Active Tenants</div>
-    <div class="value" style="color: var(--green)">{{.ActiveTenants}} <span class="text-muted" style="font-size:14px">/ {{len .Tenants}}</span></div>
+    <div class="value text-green">{{.ActiveTenants}} <span class="text-muted fs-14">/ {{len .Tenants}}</span></div>
   </div>
   <div class="stat-card">
     <div class="label">RAM Usage</div>
-    <div class="value">{{.AllocatedRAM}} <span class="text-muted" style="font-size:14px">/ {{.TotalRAM}} MB</span></div>
+    <div class="value">{{.AllocatedRAM}} <span class="text-muted fs-14">/ {{.TotalRAM}} MB</span></div>
   </div>
   <div class="stat-card">
     <div class="label">Free RAM</div>
-    <div class="value">{{sub .TotalRAM .AllocatedRAM}} <span class="text-muted" style="font-size:14px">MB</span></div>
+    <div class="value">{{sub .TotalRAM .AllocatedRAM}} <span class="text-muted fs-14">MB</span></div>
   </div>
   <div class="stat-card">
     <div class="label">Health</div>
-    <div class="value" style="font-size:14px;margin-top:8px">
+    <div class="value stat-value-sm">
       {{if .HealthyCount}}<span class="badge badge-healthy">{{.HealthyCount}} healthy</span> {{end}}
       {{if .UnhealthyCount}}<span class="badge badge-unhealthy">{{.UnhealthyCount}} unhealthy</span> {{end}}
       {{if .UnknownHealthCount}}<span class="badge badge-unknown">{{.UnknownHealthCount}} unknown</span>{{end}}
@@ -35,7 +35,7 @@
 </div>
 
 {{if .SuspendedTenants}}
-<div class="flash flash-error" style="margin-bottom:16px">{{.SuspendedTenants}} suspended tenant(s) — {{.ErrorTenants}} in error state</div>
+<div class="flash flash-error mb-16">{{.SuspendedTenants}} suspended tenant(s) — {{.ErrorTenants}} in error state</div>
 {{end}}
 
 <!-- RAM per Node -->
@@ -45,10 +45,10 @@
   {{range .Nodes}}
   <div class="detail-card">
     <div class="flex-between mb-16">
-      <a href="/admin/nodes/{{.ID}}" style="font-weight:600">{{.Name}}</a>
+      <a href="/admin/nodes/{{.ID}}" class="fw-600">{{.Name}}</a>
       <span class="badge badge-{{.Status}}">{{.Status}}</span>
     </div>
-    <div style="display:flex;justify-content:space-between;font-size:12px;color:var(--text-muted);margin-bottom:4px">
+    <div class="node-meta">
       <span>{{.AllocatedRAMMB}} / {{.TotalRAMMB}} MB</span>
       <span>{{ramPercent .}}%</span>
     </div>
