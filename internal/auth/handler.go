@@ -1,6 +1,7 @@
 package auth
 
 import (
+	"crypto/subtle"
 	"errors"
 	"log/slog"
 	"net/http"
@@ -19,18 +20,25 @@ import (
 const (
 	bcryptCost      = 12
 	tokenExpiration = 24 * time.Hour
-	minPasswordLen  = 8
+	minPasswordLen  = 12
 )
 
 type Handler struct {
-	userStore *user.Store
-	jwtSecret []byte
+	userStore         *user.Store
+	jwtSecret         []byte
+	registrationToken string
 }
 
-func NewHandler(userStore *user.Store, jwtSecret string) *Handler {
+func NewHandler(userStore *user.Store, jwtSecret, registrationToken string) *Handler {
+	if registrationToken != "" {
+		slog.Info("registration gated by REGISTRATION_TOKEN")
+	} else {
+		slog.Warn("REGISTRATION_TOKEN not set — registration is open to anyone")
+	}
 	return &Handler{
-		userStore: userStore,
-		jwtSecret: []byte(jwtSecret),
+		userStore:         userStore,
+		jwtSecret:         []byte(jwtSecret),
+		registrationToken: registrationToken,
 	}
 }
 
@@ -66,6 +74,15 @@ func toUserView(u *user.User) *userView {
 
 // Register handles POST /api/v1/auth/register.
 func (h *Handler) Register(w http.ResponseWriter, r *http.Request) {
+	// Проверяем invite token если задан
+	if h.registrationToken != "" {
+		provided := r.Header.Get("X-Registration-Token")
+		if subtle.ConstantTimeCompare([]byte(provided), []byte(h.registrationToken)) != 1 {
+			response.Error(w, http.StatusForbidden, "registration is not open")
+			return
+		}
+	}
+
 	var req registerRequest
 	if err := response.Decode(r, &req); err != nil {
 		response.Error(w, http.StatusBadRequest, "invalid request body")
@@ -80,7 +97,7 @@ func (h *Handler) Register(w http.ResponseWriter, r *http.Request) {
 
 	// Validate password
 	if len(req.Password) < minPasswordLen {
-		response.Error(w, http.StatusBadRequest, "password must be at least 8 characters")
+		response.Error(w, http.StatusBadRequest, "password must be at least 12 characters")
 		return
 	}
 

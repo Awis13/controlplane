@@ -142,7 +142,7 @@ func New(pool *pgxpool.Pool, cfg *config.Config) (http.Handler, *provisioner.Pro
 	})
 
 	// User auth (JWT-based, separate from admin WebAuthn and API Bearer token)
-	authHandler := auth.NewHandler(userStore, cfg.JWTSecret)
+	authHandler := auth.NewHandler(userStore, cfg.JWTSecret, cfg.RegistrationToken)
 	r.Route("/api/v1/auth", func(r chi.Router) {
 		r.Use(httprate.LimitByIP(10, time.Minute))
 		r.Post("/register", authHandler.Register)
