@@ -218,6 +218,27 @@ func (s *Store) Delete(ctx context.Context, id string) error {
 	return nil
 }
 
+// GetLeastLoaded returns the active node with the most available RAM
+// that has at least requiredMB free. Returns nil if no suitable node found.
+func (s *Store) GetLeastLoaded(ctx context.Context, requiredMB int) (*Node, error) {
+	var n Node
+	err := s.pool.QueryRow(ctx,
+		`SELECT id, name, tailscale_ip, proxmox_url, total_ram_mb, allocated_ram_mb, status, created_at, updated_at
+		 FROM nodes
+		 WHERE status = 'active' AND (total_ram_mb - allocated_ram_mb) >= $1
+		 ORDER BY (total_ram_mb - allocated_ram_mb) DESC
+		 LIMIT 1`, requiredMB).
+		Scan(&n.ID, &n.Name, &n.TailscaleIP, &n.ProxmoxURL,
+			&n.TotalRAMMB, &n.AllocatedRAMMB, &n.Status, &n.CreatedAt, &n.UpdatedAt)
+	if err != nil {
+		if err == pgx.ErrNoRows {
+			return nil, nil
+		}
+		return nil, fmt.Errorf("query least loaded node: %w", err)
+	}
+	return &n, nil
+}
+
 // ReserveRAM atomically increments allocated_ram_mb if capacity is available.
 // Returns ErrInsufficientCapacity if not enough RAM.
 func (s *Store) ReserveRAM(ctx context.Context, nodeID string, ramMB int) error {

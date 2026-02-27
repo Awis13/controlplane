@@ -91,6 +91,23 @@ func (s *Store) GetByID(ctx context.Context, id string) (*Project, error) {
 	return &p, nil
 }
 
+// GetDefault returns the first project by creation order (oldest).
+// Used for auto-selection when users create tenants without specifying a project.
+func (s *Store) GetDefault(ctx context.Context) (*Project, error) {
+	var p Project
+	err := s.pool.QueryRow(ctx,
+		`SELECT `+projectColumns+` FROM projects ORDER BY created_at ASC LIMIT 1`).
+		Scan(&p.ID, &p.Name, &p.TemplateID, &p.Ports,
+			&p.StripePriceID, &p.HealthPath, &p.RAMMB, &p.CreatedAt, &p.UpdatedAt)
+	if err != nil {
+		if err == pgx.ErrNoRows {
+			return nil, nil
+		}
+		return nil, fmt.Errorf("query default project: %w", err)
+	}
+	return &p, nil
+}
+
 func (s *Store) Create(ctx context.Context, req CreateProjectRequest) (*Project, error) {
 	if req.Ports == nil {
 		req.Ports = []int{}
