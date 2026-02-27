@@ -10,7 +10,9 @@ Universal control plane for managing LXC-based projects on Proxmox compute nodes
 docker compose up -d
 ```
 
-The API starts on port 8080. PostgreSQL runs on 5432 with automatic migrations.
+The API starts on port 8080 (bound to 127.0.0.1 by default). PostgreSQL runs on 5432 with automatic migrations.
+
+For first-time setup, set `SETUP_TOKEN` env var — required for initial WebAuthn passkey registration.
 
 ## How to run tests
 
@@ -24,19 +26,23 @@ go test ./...
 controlplane/
   cmd/server/main.go          # Entry point: config, DB connect, migrations, HTTP server, graceful shutdown
   internal/
-    config/config.go           # Environment-based configuration (DATABASE_URL, LISTEN_ADDR, LOG_LEVEL)
+    config/config.go           # Environment-based configuration (DATABASE_URL, LISTEN_ADDR, LOG_LEVEL, SETUP_TOKEN)
     database/database.go       # PostgreSQL connection pool (pgxpool)
     database/migrate.go        # Embedded SQL migrations via golang-migrate
     database/migrations/       # SQL migration files
-    server/server.go           # chi router setup with all routes
+    server/server.go           # chi router setup, security headers (HSTS, CSP strict, X-Frame-Options)
     response/response.go       # JSON response helpers (JSON, Error, Decode)
-    node/                      # Node CRUD (model, store, handler)
+    node/                      # Node CRUD (model, store, handler) + Proxmox client cache invalidation
     project/                   # Project CRUD (model, store, handler)
     tenant/                    # Tenant CRUD (model, store, handler, handler_test)
     provisioner/               # Async LXC provisioning/deprovisioning (bounded concurrency, state machine)
     proxmox/                   # Proxmox VE API client (LXC lifecycle, node status, task polling)
     crypto/                    # AES-256-GCM encryption for API tokens
     health/                    # Health check endpoint with DB ping
+    admin/                     # Admin UI — WebAuthn auth, HTMX dashboard, node/project/tenant management
+    admin/static/              # Alpine.js, HTMX, CSS, webauthn.js
+    admin/templates/           # Go html/template files
+    audit/                     # Audit logging (fire-and-forget DB inserts)
   docker-compose.yml           # PostgreSQL + controlplane services
   Dockerfile                   # Multi-stage build (golang:1.24-alpine -> alpine:3.21)
 ```
@@ -60,14 +66,31 @@ controlplane/
 ## Dependencies
 
 - `github.com/go-chi/chi/v5` — HTTP router
+- `github.com/go-chi/httprate` — IP-based rate limiting
 - `github.com/jackc/pgx/v5` — PostgreSQL driver (pure Go, no CGO)
 - `github.com/golang-migrate/migrate/v4` — Database migrations with embedded SQL
+- `github.com/go-webauthn/webauthn` — WebAuthn/passkey authentication
+- `github.com/justinas/nosurf` — CSRF protection
+
+## Security
+
+- WebAuthn passkey auth for admin UI (SETUP_TOKEN required for first registration)
+- Bearer token auth for API (constant-time compare)
+- CSRF protection (nosurf) with SameSite=Strict cookies
+- CSP: `script-src 'self'` (no unsafe-inline), HSTS, X-Frame-Options DENY
+- Rate limiting: 10 req/min on admin login, 100 req/min on API
+- ReadHeaderTimeout 5s (Slowloris protection)
+- 1MB body limit on all endpoints
+- Proxmox client cache invalidated on token rotation
+- DB-first state transitions with rollback for suspend/resume
+- Provisioner shutdown with 10s timeout on SIGTERM
+- Docker: non-root user, bound to 127.0.0.1
 
 ## Notes
 
 - No ORM, raw SQL via pgx
 - Structured logging with `log/slog` (JSON output)
-- Graceful shutdown on SIGINT/SIGTERM (TODO: wire Provisioner.Shutdown())
+- Graceful shutdown on SIGINT/SIGTERM with provisioner drain
 - Migrations auto-run on startup
 - API token field excluded from JSON responses (`json:"-"`)
 - Proxmox API client uses InsecureSkipVerify (self-signed certs over Tailscale)
