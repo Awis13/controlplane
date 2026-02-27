@@ -177,6 +177,12 @@ func (p *Provisioner) Provision(tenantID, nodeID, projectID, subdomain string, r
 	p.wg.Add(1)
 	go func() {
 		defer p.wg.Done()
+		defer func() {
+			if rec := recover(); rec != nil {
+				slog.Error("provision: panic recovered", "tenant_id", tenantID, "panic", rec)
+				p.setError(context.Background(), tenantID, nodeID, ramMB, "provisioning failed: internal panic")
+			}
+		}()
 
 		// Acquire semaphore slot (bounded concurrency)
 		p.sem <- struct{}{}
@@ -326,6 +332,52 @@ func (p *Provisioner) Deprovision(ctx context.Context, tenantID, nodeID string, 
 	}
 
 	log.Info("deprovision: tenant deprovisioned successfully")
+	return nil
+}
+
+// Suspend stops an LXC container for a tenant.
+func (p *Provisioner) Suspend(ctx context.Context, tenantID, nodeID string, lxcID int) error {
+	log := slog.With("tenant_id", tenantID, "node_id", nodeID, "lxc_id", lxcID)
+
+	client, err := p.getClient(ctx, nodeID)
+	if err != nil {
+		return fmt.Errorf("get proxmox client: %w", err)
+	}
+
+	log.Info("suspend: stopping container")
+	stopTask, err := client.StopContainer(ctx, lxcID)
+	if err != nil {
+		return fmt.Errorf("stop container: %w", err)
+	}
+
+	if err := stopTask.Wait(ctx); err != nil {
+		return fmt.Errorf("stop task failed: %w", err)
+	}
+
+	log.Info("suspend: container stopped")
+	return nil
+}
+
+// Resume starts an LXC container for a tenant.
+func (p *Provisioner) Resume(ctx context.Context, tenantID, nodeID string, lxcID int) error {
+	log := slog.With("tenant_id", tenantID, "node_id", nodeID, "lxc_id", lxcID)
+
+	client, err := p.getClient(ctx, nodeID)
+	if err != nil {
+		return fmt.Errorf("get proxmox client: %w", err)
+	}
+
+	log.Info("resume: starting container")
+	startTask, err := client.StartContainer(ctx, lxcID)
+	if err != nil {
+		return fmt.Errorf("start container: %w", err)
+	}
+
+	if err := startTask.Wait(ctx); err != nil {
+		return fmt.Errorf("start task failed: %w", err)
+	}
+
+	log.Info("resume: container started")
 	return nil
 }
 

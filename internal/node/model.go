@@ -24,3 +24,10 @@ type CreateNodeRequest struct {
 	APIToken    string `json:"api_token"`
 	TotalRAMMB  int    `json:"total_ram_mb"`
 }
+
+type UpdateNodeRequest struct {
+	Status     *string `json:"status,omitempty"`
+	TotalRAMMB *int    `json:"total_ram_mb,omitempty"`
+	ProxmoxURL *string `json:"proxmox_url,omitempty"`
+	APIToken   *string `json:"api_token,omitempty"`
+}

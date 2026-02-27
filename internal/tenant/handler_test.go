@@ -20,13 +20,16 @@ import (
 // --- Mock tenant store ---
 
 type mockTenantStore struct {
-	tenants        map[string]*Tenant
-	createErr      error
-	deleteErr      error
-	setActiveErr   error
-	setErrorErr    error
-	setDeletingErr error
-	setDeletedErr  error
+	tenants          map[string]*Tenant
+	createErr        error
+	deleteErr        error
+	setActiveErr     error
+	setErrorErr      error
+	setDeletingErr   error
+	setDeletedErr    error
+	setSuspendedErr  error
+	setResumedErr    error
+	updateErr        error
 }
 
 func newMockTenantStore() *mockTenantStore {
@@ -39,6 +42,53 @@ func (m *mockTenantStore) List(_ context.Context) ([]Tenant, error) {
 		result = append(result, *t)
 	}
 	return result, nil
+}
+
+func (m *mockTenantStore) ListPaginated(_ context.Context, limit, offset int, status, nodeID, projectID string) ([]Tenant, int, error) {
+	var result []Tenant
+	for _, t := range m.tenants {
+		if status != "" && t.Status != status {
+			continue
+		}
+		if nodeID != "" && t.NodeID != nodeID {
+			continue
+		}
+		if projectID != "" && t.ProjectID != projectID {
+			continue
+		}
+		result = append(result, *t)
+	}
+	total := len(result)
+	if offset < len(result) {
+		end := offset + limit
+		if end > len(result) {
+			end = len(result)
+		}
+		result = result[offset:end]
+	} else {
+		result = nil
+	}
+	return result, total, nil
+}
+
+func (m *mockTenantStore) Update(_ context.Context, id string, req UpdateTenantRequest) (*Tenant, error) {
+	if m.updateErr != nil {
+		return nil, m.updateErr
+	}
+	t, ok := m.tenants[id]
+	if !ok {
+		return nil, nil
+	}
+	if req.Name != nil {
+		t.Name = *req.Name
+	}
+	if req.StripeSubscriptionID != nil {
+		t.StripeSubscriptionID = req.StripeSubscriptionID
+	}
+	if req.StripeCustomerID != nil {
+		t.StripeCustomerID = req.StripeCustomerID
+	}
+	return t, nil
 }
 
 func (m *mockTenantStore) GetByID(_ context.Context, id string) (*Tenant, error) {
@@ -54,14 +104,15 @@ func (m *mockTenantStore) Create(_ context.Context, req CreateTenantRequest) (*T
 		return nil, m.createErr
 	}
 	t := &Tenant{
-		ID:        "new-tenant-id",
-		Name:      req.Name,
-		ProjectID: req.ProjectID,
-		NodeID:    req.NodeID,
-		Subdomain: req.Subdomain,
-		Status:    "provisioning",
-		CreatedAt: time.Now(),
-		UpdatedAt: time.Now(),
+		ID:           "new-tenant-id",
+		Name:         req.Name,
+		ProjectID:    req.ProjectID,
+		NodeID:       req.NodeID,
+		Subdomain:    req.Subdomain,
+		Status:       "provisioning",
+		HealthStatus: "unknown",
+		CreatedAt:    time.Now(),
+		UpdatedAt:    time.Now(),
 	}
 	m.tenants[t.ID] = t
 	return t, nil
@@ -113,6 +164,26 @@ func (m *mockTenantStore) SetDeleted(_ context.Context, id string) error {
 	}
 	if t, ok := m.tenants[id]; ok {
 		t.Status = "deleted"
+	}
+	return nil
+}
+
+func (m *mockTenantStore) SetSuspended(_ context.Context, id string) error {
+	if m.setSuspendedErr != nil {
+		return m.setSuspendedErr
+	}
+	if t, ok := m.tenants[id]; ok {
+		t.Status = "suspended"
+	}
+	return nil
+}
+
+func (m *mockTenantStore) SetResumed(_ context.Context, id string) error {
+	if m.setResumedErr != nil {
+		return m.setResumedErr
+	}
+	if t, ok := m.tenants[id]; ok {
+		t.Status = "active"
 	}
 	return nil
 }
@@ -169,7 +240,11 @@ type mockProvisioner struct {
 	mu                sync.Mutex
 	provisionCalled   bool
 	deprovisionCalled bool
+	suspendCalled     bool
+	resumeCalled      bool
 	deprovisionErr    error
+	suspendErr        error
+	resumeErr         error
 	provisionDone     chan struct{} // signaled when Provision completes
 }
 
@@ -194,6 +269,20 @@ func (m *mockProvisioner) Deprovision(_ context.Context, _, _ string, _, _ int) 
 	m.deprovisionCalled = true
 	m.mu.Unlock()
 	return m.deprovisionErr
+}
+
+func (m *mockProvisioner) Suspend(_ context.Context, _, _ string, _ int) error {
+	m.mu.Lock()
+	m.suspendCalled = true
+	m.mu.Unlock()
+	return m.suspendErr
+}
+
+func (m *mockProvisioner) Resume(_ context.Context, _, _ string, _ int) error {
+	m.mu.Lock()
+	m.resumeCalled = true
+	m.mu.Unlock()
+	return m.resumeErr
 }
 
 func (m *mockProvisioner) wasProvisionCalled() bool {
@@ -268,7 +357,7 @@ func TestCreate_Returns202(t *testing.T) {
 	ns.nodes[validNodeID] = activeNode()
 	ps.projects[validProjectID] = testProjectObj()
 
-	h := NewHandler(ts, ns, ps, prov)
+	h := NewHandler(ts, ns, ps, prov, nil)
 	r := testRouter(h)
 
 	body, _ := json.Marshal(createRequest("my-tenant", "myapp"))
@@ -305,7 +394,7 @@ func TestCreate_NodeNotFound(t *testing.T) {
 	// Node NOT added to store
 	ps.projects[validProjectID] = testProjectObj()
 
-	h := NewHandler(ts, ns, ps, prov)
+	h := NewHandler(ts, ns, ps, prov, nil)
 	r := testRouter(h)
 
 	body, _ := json.Marshal(createRequest("my-tenant", "myapp"))
@@ -328,7 +417,7 @@ func TestCreate_ProjectNotFound(t *testing.T) {
 	ns.nodes[validNodeID] = activeNode()
 	// Project NOT added to store
 
-	h := NewHandler(ts, ns, ps, prov)
+	h := NewHandler(ts, ns, ps, prov, nil)
 	r := testRouter(h)
 
 	body, _ := json.Marshal(createRequest("my-tenant", "myapp"))
@@ -352,7 +441,7 @@ func TestCreate_InsufficientCapacity(t *testing.T) {
 	ps.projects[validProjectID] = testProjectObj()
 	ns.reserveErr = node.ErrInsufficientCapacity
 
-	h := NewHandler(ts, ns, ps, prov)
+	h := NewHandler(ts, ns, ps, prov, nil)
 	r := testRouter(h)
 
 	body, _ := json.Marshal(createRequest("my-tenant", "myapp"))
@@ -375,7 +464,7 @@ func TestCreate_ReservedSubdomain(t *testing.T) {
 	ns.nodes[validNodeID] = activeNode()
 	ps.projects[validProjectID] = testProjectObj()
 
-	h := NewHandler(ts, ns, ps, prov)
+	h := NewHandler(ts, ns, ps, prov, nil)
 	r := testRouter(h)
 
 	reserved := []string{"www", "api", "admin", "app", "mail", "cdn"}
@@ -403,7 +492,7 @@ func TestCreate_InactiveNode(t *testing.T) {
 	ns.nodes[validNodeID] = inactiveNode
 	ps.projects[validProjectID] = testProjectObj()
 
-	h := NewHandler(ts, ns, ps, prov)
+	h := NewHandler(ts, ns, ps, prov, nil)
 	r := testRouter(h)
 
 	body, _ := json.Marshal(createRequest("my-tenant", "myapp"))
@@ -423,7 +512,7 @@ func TestCreate_MissingFields(t *testing.T) {
 	ps := newMockProjectStore()
 	prov := newMockProvisioner()
 
-	h := NewHandler(ts, ns, ps, prov)
+	h := NewHandler(ts, ns, ps, prov, nil)
 	r := testRouter(h)
 
 	body, _ := json.Marshal(map[string]string{"name": "test"})
@@ -443,7 +532,7 @@ func TestCreate_InvalidSubdomain(t *testing.T) {
 	ps := newMockProjectStore()
 	prov := newMockProvisioner()
 
-	h := NewHandler(ts, ns, ps, prov)
+	h := NewHandler(ts, ns, ps, prov, nil)
 	r := testRouter(h)
 
 	invalids := []string{"A", "-bad", "bad-", "a"}
@@ -485,7 +574,7 @@ func TestDelete_ActiveTenant(t *testing.T) {
 	}
 	ps.projects[validProjectID] = testProjectObj()
 
-	h := NewHandler(ts, ns, ps, prov)
+	h := NewHandler(ts, ns, ps, prov, nil)
 	r := testRouter(h)
 
 	req := httptest.NewRequest("DELETE", "/tenants/"+validTenantID, nil)
@@ -520,7 +609,7 @@ func TestDelete_ErrorTenantNoLXC(t *testing.T) {
 	}
 	ps.projects[validProjectID] = testProjectObj()
 
-	h := NewHandler(ts, ns, ps, prov)
+	h := NewHandler(ts, ns, ps, prov, nil)
 	r := testRouter(h)
 
 	req := httptest.NewRequest("DELETE", "/tenants/"+validTenantID, nil)
@@ -548,7 +637,7 @@ func TestDelete_NotFound(t *testing.T) {
 	ps := newMockProjectStore()
 	prov := newMockProvisioner()
 
-	h := NewHandler(ts, ns, ps, prov)
+	h := NewHandler(ts, ns, ps, prov, nil)
 	r := testRouter(h)
 
 	req := httptest.NewRequest("DELETE", "/tenants/"+validTenantID, nil)
@@ -577,7 +666,7 @@ func TestDelete_CannotDeleteProvisioningTenant(t *testing.T) {
 		UpdatedAt: time.Now(),
 	}
 
-	h := NewHandler(ts, ns, ps, prov)
+	h := NewHandler(ts, ns, ps, prov, nil)
 	r := testRouter(h)
 
 	req := httptest.NewRequest("DELETE", "/tenants/"+validTenantID, nil)
@@ -606,7 +695,7 @@ func TestDelete_CannotDeleteDeletedTenant(t *testing.T) {
 		UpdatedAt: time.Now(),
 	}
 
-	h := NewHandler(ts, ns, ps, prov)
+	h := NewHandler(ts, ns, ps, prov, nil)
 	r := testRouter(h)
 
 	req := httptest.NewRequest("DELETE", "/tenants/"+validTenantID, nil)
@@ -639,7 +728,7 @@ func TestDelete_DeprovisionError(t *testing.T) {
 	}
 	ps.projects[validProjectID] = testProjectObj()
 
-	h := NewHandler(ts, ns, ps, prov)
+	h := NewHandler(ts, ns, ps, prov, nil)
 	r := testRouter(h)
 
 	req := httptest.NewRequest("DELETE", "/tenants/"+validTenantID, nil)
@@ -674,7 +763,7 @@ func TestDelete_ConcurrentDeleteReturns409(t *testing.T) {
 	}
 	ps.projects[validProjectID] = testProjectObj()
 
-	h := NewHandler(ts, ns, ps, prov)
+	h := NewHandler(ts, ns, ps, prov, nil)
 	r := testRouter(h)
 
 	req := httptest.NewRequest("DELETE", "/tenants/"+validTenantID, nil)
@@ -703,7 +792,7 @@ func TestGet_Found(t *testing.T) {
 		UpdatedAt: time.Now(),
 	}
 
-	h := NewHandler(ts, ns, ps, prov)
+	h := NewHandler(ts, ns, ps, prov, nil)
 	r := testRouter(h)
 
 	req := httptest.NewRequest("GET", "/tenants/"+validTenantID, nil)
@@ -721,7 +810,7 @@ func TestGet_NotFound(t *testing.T) {
 	ps := newMockProjectStore()
 	prov := newMockProvisioner()
 
-	h := NewHandler(ts, ns, ps, prov)
+	h := NewHandler(ts, ns, ps, prov, nil)
 	r := testRouter(h)
 
 	req := httptest.NewRequest("GET", "/tenants/"+validTenantID, nil)
@@ -739,7 +828,7 @@ func TestGet_InvalidID(t *testing.T) {
 	ps := newMockProjectStore()
 	prov := newMockProvisioner()
 
-	h := NewHandler(ts, ns, ps, prov)
+	h := NewHandler(ts, ns, ps, prov, nil)
 	r := testRouter(h)
 
 	req := httptest.NewRequest("GET", "/tenants/not-a-uuid", nil)
@@ -757,7 +846,7 @@ func TestList_Empty(t *testing.T) {
 	ps := newMockProjectStore()
 	prov := newMockProvisioner()
 
-	h := NewHandler(ts, ns, ps, prov)
+	h := NewHandler(ts, ns, ps, prov, nil)
 	r := testRouter(h)
 
 	req := httptest.NewRequest("GET", "/tenants", nil)
@@ -768,11 +857,14 @@ func TestList_Empty(t *testing.T) {
 		t.Errorf("expected 200, got %d: %s", w.Code, w.Body.String())
 	}
 
-	var tenants []Tenant
-	if err := json.NewDecoder(w.Body).Decode(&tenants); err != nil {
+	var result struct {
+		Items []Tenant `json:"items"`
+		Total int      `json:"total"`
+	}
+	if err := json.NewDecoder(w.Body).Decode(&result); err != nil {
 		t.Fatalf("decode response: %v", err)
 	}
-	if len(tenants) != 0 {
-		t.Errorf("expected empty list, got %d", len(tenants))
+	if len(result.Items) != 0 {
+		t.Errorf("expected empty list, got %d", len(result.Items))
 	}
 }

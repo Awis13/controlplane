@@ -53,7 +53,7 @@ func main() {
 	}
 
 	// Create HTTP server
-	handler, err := server.New(pool, cfg)
+	handler, prov, err := server.New(pool, cfg)
 	if err != nil {
 		slog.Error("failed to create server", "error", err)
 		os.Exit(1)
@@ -89,6 +89,10 @@ func main() {
 
 	shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer shutdownCancel()
+
+	// Wait for in-flight provisioning goroutines to complete
+	slog.Info("waiting for provisioner to finish")
+	prov.Shutdown()
 
 	if err := srv.Shutdown(shutdownCtx); err != nil {
 		slog.Error("forced shutdown", "error", err)
