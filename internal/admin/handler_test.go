@@ -402,6 +402,15 @@ func testRouter(h *Handler) chi.Router {
 		r.Post("/tenants/{id}/resume", h.resumeTenant)
 		r.Get("/tenants/{id}/row", h.tenantRow)
 
+		// Network (WireGuard)
+		r.Get("/network", h.networkPage)
+		r.Post("/network/peers", h.createPeerAdmin)
+		r.Get("/network/peers/{id}", h.peerDetail)
+		r.Put("/network/peers/{id}", h.updatePeerAdmin)
+		r.Delete("/network/peers/{id}", h.deletePeerAdmin)
+		r.Post("/network/peers/{id}/enable", h.enablePeerAdmin)
+		r.Post("/network/peers/{id}/disable", h.disablePeerAdmin)
+
 		r.Delete("/webauthn/credentials/{id}", h.deleteCredential)
 	})
 

@@ -1,0 +1,1 @@
+DROP TABLE IF EXISTS wireguard_peers CASCADE;

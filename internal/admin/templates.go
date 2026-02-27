@@ -103,7 +103,7 @@ func ParseTemplates() (*Templates, error) {
 	}
 
 	// Pages to parse
-	pageNames := []string{"dashboard", "nodes", "projects", "tenants", "node_detail", "project_detail", "tenant_detail", "audit", "settings"}
+	pageNames := []string{"dashboard", "nodes", "projects", "tenants", "node_detail", "project_detail", "tenant_detail", "audit", "settings", "network", "peer_detail"}
 	pages := make(map[string]*template.Template)
 
 	for _, name := range pageNames {

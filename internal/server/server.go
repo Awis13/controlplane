@@ -1,6 +1,7 @@
 package server
 
 import (
+	"context"
 	"crypto/subtle"
 	"fmt"
 	"log/slog"
@@ -27,6 +28,7 @@ import (
 	"controlplane/internal/station"
 	"controlplane/internal/tenant"
 	"controlplane/internal/user"
+	"controlplane/internal/wireguard"
 )
 
 // New creates and configures the HTTP server with all routes.
@@ -84,6 +86,41 @@ func New(pool *pgxpool.Pool, cfg *config.Config) (http.Handler, *provisioner.Pro
 	if err != nil {
 		return nil, nil, fmt.Errorf("admin handler: %w", err)
 	}
+	// WireGuard peer management (optional — requires WG_HUB_PUBLIC_KEY)
+	wgStore := wireguard.NewStore(pool)
+	if cfg.WGHubPublicKey != "" {
+		wgService := wireguard.NewService(wgStore, cfg.EncryptionKey, cfg.WGHubPublicKey, cfg.WGHubEndpoint, cfg.WGNetworkCIDR)
+		adminHandler.SetWireGuard(wgService, wgStore)
+
+		// Регистрируем API-хэндлеры для WireGuard
+		wgHandler := wireguard.NewHandler(wgService, auditStore)
+		r.Route("/api/v1/wireguard", func(r chi.Router) {
+			r.Use(bearerAuth(cfg.APIToken))
+			r.Get("/peers", wgHandler.ListPeers)
+			r.Post("/peers", wgHandler.CreatePeer)
+			r.Get("/peers/{id}", wgHandler.GetPeer)
+			r.Put("/peers/{id}", wgHandler.UpdatePeer)
+			r.Delete("/peers/{id}", wgHandler.DeletePeer)
+			r.Post("/peers/{id}/enable", wgHandler.EnablePeer)
+			r.Post("/peers/{id}/disable", wgHandler.DisablePeer)
+			r.Get("/peers/{id}/config", wgHandler.GetPeerConfig)
+			r.Get("/peers/{id}/qr", wgHandler.GetPeerQR)
+		})
+
+		// Синхронизируем пиры с wg0 при старте
+		go func() {
+			if err := wgService.SyncPeers(context.Background()); err != nil {
+				slog.Warn("wireguard: initial sync failed", "error", err)
+			} else {
+				slog.Info("wireguard: initial peer sync complete")
+			}
+		}()
+
+		slog.Info("wireguard: module enabled", "network", cfg.WGNetworkCIDR, "hub_endpoint", cfg.WGHubEndpoint)
+	} else {
+		slog.Info("wireguard: module disabled (WG_HUB_PUBLIC_KEY not set)")
+	}
+
 	r.Mount("/admin", adminHandler.Routes())
 
 	// Stations — public read endpoints (no auth)
