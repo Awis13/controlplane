@@ -5,6 +5,7 @@ import (
 	"encoding/base64"
 	"fmt"
 	"log/slog"
+	"net/netip"
 	"os/exec"
 	"strings"
 
@@ -127,10 +128,20 @@ func (s *Service) CreatePeer(ctx context.Context, req CreatePeerRequest) (*Peer,
 func (s *Service) BuildPeerConfig(peer *Peer, privateKey string) string {
 	var sb strings.Builder
 
+	// Определяем DNS и AllowedIPs на основе networkCIDR
+	dnsAddr := "10.10.0.1"
+	peerAllowedIPs := s.networkCIDR
+	if prefix, err := netip.ParsePrefix(s.networkCIDR); err == nil {
+		// DNS = первый адрес в подсети + 1 (gateway)
+		base := prefix.Addr()
+		dnsAddr = base.Next().String()
+		peerAllowedIPs = prefix.String()
+	}
+
 	sb.WriteString("[Interface]\n")
 	sb.WriteString(fmt.Sprintf("Address = %s/24\n", peer.WgIP))
 	sb.WriteString(fmt.Sprintf("PrivateKey = %s\n", privateKey))
-	sb.WriteString("DNS = 10.10.0.1\n")
+	sb.WriteString(fmt.Sprintf("DNS = %s\n", dnsAddr))
 	sb.WriteString("\n")
 	sb.WriteString("[Peer]\n")
 	sb.WriteString(fmt.Sprintf("PublicKey = %s\n", s.hubPublicKey))
@@ -143,7 +154,7 @@ func (s *Service) BuildPeerConfig(peer *Peer, privateKey string) string {
 		}
 	}
 
-	sb.WriteString("AllowedIPs = 10.10.0.0/24, 10.10.10.0/24\n")
+	sb.WriteString(fmt.Sprintf("AllowedIPs = %s\n", peerAllowedIPs))
 	sb.WriteString(fmt.Sprintf("Endpoint = %s\n", s.hubEndpoint))
 	sb.WriteString("PersistentKeepalive = 25\n")
 

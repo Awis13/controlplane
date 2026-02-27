@@ -149,7 +149,7 @@ func TestBuildPeerConfig(t *testing.T) {
 	if !strings.Contains(config, "PublicKey = "+hubPubKey) {
 		t.Error("config missing hub PublicKey")
 	}
-	if !strings.Contains(config, "AllowedIPs = 10.10.0.0/24, 10.10.10.0/24") {
+	if !strings.Contains(config, "AllowedIPs = 10.10.0.0/24") {
 		t.Error("config missing AllowedIPs")
 	}
 	if !strings.Contains(config, "Endpoint = "+hubEndpoint) {
@@ -233,6 +233,25 @@ func TestCustomNetworkCIDR(t *testing.T) {
 
 	if svc.NetworkCIDR() != "192.168.1.0/24" {
 		t.Errorf("custom NetworkCIDR = %q, want 192.168.1.0/24", svc.NetworkCIDR())
+	}
+}
+
+func TestBuildPeerConfigUsesNetworkCIDR(t *testing.T) {
+	svc := NewService(nil, testEncryptionKey, "hub-pub-key", "1.2.3.4:51820", "10.10.0.0/16")
+
+	peer := &Peer{
+		WgIP:       "10.10.5.10",
+		PublicKey:  "some-public-key",
+		AllowedIPs: "10.10.5.10/32",
+	}
+
+	config := svc.BuildPeerConfig(peer, "priv-key")
+
+	if !strings.Contains(config, "DNS = 10.10.0.1") {
+		t.Error("config should derive DNS from networkCIDR base + 1")
+	}
+	if !strings.Contains(config, "AllowedIPs = 10.10.0.0/16") {
+		t.Error("config should use networkCIDR for AllowedIPs")
 	}
 }
 

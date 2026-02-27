@@ -45,17 +45,8 @@ func (h *Handler) networkPage(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	filterType := r.URL.Query().Get("type")
-
-	var peers []wireguard.Peer
-	var err error
-
-	if filterType != "" && wireguard.ValidPeerTypes[filterType] {
-		peers, err = h.wgStore.ListByType(r.Context(), filterType)
-	} else {
-		peers, err = h.wgStore.List(r.Context())
-	}
-
+	// Получаем все пиры одним запросом
+	allPeers, err := h.wgStore.List(r.Context())
 	if err != nil {
 		slog.Error("admin: list peers", "error", err)
 		http.Error(w, "internal error", 500)
@@ -64,7 +55,6 @@ func (h *Handler) networkPage(w http.ResponseWriter, r *http.Request) {
 
 	// Считаем статистику по типам
 	var adminCount, nodeCount, userCount, enabledCount int
-	allPeers, _ := h.wgStore.List(r.Context())
 	for _, p := range allPeers {
 		switch p.Type {
 		case "admin":
@@ -77,6 +67,19 @@ func (h *Handler) networkPage(w http.ResponseWriter, r *http.Request) {
 		if p.Enabled {
 			enabledCount++
 		}
+	}
+
+	// Фильтруем in-memory если указан тип
+	filterType := r.URL.Query().Get("type")
+	peers := allPeers
+	if filterType != "" && wireguard.ValidPeerTypes[filterType] {
+		filtered := make([]wireguard.Peer, 0, len(allPeers))
+		for _, p := range allPeers {
+			if p.Type == filterType {
+				filtered = append(filtered, p)
+			}
+		}
+		peers = filtered
 	}
 
 	data := struct {
@@ -120,6 +123,7 @@ func (h *Handler) createPeerAdmin(w http.ResponseWriter, r *http.Request) {
 	peerType := strings.TrimSpace(r.FormValue("type"))
 	endpoint := strings.TrimSpace(r.FormValue("endpoint"))
 	tenantID := strings.TrimSpace(r.FormValue("tenant_id"))
+	allowedIPs := strings.TrimSpace(r.FormValue("allowed_ips"))
 
 	if name == "" || peerType == "" {
 		h.renderFlash(w, "flash_error", "Name and type are required")
@@ -131,11 +135,20 @@ func (h *Handler) createPeerAdmin(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Валидация AllowedIPs если указаны
+	if allowedIPs != "" {
+		if err := wireguard.ValidateAllowedIPs(allowedIPs); err != nil {
+			h.renderFlash(w, "flash_error", "Invalid AllowedIPs: "+err.Error())
+			return
+		}
+	}
+
 	req := wireguard.CreatePeerRequest{
-		Name:     name,
-		Type:     peerType,
-		Endpoint: endpoint,
-		TenantID: tenantID,
+		Name:       name,
+		Type:       peerType,
+		Endpoint:   endpoint,
+		TenantID:   tenantID,
+		AllowedIPs: allowedIPs,
 	}
 
 	peer, privateKey, err := h.wgService.CreatePeer(r.Context(), req)
@@ -162,11 +175,36 @@ func (h *Handler) createPeerAdmin(w http.ResponseWriter, r *http.Request) {
 		})
 	}
 
-	// Показываем строку + тост с приватным ключом
-	h.triggerToast(w, "Peer created. Private key: "+privateKey, "success")
+	// Рендерим страницу деталей пира с приватным ключом (показывается один раз)
+	config := h.wgService.BuildPeerConfig(peer, privateKey)
 
-	if err := h.tmpl.RenderPartial(w, "peer_row", peer); err != nil {
-		slog.Error("admin: render peer row", "error", err)
+	qrPNG, qrErr := h.wgService.GenerateQRCode(config)
+	var qrBase64 string
+	if qrErr == nil {
+		qrBase64 = base64.StdEncoding.EncodeToString(qrPNG)
+	} else {
+		slog.Warn("admin: не удалось сгенерировать QR", "error", qrErr)
+	}
+
+	data := struct {
+		pageData
+		Peer       *wireguard.Peer
+		Config     string
+		QRBase64   string
+		PrivateKey string
+	}{
+		pageData: newPage(r, "Peer: "+peer.Name, "network", []breadcrumb{
+			{Label: "Network", URL: "/admin/network"},
+			{Label: peer.Name},
+		}),
+		Peer:       peer,
+		Config:     config,
+		QRBase64:   qrBase64,
+		PrivateKey: privateKey,
+	}
+
+	if err := h.tmpl.RenderPage(w, "peer_detail", data); err != nil {
+		slog.Error("admin: render peer detail after create", "error", err)
 	}
 }
 
@@ -208,9 +246,10 @@ func (h *Handler) peerDetail(w http.ResponseWriter, r *http.Request) {
 
 	data := struct {
 		pageData
-		Peer     *wireguard.Peer
-		Config   string
-		QRBase64 string
+		Peer       *wireguard.Peer
+		Config     string
+		QRBase64   string
+		PrivateKey string
 	}{
 		pageData: newPage(r, "Peer: "+peer.Name, "network", []breadcrumb{
 			{Label: "Network", URL: "/admin/network"},

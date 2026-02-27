@@ -105,6 +105,12 @@ func (h *Handler) CreatePeer(w http.ResponseWriter, r *http.Request) {
 		response.Error(w, http.StatusBadRequest, "invalid type: must be admin, node, or user")
 		return
 	}
+	if req.AllowedIPs != "" {
+		if err := ValidateAllowedIPs(req.AllowedIPs); err != nil {
+			response.Error(w, http.StatusBadRequest, "invalid allowed_ips: "+err.Error())
+			return
+		}
+	}
 
 	peer, privateKey, err := h.service.CreatePeer(r.Context(), req)
 	if err != nil {
