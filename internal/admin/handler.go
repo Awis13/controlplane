@@ -66,6 +66,7 @@ type Provisioner interface {
 	Deprovision(ctx context.Context, tenantID, nodeID string, lxcID, ramMB int) error
 	Suspend(ctx context.Context, tenantID, nodeID string, lxcID int) error
 	Resume(ctx context.Context, tenantID, nodeID string, lxcID int) error
+	InvalidateClient(nodeID string)
 }
 
 // Handler serves the admin UI.
@@ -1253,6 +1254,11 @@ func (h *Handler) updateNodeAdmin(w http.ResponseWriter, r *http.Request) {
 		slog.Error("admin: update node", "error", err)
 		h.renderFlash(w, "flash_error", "Failed to update node")
 		return
+	}
+
+	if req.APIToken != nil && h.provisioner != nil {
+		h.provisioner.InvalidateClient(id)
+		slog.Info("admin: invalidated cached Proxmox client", "node_id", id)
 	}
 
 	if h.auditStore != nil {

@@ -121,6 +121,14 @@ func (p *Provisioner) WithClientFactory(f ClientFactory) {
 	p.clientFactory = f
 }
 
+// InvalidateClient removes the cached Proxmox client for a node,
+// forcing re-creation with fresh credentials on next use.
+func (p *Provisioner) InvalidateClient(nodeID string) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	delete(p.clients, nodeID)
+}
+
 // Shutdown waits for all in-flight provisioning goroutines to complete.
 func (p *Provisioner) Shutdown() {
 	p.wg.Wait()

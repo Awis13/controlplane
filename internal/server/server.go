@@ -80,7 +80,7 @@ func New(pool *pgxpool.Pool, cfg *config.Config) (http.Handler, *provisioner.Pro
 		r.Use(bearerAuth(cfg.APIToken))
 
 		// Nodes
-		nodeHandler := node.NewHandler(nodeStore, auditStore, cfg.EncryptionKey)
+		nodeHandler := node.NewHandler(nodeStore, auditStore, cfg.EncryptionKey, prov)
 		r.Route("/nodes", func(r chi.Router) {
 			r.Get("/", nodeHandler.List)
 			r.Post("/", nodeHandler.Create)

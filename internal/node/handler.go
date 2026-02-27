@@ -32,16 +32,22 @@ type NodeStore interface {
 	ReleaseRAM(ctx context.Context, nodeID string, ramMB int) error
 }
 
+// ProvisionerClientInvalidator can invalidate cached Proxmox clients.
+type ProvisionerClientInvalidator interface {
+	InvalidateClient(nodeID string)
+}
+
 var nameRegexp = regexp.MustCompile(`^[a-z0-9][a-z0-9._-]*[a-z0-9]$`)
 
 type Handler struct {
 	store         NodeStore
 	auditStore    *audit.Store
 	encryptionKey string
+	provisioner   ProvisionerClientInvalidator
 }
 
-func NewHandler(store NodeStore, auditStore *audit.Store, encryptionKey string) *Handler {
-	return &Handler{store: store, auditStore: auditStore, encryptionKey: encryptionKey}
+func NewHandler(store NodeStore, auditStore *audit.Store, encryptionKey string, provisioner ProvisionerClientInvalidator) *Handler {
+	return &Handler{store: store, auditStore: auditStore, encryptionKey: encryptionKey, provisioner: provisioner}
 }
 
 func (h *Handler) List(w http.ResponseWriter, r *http.Request) {
@@ -207,6 +213,10 @@ func (h *Handler) Update(w http.ResponseWriter, r *http.Request) {
 	if n == nil {
 		response.Error(w, http.StatusNotFound, "node not found")
 		return
+	}
+	if req.APIToken != nil && h.provisioner != nil {
+		h.provisioner.InvalidateClient(id)
+		slog.Info("node: invalidated cached Proxmox client", "node_id", id)
 	}
 	if h.auditStore != nil {
 		h.auditStore.Log(r.Context(), "update", "node", n.ID, nil)
