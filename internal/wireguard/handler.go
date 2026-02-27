@@ -111,6 +111,12 @@ func (h *Handler) CreatePeer(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
+	if req.Endpoint != "" {
+		if err := ValidateEndpoint(req.Endpoint); err != nil {
+			response.Error(w, http.StatusBadRequest, "invalid endpoint: "+err.Error())
+			return
+		}
+	}
 
 	peer, privateKey, err := h.service.CreatePeer(r.Context(), req)
 	if err != nil {

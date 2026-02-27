@@ -1,8 +1,11 @@
 package wireguard
 
 import (
+	"encoding/base64"
 	"fmt"
+	"net"
 	"net/netip"
+	"strconv"
 	"strings"
 )
 
@@ -47,5 +50,30 @@ func ValidateAllowedIPs(allowedIPs string) error {
 		}
 	}
 
+	return nil
+}
+
+// ValidatePublicKey проверяет что строка — валидный WireGuard public key (32 байта base64).
+func ValidatePublicKey(key string) error {
+	b, err := base64.StdEncoding.DecodeString(key)
+	if err != nil {
+		return fmt.Errorf("invalid base64: %w", err)
+	}
+	if len(b) != 32 {
+		return fmt.Errorf("key must be 32 bytes, got %d", len(b))
+	}
+	return nil
+}
+
+// ValidateEndpoint проверяет формат host:port.
+func ValidateEndpoint(endpoint string) error {
+	host, portStr, err := net.SplitHostPort(endpoint)
+	if err != nil || host == "" {
+		return fmt.Errorf("must be host:port format")
+	}
+	port, err := strconv.Atoi(portStr)
+	if err != nil || port < 1 || port > 65535 {
+		return fmt.Errorf("port must be 1-65535")
+	}
 	return nil
 }
