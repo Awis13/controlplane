@@ -87,12 +87,22 @@ func main() {
 		os.Exit(1)
 	}
 
-	shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), 10*time.Second)
+	shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), 15*time.Second)
 	defer shutdownCancel()
 
-	// Wait for in-flight provisioning goroutines to complete
+	// Wait for in-flight provisioning goroutines (with timeout)
 	slog.Info("waiting for provisioner to finish")
-	prov.Shutdown()
+	provDone := make(chan struct{})
+	go func() {
+		prov.Shutdown()
+		close(provDone)
+	}()
+	select {
+	case <-provDone:
+		slog.Info("provisioner finished")
+	case <-time.After(10 * time.Second):
+		slog.Warn("provisioner shutdown timed out after 10s, proceeding with server shutdown")
+	}
 
 	if err := srv.Shutdown(shutdownCtx); err != nil {
 		slog.Error("forced shutdown", "error", err)

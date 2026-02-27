@@ -94,7 +94,9 @@
       try {
         const beginResp = await fetch('/admin/webauthn/register/begin', {method: 'POST'});
         if (!beginResp.ok) { showError((await beginResp.json()).error || 'Failed'); btn.disabled = false; return; }
-        const opts = await beginResp.json();
+        const beginData = await beginResp.json();
+        const sessionToken = beginData.sessionToken;
+        const opts = {publicKey: beginData.publicKey};
 
         opts.publicKey.challenge = base64urlToBuf(opts.publicKey.challenge);
         opts.publicKey.user.id = base64urlToBuf(opts.publicKey.user.id);
@@ -114,7 +116,7 @@
         });
 
         const finishResp = await fetch('/admin/webauthn/register/finish', {
-          method: 'POST', headers: {'Content-Type': 'application/json'}, body,
+          method: 'POST', headers: {'Content-Type': 'application/json', 'X-Session-Token': sessionToken}, body,
         });
         if (!finishResp.ok) { showError((await finishResp.json()).error || 'Registration failed'); btn.disabled = false; return; }
 
@@ -132,7 +134,9 @@
       try {
         const beginResp = await fetch('/admin/webauthn/login/begin', {method: 'POST'});
         if (!beginResp.ok) { showError((await beginResp.json()).error || 'Failed'); btn.disabled = false; return; }
-        const opts = await beginResp.json();
+        const beginData = await beginResp.json();
+        const sessionToken = beginData.sessionToken;
+        const opts = {publicKey: beginData.publicKey};
 
         opts.publicKey.challenge = base64urlToBuf(opts.publicKey.challenge);
         if (opts.publicKey.allowCredentials) {
@@ -153,7 +157,7 @@
         });
 
         const finishResp = await fetch('/admin/webauthn/login/finish', {
-          method: 'POST', headers: {'Content-Type': 'application/json'}, body,
+          method: 'POST', headers: {'Content-Type': 'application/json', 'X-Session-Token': sessionToken}, body,
         });
         if (!finishResp.ok) { showError((await finishResp.json()).error || 'Login failed'); btn.disabled = false; return; }
 

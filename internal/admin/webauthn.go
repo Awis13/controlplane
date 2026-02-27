@@ -1,6 +1,8 @@
 package admin
 
 import (
+	"crypto/rand"
+	"encoding/base64"
 	"encoding/json"
 	"log/slog"
 	"net/http"
@@ -13,35 +15,68 @@ import (
 
 const challengeTTL = 5 * time.Minute
 
+// sessionEntry pairs session data with a flow type for extra safety.
+type sessionEntry struct {
+	data     *webauthn.SessionData
+	flowType string // "register" or "login"
+}
+
 // webauthnSessions stores challenge data between begin/finish calls.
+// Sessions are keyed by a random token (not a fixed key) to prevent
+// concurrent requests from overwriting each other's challenges.
 type webauthnSessions struct {
 	mu       sync.Mutex
-	sessions map[string]*webauthn.SessionData // key: "register" or "login"
+	sessions map[string]sessionEntry
 }
 
 func newWebAuthnSessions() *webauthnSessions {
-	return &webauthnSessions{sessions: make(map[string]*webauthn.SessionData)}
+	return &webauthnSessions{sessions: make(map[string]sessionEntry)}
 }
 
-func (s *webauthnSessions) Set(key string, data *webauthn.SessionData) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	s.sessions[key] = data
+// generateToken creates a random 32-byte base64url token for session keying.
+func generateToken() (string, error) {
+	b := make([]byte, 32)
+	if _, err := rand.Read(b); err != nil {
+		return "", err
+	}
+	return base64.RawURLEncoding.EncodeToString(b), nil
 }
 
-func (s *webauthnSessions) Get(key string) *webauthn.SessionData {
+// Set stores session data under a new random token and returns the token.
+func (s *webauthnSessions) Set(flowType string, data *webauthn.SessionData) (string, error) {
+	token, err := generateToken()
+	if err != nil {
+		return "", err
+	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	data, ok := s.sessions[key]
+	// GC expired entries (bounded: at most a handful)
+	for k, v := range s.sessions {
+		if time.Now().After(v.data.Expires) {
+			delete(s.sessions, k)
+		}
+	}
+	s.sessions[token] = sessionEntry{data: data, flowType: flowType}
+	return token, nil
+}
+
+// Get retrieves and deletes session data by token (one-time use).
+// Returns nil if token not found, expired, or flow type mismatch.
+func (s *webauthnSessions) Get(token, expectedFlow string) *webauthn.SessionData {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	entry, ok := s.sessions[token]
 	if !ok {
 		return nil
 	}
-	if time.Now().After(data.Expires) {
-		delete(s.sessions, key)
+	delete(s.sessions, token) // one-time use
+	if entry.flowType != expectedFlow {
 		return nil
 	}
-	delete(s.sessions, key) // one-time use
-	return data
+	if time.Now().After(entry.data.Expires) {
+		return nil
+	}
+	return entry.data
 }
 
 // --- Login page ---
@@ -107,10 +142,18 @@ func (h *Handler) registerBegin(w http.ResponseWriter, r *http.Request) {
 	}
 
 	session.Expires = time.Now().Add(challengeTTL)
-	h.webauthnSessions.Set("register", session)
+	token, err := h.webauthnSessions.Set("register", session)
+	if err != nil {
+		slog.Error("admin: generate session token", "error", err)
+		jsonError(w, "internal error", 500)
+		return
+	}
 
 	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(creation)
+	json.NewEncoder(w).Encode(map[string]interface{}{
+		"publicKey":    creation.Response,
+		"sessionToken": token,
+	})
 }
 
 func (h *Handler) registerFinish(w http.ResponseWriter, r *http.Request) {
@@ -127,7 +170,13 @@ func (h *Handler) registerFinish(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	session := h.webauthnSessions.Get("register")
+	sessionToken := r.Header.Get("X-Session-Token")
+	if sessionToken == "" {
+		jsonError(w, "missing session token", 400)
+		return
+	}
+
+	session := h.webauthnSessions.Get(sessionToken, "register")
 	if session == nil {
 		jsonError(w, "no pending registration", 400)
 		return
@@ -179,16 +228,30 @@ func (h *Handler) loginBegin(w http.ResponseWriter, r *http.Request) {
 	}
 
 	session.Expires = time.Now().Add(challengeTTL)
-	h.webauthnSessions.Set("login", session)
+	token, err := h.webauthnSessions.Set("login", session)
+	if err != nil {
+		slog.Error("admin: generate session token", "error", err)
+		jsonError(w, "internal error", 500)
+		return
+	}
 
 	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(assertion)
+	json.NewEncoder(w).Encode(map[string]interface{}{
+		"publicKey":    assertion.Response,
+		"sessionToken": token,
+	})
 }
 
 func (h *Handler) loginFinish(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
 
-	session := h.webauthnSessions.Get("login")
+	sessionToken := r.Header.Get("X-Session-Token")
+	if sessionToken == "" {
+		jsonError(w, "no pending login", 400)
+		return
+	}
+
+	session := h.webauthnSessions.Get(sessionToken, "login")
 	if session == nil {
 		jsonError(w, "no pending login", 400)
 		return

@@ -113,7 +113,7 @@ func (h *Handler) Routes() chi.Router {
 			Path:     "/admin",
 			HttpOnly: true,
 			Secure:   true,
-			SameSite: http.SameSiteLaxMode,
+			SameSite: http.SameSiteStrictMode,
 		})
 		// Exempt WebAuthn JSON endpoints (they have their own challenge-response)
 		csrf.ExemptPaths(
@@ -1185,6 +1185,18 @@ func (h *Handler) deleteCredential(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Prevent deleting the last credential (would re-open unauthenticated registration)
+	creds, err := h.webauthnStore.ListCredentialInfos(r.Context())
+	if err != nil {
+		slog.Error("admin: count credentials", "error", err)
+		h.renderFlash(w, "flash_error", "Failed to check credentials")
+		return
+	}
+	if len(creds) <= 1 {
+		h.renderFlash(w, "flash_error", "Cannot delete the last credential")
+		return
+	}
+
 	if err := h.webauthnStore.DeleteCredential(r.Context(), id); err != nil {
 		slog.Error("admin: delete credential", "error", err)
 		h.renderFlash(w, "flash_error", "Failed to delete credential")
@@ -1387,15 +1399,7 @@ func (h *Handler) suspendTenant(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Stop container
-	if t.LXCID != nil {
-		if err := h.provisioner.Suspend(r.Context(), t.ID, t.NodeID, *t.LXCID); err != nil {
-			slog.Error("admin: suspend tenant", "error", err)
-			h.renderFlash(w, "flash_error", "Failed to stop container")
-			return
-		}
-	}
-
+	// Update DB first (CAS guard ensures atomicity), then stop container
 	if err := h.tenants.SetSuspended(r.Context(), id); err != nil {
 		if errors.Is(err, tenant.ErrStateConflict) {
 			h.renderFlash(w, "flash_error", "Tenant is not in a suspendable state")
@@ -1404,6 +1408,18 @@ func (h *Handler) suspendTenant(w http.ResponseWriter, r *http.Request) {
 		slog.Error("admin: set suspended", "error", err)
 		h.renderFlash(w, "flash_error", "Failed to suspend tenant")
 		return
+	}
+
+	if t.LXCID != nil {
+		if err := h.provisioner.Suspend(r.Context(), t.ID, t.NodeID, *t.LXCID); err != nil {
+			slog.Error("admin: suspend container failed, rolling back", "error", err)
+			// Rollback: restore active state
+			if rbErr := h.tenants.SetResumed(r.Context(), id); rbErr != nil {
+				slog.Error("admin: rollback suspend failed", "error", rbErr)
+			}
+			h.renderFlash(w, "flash_error", "Failed to stop container")
+			return
+		}
 	}
 
 	if h.auditStore != nil {
@@ -1432,15 +1448,7 @@ func (h *Handler) resumeTenant(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Start container
-	if t.LXCID != nil {
-		if err := h.provisioner.Resume(r.Context(), t.ID, t.NodeID, *t.LXCID); err != nil {
-			slog.Error("admin: resume tenant", "error", err)
-			h.renderFlash(w, "flash_error", "Failed to start container")
-			return
-		}
-	}
-
+	// Update DB first (CAS guard ensures atomicity), then start container
 	if err := h.tenants.SetResumed(r.Context(), id); err != nil {
 		if errors.Is(err, tenant.ErrStateConflict) {
 			h.renderFlash(w, "flash_error", "Tenant is not in a resumable state")
@@ -1449,6 +1457,18 @@ func (h *Handler) resumeTenant(w http.ResponseWriter, r *http.Request) {
 		slog.Error("admin: set resumed", "error", err)
 		h.renderFlash(w, "flash_error", "Failed to resume tenant")
 		return
+	}
+
+	if t.LXCID != nil {
+		if err := h.provisioner.Resume(r.Context(), t.ID, t.NodeID, *t.LXCID); err != nil {
+			slog.Error("admin: resume container failed, rolling back", "error", err)
+			// Rollback: restore suspended state
+			if rbErr := h.tenants.SetSuspended(r.Context(), id); rbErr != nil {
+				slog.Error("admin: rollback resume failed", "error", rbErr)
+			}
+			h.renderFlash(w, "flash_error", "Failed to start container")
+			return
+		}
 	}
 
 	if h.auditStore != nil {
