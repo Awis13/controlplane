@@ -1,0 +1,65 @@
+{{define "content"}}
+<h1>Audit Log</h1>
+
+<div class="filter-bar" x-data="{ entityType: '{{.FilterEntityType}}', action: '{{.FilterAction}}' }">
+  <select name="entity_type" x-model="entityType"
+    hx-get="/admin/audit"
+    hx-target="body"
+    hx-push-url="true"
+    hx-include="[name='action']">
+    <option value="">All Entity Types</option>
+    <option value="node">Node</option>
+    <option value="project">Project</option>
+    <option value="tenant">Tenant</option>
+  </select>
+  <select name="action" x-model="action"
+    hx-get="/admin/audit"
+    hx-target="body"
+    hx-push-url="true"
+    hx-include="[name='entity_type']">
+    <option value="">All Actions</option>
+    <option value="create">Create</option>
+    <option value="update">Update</option>
+    <option value="delete">Delete</option>
+    <option value="suspend">Suspend</option>
+    <option value="resume">Resume</option>
+  </select>
+</div>
+
+<table>
+  <thead>
+    <tr>
+      <th>Action</th>
+      <th>Entity Type</th>
+      <th>Entity ID</th>
+      <th>Time</th>
+    </tr>
+  </thead>
+  <tbody>
+    {{range .Entries}}
+    <tr>
+      <td><span class="badge badge-{{.Action}}">{{.Action}}</span></td>
+      <td>{{.EntityType}}</td>
+      <td class="mono">{{.EntityID}}</td>
+      <td class="text-muted">{{fmtTime .CreatedAt}}</td>
+    </tr>
+    {{else}}
+    <tr class="empty-row"><td colspan="4">No audit entries yet</td></tr>
+    {{end}}
+  </tbody>
+</table>
+
+{{if gt .Total 0}}
+<div class="pagination">
+  <span>Showing {{len .Entries}} of {{.Total}} entries</span>
+  <div class="pagination-buttons">
+    {{if gt .Offset 0}}
+    <button class="btn-secondary btn-sm" hx-get="/admin/audit?offset={{sub .Offset .Limit}}&limit={{.Limit}}&entity_type={{.FilterEntityType}}&action={{.FilterAction}}" hx-target="body" hx-push-url="true">Previous</button>
+    {{end}}
+    {{if .HasMore}}
+    <button class="btn-secondary btn-sm" hx-get="/admin/audit?offset={{add .Offset .Limit}}&limit={{.Limit}}&entity_type={{.FilterEntityType}}&action={{.FilterAction}}" hx-target="body" hx-push-url="true">Next</button>
+    {{end}}
+  </div>
+</div>
+{{end}}
+{{end}}

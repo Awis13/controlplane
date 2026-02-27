@@ -5,11 +5,19 @@ import (
 	"crypto/hmac"
 	"crypto/sha256"
 	"encoding/hex"
+	"time"
 
 	"github.com/go-webauthn/webauthn/protocol"
 	"github.com/go-webauthn/webauthn/webauthn"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
+
+// CredentialInfo is a lightweight view of a WebAuthn credential for the settings page.
+type CredentialInfo struct {
+	ID        string
+	CreatedAt time.Time
+	SignCount int
+}
 
 // AdminUser implements webauthn.User for the single admin account.
 // The user ID is deterministically derived from the encryption key via HMAC.
@@ -114,4 +122,30 @@ func (s *WebAuthnStore) HasCredentials(ctx context.Context) (bool, error) {
 	var exists bool
 	err := s.pool.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM webauthn_credentials)`).Scan(&exists)
 	return exists, err
+}
+
+// ListCredentialInfos returns lightweight credential info for the settings page.
+func (s *WebAuthnStore) ListCredentialInfos(ctx context.Context) ([]CredentialInfo, error) {
+	rows, err := s.pool.Query(ctx, `
+		SELECT id, created_at, sign_count FROM webauthn_credentials ORDER BY created_at`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var infos []CredentialInfo
+	for rows.Next() {
+		var ci CredentialInfo
+		if err := rows.Scan(&ci.ID, &ci.CreatedAt, &ci.SignCount); err != nil {
+			return nil, err
+		}
+		infos = append(infos, ci)
+	}
+	return infos, rows.Err()
+}
+
+// DeleteCredential deletes a WebAuthn credential by ID.
+func (s *WebAuthnStore) DeleteCredential(ctx context.Context, id string) error {
+	_, err := s.pool.Exec(ctx, `DELETE FROM webauthn_credentials WHERE id = $1`, id)
+	return err
 }

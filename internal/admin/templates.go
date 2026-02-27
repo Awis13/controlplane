@@ -22,6 +22,7 @@ var staticFS embed.FS
 
 var funcs = template.FuncMap{
 	"sub": func(a, b int) int { return a - b },
+	"add": func(a, b int) int { return a + b },
 	"fmtTime": func(t time.Time) string {
 		return t.Format("2006-01-02 15:04")
 	},
@@ -35,6 +36,25 @@ var funcs = template.FuncMap{
 	"freeRAM": func(n node.Node) int {
 		return n.TotalRAMMB - n.AllocatedRAMMB
 	},
+	"ramPercent": func(n node.Node) int {
+		if n.TotalRAMMB == 0 {
+			return 0
+		}
+		return n.AllocatedRAMMB * 100 / n.TotalRAMMB
+	},
+	"ramColor": func(n node.Node) string {
+		if n.TotalRAMMB == 0 {
+			return "green"
+		}
+		pct := n.AllocatedRAMMB * 100 / n.TotalRAMMB
+		if pct > 90 {
+			return "red"
+		}
+		if pct > 70 {
+			return "orange"
+		}
+		return "green"
+	},
 	"derefInt": func(p *int) int {
 		if p == nil {
 			return 0
@@ -44,6 +64,12 @@ var funcs = template.FuncMap{
 	"derefStr": func(p *string) string {
 		if p == nil {
 			return ""
+		}
+		return *p
+	},
+	"derefTime": func(p *time.Time) time.Time {
+		if p == nil {
+			return time.Time{}
 		}
 		return *p
 	},
@@ -77,7 +103,7 @@ func ParseTemplates() (*Templates, error) {
 	}
 
 	// Pages to parse
-	pageNames := []string{"dashboard", "nodes", "projects", "tenants"}
+	pageNames := []string{"dashboard", "nodes", "projects", "tenants", "node_detail", "project_detail", "tenant_detail", "audit", "settings"}
 	pages := make(map[string]*template.Template)
 
 	for _, name := range pageNames {

@@ -39,6 +39,44 @@
   </form>
 </div>
 
+<!-- Filters -->
+<div class="filter-bar" id="tenant-filters">
+  <select name="status"
+    hx-get="/admin/tenants"
+    hx-target="body"
+    hx-push-url="true"
+    hx-include="#tenant-filters select">
+    <option value="">All Statuses</option>
+    <option value="provisioning" {{if eq .FilterStatus "provisioning"}}selected{{end}}>Provisioning</option>
+    <option value="active" {{if eq .FilterStatus "active"}}selected{{end}}>Active</option>
+    <option value="suspended" {{if eq .FilterStatus "suspended"}}selected{{end}}>Suspended</option>
+    <option value="error" {{if eq .FilterStatus "error"}}selected{{end}}>Error</option>
+    <option value="deleting" {{if eq .FilterStatus "deleting"}}selected{{end}}>Deleting</option>
+    <option value="deleted" {{if eq .FilterStatus "deleted"}}selected{{end}}>Deleted</option>
+  </select>
+  <select name="project_id"
+    hx-get="/admin/tenants"
+    hx-target="body"
+    hx-push-url="true"
+    hx-include="#tenant-filters select">
+    <option value="">All Projects</option>
+    {{range .Projects}}
+    <option value="{{.ID}}" {{if eq $.FilterProject .ID}}selected{{end}}>{{.Name}}</option>
+    {{end}}
+  </select>
+  <select name="node_id"
+    hx-get="/admin/tenants"
+    hx-target="body"
+    hx-push-url="true"
+    hx-include="#tenant-filters select">
+    <option value="">All Nodes</option>
+    {{range .Nodes}}
+    <option value="{{.ID}}" {{if eq $.FilterNode .ID}}selected{{end}}>{{.Name}}</option>
+    {{end}}
+  </select>
+  <span class="text-muted" style="font-size:12px">{{len .Tenants}} of {{.TotalCount}} tenants</span>
+</div>
+
 <table>
   <thead>
     <tr>
@@ -55,7 +93,7 @@
     {{range .Tenants}}
     {{template "tenant_row" .}}
     {{else}}
-    <tr class="empty-row"><td colspan="7">No tenants yet</td></tr>
+    <tr class="empty-row"><td colspan="7">No tenants match filters</td></tr>
     {{end}}
   </tbody>
 </table>

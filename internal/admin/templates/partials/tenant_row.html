@@ -6,7 +6,7 @@
     hx-swap="outerHTML"
     class="polling"
   {{end}}>
-  <td>{{.Name}}</td>
+  <td><a href="/admin/tenants/{{.ID}}">{{.Name}}</a></td>
   <td class="mono">{{.Subdomain}}</td>
   <td>{{.ProjectName}}</td>
   <td>{{.NodeName}}</td>
@@ -16,8 +16,20 @@
     {{if .ErrorMessage}}<span class="text-muted" style="font-size:11px;margin-left:4px">{{derefStr .ErrorMessage}}</span>{{end}}
   </td>
   <td class="text-right">
+    {{if eq .Status "active"}}
+    <button class="btn-warning btn-xs"
+      hx-post="/admin/tenants/{{.ID}}/suspend"
+      hx-target="body"
+      hx-confirm="Suspend tenant {{.Name}}?">Suspend</button>
+    {{end}}
+    {{if eq .Status "suspended"}}
+    <button class="btn-xs"
+      hx-post="/admin/tenants/{{.ID}}/resume"
+      hx-target="body"
+      hx-confirm="Resume tenant {{.Name}}?">Resume</button>
+    {{end}}
     {{if or (eq .Status "active") (eq .Status "error")}}
-    <button class="btn-danger btn-sm"
+    <button class="btn-danger btn-xs"
       hx-delete="/admin/tenants/{{.ID}}"
       hx-target="#tenant-{{.ID}}"
       hx-swap="outerHTML"
