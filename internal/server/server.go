@@ -118,6 +118,15 @@ func New(pool *pgxpool.Pool, cfg *config.Config) (http.Handler, *provisioner.Pro
 		})
 	})
 
+	// User tenant management (JWT-protected, auto-select project+node)
+	userTenantHandler := tenant.NewUserHandler(tenantStore, nodeStore, projectStore, prov)
+	r.Route("/api/v1/user/tenants", func(r chi.Router) {
+		r.Use(httprate.LimitByIP(20, time.Minute))
+		r.Use(auth.JWTAuth(userStore, cfg.JWTSecret))
+		r.Get("/", userTenantHandler.List)
+		r.Post("/", userTenantHandler.Create)
+	})
+
 	// API v1 (protected by Bearer token auth)
 	r.Route("/api/v1", func(r chi.Router) {
 		r.Use(httprate.LimitByIP(100, time.Minute))
