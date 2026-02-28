@@ -13,6 +13,8 @@ type Project struct {
 	StripePriceID *string   `json:"stripe_price_id,omitempty"`
 	HealthPath    string    `json:"health_path"`
 	RAMMB         int       `json:"ram_mb"`
+	NetworkCIDR   string    `json:"network_cidr"`
+	Gateway       string    `json:"gateway"`
 	CreatedAt     time.Time `json:"created_at"`
 	UpdatedAt     time.Time `json:"updated_at"`
 }
@@ -24,6 +26,8 @@ type CreateProjectRequest struct {
 	StripePriceID *string `json:"stripe_price_id,omitempty"`
 	HealthPath    string  `json:"health_path"`
 	RAMMB         int     `json:"ram_mb"`
+	NetworkCIDR   string  `json:"network_cidr"`
+	Gateway       string  `json:"gateway"`
 }
 
 type UpdateProjectRequest struct {
@@ -33,4 +37,6 @@ type UpdateProjectRequest struct {
 	StripePriceID *string `json:"stripe_price_id,omitempty"`
 	HealthPath    *string `json:"health_path,omitempty"`
 	RAMMB         *int    `json:"ram_mb,omitempty"`
+	NetworkCIDR   *string `json:"network_cidr,omitempty"`
+	Gateway       *string `json:"gateway,omitempty"`
 }

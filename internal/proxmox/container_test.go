@@ -419,6 +419,58 @@ func TestDeleteContainer_NoForce(t *testing.T) {
 	}
 }
 
+func TestConfigureNetwork(t *testing.T) {
+	var gotPath string
+	var gotMethod string
+	var gotParams string
+
+	srv := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotPath = r.URL.Path
+		gotMethod = r.Method
+		body, _ := io.ReadAll(r.Body)
+		gotParams = string(body)
+		_ = json.NewEncoder(w).Encode(response{
+			Data: json.RawMessage(`null`),
+		})
+	}))
+	defer srv.Close()
+
+	c := NewClient(srv.URL, "token", WithHTTPClient(srv.Client()), WithNodeName("testnode"))
+
+	net0 := "name=eth0,bridge=vmbr0,ip=10.10.10.5/24,gw=10.10.10.1,firewall=1,type=veth"
+	err := c.ConfigureNetwork(context.Background(), 105, net0)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	if gotMethod != http.MethodPut {
+		t.Errorf("expected PUT, got %s", gotMethod)
+	}
+	if gotPath != "/api2/json/nodes/testnode/lxc/105/config" {
+		t.Errorf("unexpected path: %s", gotPath)
+	}
+	if !strings.Contains(gotParams, "net0=") {
+		t.Errorf("missing net0 param in %q", gotParams)
+	}
+}
+
+func TestConfigureNetwork_Error(t *testing.T) {
+	srv := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusBadRequest)
+		_ = json.NewEncoder(w).Encode(response{
+			Errors: map[string]string{"net0": "invalid network config"},
+		})
+	}))
+	defer srv.Close()
+
+	c := NewClient(srv.URL, "token", WithHTTPClient(srv.Client()), WithNodeName("testnode"))
+
+	err := c.ConfigureNetwork(context.Background(), 105, "invalid")
+	if err == nil {
+		t.Fatal("expected error for invalid network config")
+	}
+}
+
 func TestCloneContainer_InvalidNewID(t *testing.T) {
 	c := NewClient("https://host:8006", "token", WithNodeName("testnode"))
 

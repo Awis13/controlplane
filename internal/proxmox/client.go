@@ -146,6 +146,28 @@ func (c *Client) delete(ctx context.Context, path string, params url.Values) (st
 	return data, nil
 }
 
+// put performs an authenticated PUT request with form-encoded params.
+func (c *Client) put(ctx context.Context, path string, params url.Values) error {
+	var body io.Reader
+	if len(params) > 0 {
+		body = strings.NewReader(params.Encode())
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodPut, c.apiURL(path), body)
+	if err != nil {
+		return fmt.Errorf("create request: %w", err)
+	}
+	req.Header.Set("Authorization", c.apiToken)
+	if len(params) > 0 {
+		req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	}
+	resp, err := c.httpClient.Do(req)
+	if err != nil {
+		return fmt.Errorf("execute request: %w", err)
+	}
+	defer resp.Body.Close()
+	return c.decodeResponse(resp, nil) // PUT config returns null data
+}
+
 // decodeResponse parses the Proxmox response envelope and extracts data into out.
 func (c *Client) decodeResponse(resp *http.Response, out any) error {
 	const maxResponseSize = 10 * 1024 * 1024 // 10MB

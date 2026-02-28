@@ -107,6 +107,23 @@ func (m *mockTenantStore) SetDeleted(_ context.Context, id string) error {
 	return nil
 }
 
+func (m *mockTenantStore) SetLXCIP(_ context.Context, id string, ip string) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	// store for verification
+	return nil
+}
+
+func (m *mockTenantStore) GetNextAvailableIP(_ context.Context, cidr string) (string, error) {
+	return "10.10.10.5", nil
+}
+
+func (m *mockTenantStore) SetHealthStatus(_ context.Context, id string, status string) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return nil
+}
+
 type mockProjectStore struct {
 	projects map[string]*project.Project
 }
@@ -204,16 +221,23 @@ func (m *mockProxmoxClient) DeleteContainer(_ context.Context, vmid int, _ bool)
 	return &mockWaiter{err: m.deleteWaitErr}, nil
 }
 
+func (m *mockProxmoxClient) ConfigureNetwork(_ context.Context, _ int, _ string) error {
+	return nil
+}
+
 // --- Helpers ---
 
 func testProject() *project.Project {
 	return &project.Project{
-		ID:         "proj-1",
-		Name:       "test-project",
-		TemplateID: 100,
-		RAMMB:      1536,
-		HealthPath: "/api/health",
-		CreatedAt:  time.Now(),
+		ID:          "proj-1",
+		Name:        "test-project",
+		TemplateID:  100,
+		RAMMB:       1536,
+		HealthPath:  "/api/health",
+		NetworkCIDR: "10.10.10.0/24",
+		Gateway:     "10.10.10.1",
+		Ports:       []int{80},
+		CreatedAt:   time.Now(),
 	}
 }
 

@@ -5,6 +5,8 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"net/http"
+	"strings"
 	"sync"
 	"time"
 
@@ -33,6 +35,9 @@ type TenantStore interface {
 	SetError(ctx context.Context, id string, errMsg string) error
 	SetDeleting(ctx context.Context, id string) error
 	SetDeleted(ctx context.Context, id string) error
+	SetLXCIP(ctx context.Context, id string, ip string) error
+	GetNextAvailableIP(ctx context.Context, cidr string) (string, error)
+	SetHealthStatus(ctx context.Context, id string, status string) error
 }
 
 // ProjectStore defines what the provisioner needs from the project store.
@@ -53,6 +58,7 @@ type ProxmoxClient interface {
 	StartContainer(ctx context.Context, vmid int) (Waiter, error)
 	StopContainer(ctx context.Context, vmid int) (Waiter, error)
 	DeleteContainer(ctx context.Context, vmid int, force bool) (Waiter, error)
+	ConfigureNetwork(ctx context.Context, vmid int, net0Value string) error
 }
 
 // proxmoxAdapter wraps a real *proxmox.Client to satisfy ProxmoxClient interface.
@@ -80,6 +86,10 @@ func (a *proxmoxAdapter) StopContainer(ctx context.Context, vmid int) (Waiter, e
 
 func (a *proxmoxAdapter) DeleteContainer(ctx context.Context, vmid int, force bool) (Waiter, error) {
 	return a.client.DeleteContainer(ctx, vmid, force)
+}
+
+func (a *proxmoxAdapter) ConfigureNetwork(ctx context.Context, vmid int, net0Value string) error {
+	return a.client.ConfigureNetwork(ctx, vmid, net0Value)
 }
 
 // ClientFactory creates Proxmox clients. Allows injection in tests.
@@ -218,7 +228,7 @@ func (p *Provisioner) doProvision(tenantID, nodeID, projectID, subdomain string,
 
 	log := slog.With("tenant_id", tenantID, "node_id", nodeID, "project_id", projectID)
 
-	// Get project for template_id
+	// Get project
 	proj, err := p.projectStore.GetByID(ctx, projectID)
 	if err != nil {
 		log.Error("provision: get project", "error", err)
@@ -261,11 +271,41 @@ func (p *Provisioner) doProvision(tenantID, nodeID, projectID, subdomain string,
 		p.setError(ctx, tenantID, nodeID, ramMB, "provisioning failed: clone error")
 		return
 	}
-
 	if err := cloneTask.Wait(ctx); err != nil {
 		log.Error("provision: wait for clone", "error", err)
 		p.setError(ctx, tenantID, nodeID, ramMB, "provisioning failed: clone did not complete")
 		return
+	}
+
+	// Allocate IP and configure network (before start)
+	var lxcIP string
+	if proj.NetworkCIDR != "" {
+		lxcIP, err = p.tenantStore.GetNextAvailableIP(ctx, proj.NetworkCIDR)
+		if err != nil {
+			log.Error("provision: allocate ip", "error", err)
+			p.cleanupAndError(ctx, client, tenantID, nodeID, ramMB, newID, "provisioning failed: IP allocation error")
+			return
+		}
+		log = log.With("lxc_ip", lxcIP)
+
+		// Extract prefix length from CIDR (e.g. "10.10.10.0/24" → "24")
+		prefixLen := "24"
+		if parts := strings.SplitN(proj.NetworkCIDR, "/", 2); len(parts) == 2 {
+			prefixLen = parts[1]
+		}
+		net0 := fmt.Sprintf("name=eth0,bridge=vmbr0,ip=%s/%s,gw=%s,firewall=1,type=veth", lxcIP, prefixLen, proj.Gateway)
+		log.Info("provision: configuring network", "net0", net0)
+		if err := client.ConfigureNetwork(ctx, newID, net0); err != nil {
+			log.Error("provision: configure network", "error", err)
+			p.cleanupAndError(ctx, client, tenantID, nodeID, ramMB, newID, "provisioning failed: network config error")
+			return
+		}
+
+		// Save IP in DB early (before start, so it's visible during provisioning)
+		if err := p.tenantStore.SetLXCIP(ctx, tenantID, lxcIP); err != nil {
+			log.Error("provision: set lxc ip", "error", err)
+			// Non-fatal — continue
+		}
 	}
 
 	// Start container
@@ -276,7 +316,6 @@ func (p *Provisioner) doProvision(tenantID, nodeID, projectID, subdomain string,
 		p.cleanupAndError(ctx, client, tenantID, nodeID, ramMB, newID, "provisioning failed: start error")
 		return
 	}
-
 	if err := startTask.Wait(ctx); err != nil {
 		log.Error("provision: wait for start", "error", err)
 		p.cleanupAndError(ctx, client, tenantID, nodeID, ramMB, newID, "provisioning failed: start did not complete")
@@ -286,13 +325,56 @@ func (p *Provisioner) doProvision(tenantID, nodeID, projectID, subdomain string,
 	// Mark as active
 	if err := p.tenantStore.SetActive(ctx, tenantID, newID); err != nil {
 		log.Error("provision: set active", "error", err)
-		// Container is running but DB update failed — clean up the container
-		// to avoid orphans, and mark as error
 		p.cleanupAndError(ctx, client, tenantID, nodeID, ramMB, newID, "provisioning failed: could not update status")
 		return
 	}
 
+	// Add Caddy route (best-effort, don't fail provisioning)
+	if p.caddyClient != nil && lxcIP != "" {
+		if err := p.caddyClient.AddRoute(ctx, subdomain, lxcIP); err != nil {
+			log.Error("provision: add caddy route", "subdomain", subdomain, "error", err)
+		} else {
+			log.Info("provision: caddy route added", "subdomain", subdomain)
+		}
+	}
+
+	// Health check (best-effort, don't fail provisioning)
+	if lxcIP != "" && len(proj.Ports) > 0 && proj.HealthPath != "" {
+		healthURL := fmt.Sprintf("http://%s:%d%s", lxcIP, proj.Ports[0], proj.HealthPath)
+		log.Info("provision: checking health", "url", healthURL)
+		healthy := p.waitForHealth(ctx, healthURL, 60*time.Second, 5*time.Second)
+		status := "healthy"
+		if !healthy {
+			status = "unhealthy"
+			log.Warn("provision: health check timeout, marking unhealthy")
+		}
+		if err := p.tenantStore.SetHealthStatus(ctx, tenantID, status); err != nil {
+			log.Error("provision: set health status", "error", err)
+		}
+	}
+
 	log.Info("provision: tenant provisioned successfully")
+}
+
+// waitForHealth polls a URL until it returns 200 or timeout.
+func (p *Provisioner) waitForHealth(ctx context.Context, url string, timeout, interval time.Duration) bool {
+	deadline := time.Now().Add(timeout)
+	client := &http.Client{Timeout: 5 * time.Second}
+	for time.Now().Before(deadline) {
+		resp, err := client.Get(url)
+		if err == nil {
+			resp.Body.Close()
+			if resp.StatusCode == http.StatusOK {
+				return true
+			}
+		}
+		select {
+		case <-ctx.Done():
+			return false
+		case <-time.After(interval):
+		}
+	}
+	return false
 }
 
 // Deprovision removes an LXC container for a tenant synchronously.

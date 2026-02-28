@@ -127,6 +127,22 @@ func (c *Client) ShutdownContainer(ctx context.Context, vmid int, timeout int) (
 	return &Task{UPID: upid, node: node, client: c}, nil
 }
 
+// ConfigureNetwork sets the network interface config on a container.
+// Should be called on a stopped container before starting it.
+// net0Value is the full Proxmox net0 string, e.g. "name=eth0,bridge=vmbr0,ip=10.10.10.5/24,gw=10.10.10.1,firewall=1,type=veth"
+func (c *Client) ConfigureNetwork(ctx context.Context, vmid int, net0Value string) error {
+	node, err := c.resolveNode(ctx)
+	if err != nil {
+		return err
+	}
+	params := url.Values{}
+	params.Set("net0", net0Value)
+	if err := c.put(ctx, fmt.Sprintf("nodes/%s/lxc/%d/config", node, vmid), params); err != nil {
+		return fmt.Errorf("configure network: %w", err)
+	}
+	return nil
+}
+
 // DeleteContainer removes an LXC container. If force is true, the container
 // is stopped first if running.
 // Returns a Task that can be used to wait for the delete operation to complete.

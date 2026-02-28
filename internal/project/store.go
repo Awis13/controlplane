@@ -22,7 +22,7 @@ func NewStore(pool *pgxpool.Pool) *Store {
 	return &Store{pool: pool}
 }
 
-const projectColumns = `id, name, template_id, ports, stripe_price_id, health_path, ram_mb, created_at, updated_at`
+const projectColumns = `id, name, template_id, ports, stripe_price_id, health_path, ram_mb, network_cidr, gateway, created_at, updated_at`
 
 func (s *Store) List(ctx context.Context) ([]Project, error) {
 	rows, err := s.pool.Query(ctx,
@@ -36,7 +36,7 @@ func (s *Store) List(ctx context.Context) ([]Project, error) {
 	for rows.Next() {
 		var p Project
 		if err := rows.Scan(&p.ID, &p.Name, &p.TemplateID, &p.Ports,
-			&p.StripePriceID, &p.HealthPath, &p.RAMMB, &p.CreatedAt, &p.UpdatedAt); err != nil {
+			&p.StripePriceID, &p.HealthPath, &p.RAMMB, &p.NetworkCIDR, &p.Gateway, &p.CreatedAt, &p.UpdatedAt); err != nil {
 			return nil, fmt.Errorf("scan project: %w", err)
 		}
 		projects = append(projects, p)
@@ -64,7 +64,7 @@ func (s *Store) ListPaginated(ctx context.Context, limit, offset int) ([]Project
 	for rows.Next() {
 		var p Project
 		if err := rows.Scan(&p.ID, &p.Name, &p.TemplateID, &p.Ports,
-			&p.StripePriceID, &p.HealthPath, &p.RAMMB, &p.CreatedAt, &p.UpdatedAt, &total); err != nil {
+			&p.StripePriceID, &p.HealthPath, &p.RAMMB, &p.NetworkCIDR, &p.Gateway, &p.CreatedAt, &p.UpdatedAt, &total); err != nil {
 			return nil, 0, fmt.Errorf("scan project: %w", err)
 		}
 		projects = append(projects, p)
@@ -81,7 +81,7 @@ func (s *Store) GetByID(ctx context.Context, id string) (*Project, error) {
 	err := s.pool.QueryRow(ctx,
 		`SELECT `+projectColumns+` FROM projects WHERE id = $1`, id).
 		Scan(&p.ID, &p.Name, &p.TemplateID, &p.Ports,
-			&p.StripePriceID, &p.HealthPath, &p.RAMMB, &p.CreatedAt, &p.UpdatedAt)
+			&p.StripePriceID, &p.HealthPath, &p.RAMMB, &p.NetworkCIDR, &p.Gateway, &p.CreatedAt, &p.UpdatedAt)
 	if err != nil {
 		if err == pgx.ErrNoRows {
 			return nil, nil
@@ -98,7 +98,7 @@ func (s *Store) GetDefault(ctx context.Context) (*Project, error) {
 	err := s.pool.QueryRow(ctx,
 		`SELECT `+projectColumns+` FROM projects ORDER BY created_at ASC LIMIT 1`).
 		Scan(&p.ID, &p.Name, &p.TemplateID, &p.Ports,
-			&p.StripePriceID, &p.HealthPath, &p.RAMMB, &p.CreatedAt, &p.UpdatedAt)
+			&p.StripePriceID, &p.HealthPath, &p.RAMMB, &p.NetworkCIDR, &p.Gateway, &p.CreatedAt, &p.UpdatedAt)
 	if err != nil {
 		if err == pgx.ErrNoRows {
 			return nil, nil
@@ -119,14 +119,21 @@ func (s *Store) Create(ctx context.Context, req CreateProjectRequest) (*Project,
 		req.RAMMB = 1536
 	}
 
+	if req.NetworkCIDR == "" {
+		req.NetworkCIDR = "10.10.10.0/24"
+	}
+	if req.Gateway == "" {
+		req.Gateway = "10.10.10.1"
+	}
+
 	var p Project
 	err := s.pool.QueryRow(ctx,
-		`INSERT INTO projects (name, template_id, ports, stripe_price_id, health_path, ram_mb)
-		 VALUES ($1, $2, $3, $4, $5, $6)
+		`INSERT INTO projects (name, template_id, ports, stripe_price_id, health_path, ram_mb, network_cidr, gateway)
+		 VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
 		 RETURNING `+projectColumns,
-		req.Name, req.TemplateID, req.Ports, req.StripePriceID, req.HealthPath, req.RAMMB).
+		req.Name, req.TemplateID, req.Ports, req.StripePriceID, req.HealthPath, req.RAMMB, req.NetworkCIDR, req.Gateway).
 		Scan(&p.ID, &p.Name, &p.TemplateID, &p.Ports,
-			&p.StripePriceID, &p.HealthPath, &p.RAMMB, &p.CreatedAt, &p.UpdatedAt)
+			&p.StripePriceID, &p.HealthPath, &p.RAMMB, &p.NetworkCIDR, &p.Gateway, &p.CreatedAt, &p.UpdatedAt)
 	if err != nil {
 		return nil, fmt.Errorf("insert project: %w", err)
 	}
@@ -169,6 +176,16 @@ func (s *Store) Update(ctx context.Context, id string, req UpdateProjectRequest)
 		args = append(args, *req.RAMMB)
 		argIdx++
 	}
+	if req.NetworkCIDR != nil {
+		setClauses = append(setClauses, fmt.Sprintf("network_cidr = $%d", argIdx))
+		args = append(args, *req.NetworkCIDR)
+		argIdx++
+	}
+	if req.Gateway != nil {
+		setClauses = append(setClauses, fmt.Sprintf("gateway = $%d", argIdx))
+		args = append(args, *req.Gateway)
+		argIdx++
+	}
 
 	if len(setClauses) == 0 {
 		return nil, ErrNoUpdate
@@ -183,7 +200,7 @@ func (s *Store) Update(ctx context.Context, id string, req UpdateProjectRequest)
 	var p Project
 	err := s.pool.QueryRow(ctx, query, args...).
 		Scan(&p.ID, &p.Name, &p.TemplateID, &p.Ports,
-			&p.StripePriceID, &p.HealthPath, &p.RAMMB, &p.CreatedAt, &p.UpdatedAt)
+			&p.StripePriceID, &p.HealthPath, &p.RAMMB, &p.NetworkCIDR, &p.Gateway, &p.CreatedAt, &p.UpdatedAt)
 	if err != nil {
 		if err == pgx.ErrNoRows {
 			return nil, nil
