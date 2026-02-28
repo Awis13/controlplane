@@ -85,6 +85,7 @@
       <th>Project</th>
       <th>Node</th>
       <th>LXC ID</th>
+      <th>LXC IP</th>
       <th>Status</th>
       <th></th>
     </tr>
@@ -93,7 +94,7 @@
     {{range .Tenants}}
     {{template "tenant_row" .}}
     {{else}}
-    <tr class="empty-row"><td colspan="7">No tenants match filters</td></tr>
+    <tr class="empty-row"><td colspan="8">No tenants match filters</td></tr>
     {{end}}
   </tbody>
 </table>

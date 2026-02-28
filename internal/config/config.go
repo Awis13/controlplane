@@ -18,9 +18,12 @@ type Config struct {
 	JWTSecret         string   // required: HMAC-SHA256 secret for user JWT tokens
 	RegistrationToken string   // optional: if set, registration requires X-Registration-Token header
 	CORSOrigins    []string // optional: allowed CORS origins (default: localhost dev ports)
-	WGHubPublicKey string   // optional: WireGuard hub public key
-	WGHubEndpoint  string   // optional: WireGuard hub endpoint (host:port)
-	WGNetworkCIDR  string   // optional: WireGuard network CIDR (default: 10.10.0.0/24)
+	WGHubPublicKey  string // optional: WireGuard hub public key
+	WGHubEndpoint   string // optional: WireGuard hub endpoint (host:port)
+	WGNetworkCIDR   string // optional: WireGuard network CIDR (default: 10.10.0.0/24)
+	CaddyAdminURL   string // optional: Caddy Admin API URL (e.g. http://172.17.0.1:2019)
+	CaddyServerName string // optional: Caddy server name (default: srv1)
+	CaddyDomain     string // optional: domain for tenant routes (default: freeradio.app)
 }
 
 // Load reads configuration from environment variables.
@@ -57,9 +60,12 @@ func Load() (*Config, error) {
 		JWTSecret:      jwtSecret,
 		CORSOrigins:    corsOrigins,
 		RegistrationToken: os.Getenv("REGISTRATION_TOKEN"),
-		WGHubPublicKey:    os.Getenv("WG_HUB_PUBLIC_KEY"),
-		WGHubEndpoint:  os.Getenv("WG_HUB_ENDPOINT"),
-		WGNetworkCIDR:  getEnv("WG_NETWORK_CIDR", "10.10.0.0/24"),
+		WGHubPublicKey:  os.Getenv("WG_HUB_PUBLIC_KEY"),
+		WGHubEndpoint:   os.Getenv("WG_HUB_ENDPOINT"),
+		WGNetworkCIDR:   getEnv("WG_NETWORK_CIDR", "10.10.0.0/24"),
+		CaddyAdminURL:   os.Getenv("CADDY_ADMIN_URL"),
+		CaddyServerName: getEnv("CADDY_SERVER_NAME", "srv1"),
+		CaddyDomain:     getEnv("CADDY_DOMAIN", "freeradio.app"),
 	}, nil
 }
 

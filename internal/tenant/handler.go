@@ -47,7 +47,7 @@ type ProjectStore interface {
 // Provisioner defines the provisioning operations.
 type Provisioner interface {
 	Provision(tenantID, nodeID, projectID, subdomain string, ramMB int)
-	Deprovision(ctx context.Context, tenantID, nodeID string, lxcID, ramMB int) error
+	Deprovision(ctx context.Context, tenantID, nodeID, subdomain string, lxcID, ramMB int) error
 	Suspend(ctx context.Context, tenantID, nodeID string, lxcID int) error
 	Resume(ctx context.Context, tenantID, nodeID string, lxcID int) error
 }
@@ -419,7 +419,7 @@ func (h *Handler) Delete(w http.ResponseWriter, r *http.Request) {
 
 	// If tenant has an LXC ID, deprovision the container
 	if t.LXCID != nil {
-		if err := h.provisioner.Deprovision(r.Context(), t.ID, t.NodeID, *t.LXCID, ramMB); err != nil {
+		if err := h.provisioner.Deprovision(r.Context(), t.ID, t.NodeID, t.Subdomain, *t.LXCID, ramMB); err != nil {
 			if errors.Is(err, ErrStateConflict) {
 				response.Error(w, http.StatusConflict, "tenant is already being deleted")
 				return

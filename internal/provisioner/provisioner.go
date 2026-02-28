@@ -90,6 +90,12 @@ func defaultClientFactory(baseURL, apiToken string) ProxmoxClient {
 	return &proxmoxAdapter{client: proxmox.NewClient(baseURL, apiToken)}
 }
 
+// CaddyClient defines the Caddy Admin API operations needed by the provisioner.
+type CaddyClient interface {
+	AddRoute(ctx context.Context, subdomain, targetIP string) error
+	RemoveRoute(ctx context.Context, subdomain string) error
+}
+
 // Provisioner handles async provisioning and deprovisioning of tenant LXC containers.
 type Provisioner struct {
 	nodeStore     NodeStore
@@ -101,6 +107,7 @@ type Provisioner struct {
 	mu            sync.RWMutex             // guards clients map
 	sem           chan struct{}             // bounded concurrency for provision goroutines
 	wg            sync.WaitGroup           // tracks in-flight provisions for graceful shutdown
+	caddyClient   CaddyClient              // optional: Caddy route management
 }
 
 // New creates a new Provisioner.
@@ -119,6 +126,11 @@ func New(nodeStore NodeStore, tenantStore TenantStore, projectStore ProjectStore
 // WithClientFactory sets a custom client factory (used for testing).
 func (p *Provisioner) WithClientFactory(f ClientFactory) {
 	p.clientFactory = f
+}
+
+// WithCaddyClient sets the Caddy client for dynamic route management.
+func (p *Provisioner) WithCaddyClient(c CaddyClient) {
+	p.caddyClient = c
 }
 
 // InvalidateClient removes the cached Proxmox client for a node,
@@ -285,7 +297,8 @@ func (p *Provisioner) doProvision(tenantID, nodeID, projectID, subdomain string,
 
 // Deprovision removes an LXC container for a tenant synchronously.
 // ramMB is passed by the caller (from the project) so we don't need to re-fetch the project.
-func (p *Provisioner) Deprovision(ctx context.Context, tenantID, nodeID string, lxcID, ramMB int) error {
+// subdomain is used to remove the Caddy route if a CaddyClient is configured.
+func (p *Provisioner) Deprovision(ctx context.Context, tenantID, nodeID, subdomain string, lxcID, ramMB int) error {
 	log := slog.With("tenant_id", tenantID, "node_id", nodeID, "lxc_id", lxcID)
 
 	// Atomically transition to deleting — prevents concurrent delete requests
@@ -331,6 +344,15 @@ func (p *Provisioner) Deprovision(ctx context.Context, tenantID, nodeID string, 
 	if ramMB > 0 {
 		if err := p.nodeStore.ReleaseRAM(ctx, nodeID, ramMB); err != nil {
 			log.Error("deprovision: release ram", "error", err)
+		}
+	}
+
+	// Remove Caddy route (best-effort, don't fail deprovisioning)
+	if p.caddyClient != nil && subdomain != "" {
+		if err := p.caddyClient.RemoveRoute(ctx, subdomain); err != nil {
+			log.Error("deprovision: remove caddy route", "subdomain", subdomain, "error", err)
+		} else {
+			log.Info("deprovision: caddy route removed", "subdomain", subdomain)
 		}
 	}
 

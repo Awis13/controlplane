@@ -34,6 +34,10 @@
       <span class="detail-value mono">{{if .Tenant.LXCID}}{{derefInt .Tenant.LXCID}}{{else}}—{{end}}</span>
     </div>
     <div class="detail-row">
+      <span class="detail-label">LXC IP</span>
+      <span class="detail-value mono">{{if .Tenant.LXCIP}}{{derefStr .Tenant.LXCIP}}{{else}}—{{end}}</span>
+    </div>
+    <div class="detail-row">
       <span class="detail-label">Status</span>
       <span class="detail-value"><span class="badge badge-{{.Tenant.Status}}">{{.Tenant.Status}}</span></span>
     </div>
