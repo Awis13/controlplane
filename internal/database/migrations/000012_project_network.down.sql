@@ -1,0 +1,2 @@
+ALTER TABLE projects DROP COLUMN IF EXISTS gateway;
+ALTER TABLE projects DROP COLUMN IF EXISTS network_cidr;
