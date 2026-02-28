@@ -226,7 +226,7 @@ func (h *Handler) deleteTenant(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if t.LXCID != nil {
-		if err := h.provisioner.Deprovision(r.Context(), t.ID, t.NodeID, *t.LXCID, ramMB); err != nil {
+		if err := h.provisioner.Deprovision(r.Context(), t.ID, t.NodeID, t.Subdomain, *t.LXCID, ramMB); err != nil {
 			if errors.Is(err, tenant.ErrStateConflict) {
 				h.renderFlash(w, "flash_error", "Tenant is already being deleted")
 				return

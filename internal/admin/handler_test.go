@@ -305,7 +305,7 @@ func (m *mockProvisioner) Provision(_, _, _, _ string, _ int) {
 	m.provisionCalled = true
 }
 
-func (m *mockProvisioner) Deprovision(_ context.Context, _, _ string, _, _ int) error {
+func (m *mockProvisioner) Deprovision(_ context.Context, _, _, _ string, _, _ int) error {
 	m.deprovisionCalled = true
 	return m.deprovisionErr
 }

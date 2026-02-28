@@ -19,6 +19,7 @@ import (
 	"controlplane/internal/admin"
 	"controlplane/internal/audit"
 	"controlplane/internal/auth"
+	"controlplane/internal/caddy"
 	"controlplane/internal/config"
 	"controlplane/internal/health"
 	"controlplane/internal/node"
@@ -55,6 +56,29 @@ func New(pool *pgxpool.Pool, cfg *config.Config) (http.Handler, *provisioner.Pro
 	userStore := user.NewStore(pool)
 	auditStore := audit.NewStore(pool)
 	prov := provisioner.New(nodeStore, tenantStore, projectStore, cfg.EncryptionKey)
+
+	// Caddy dynamic routing (optional)
+	if cfg.CaddyAdminURL != "" {
+		caddyClient := caddy.NewClient(cfg.CaddyAdminURL, cfg.CaddyServerName, cfg.CaddyDomain)
+		prov.WithCaddyClient(caddyClient)
+
+		// Reconcile routes on startup (background goroutine)
+		go func() {
+			adapter := &tenantStoreAdapter{store: tenantStore}
+			result, err := caddy.Reconcile(context.Background(), caddyClient, adapter)
+			if err != nil {
+				slog.Warn("caddy: reconciliation failed", "error", err)
+			} else {
+				slog.Info("caddy: route reconciliation complete",
+					"success", result.Success, "failed", result.Failed)
+			}
+		}()
+
+		slog.Info("caddy: dynamic routing enabled",
+			"admin_url", cfg.CaddyAdminURL, "server", cfg.CaddyServerName, "domain", cfg.CaddyDomain)
+	} else {
+		slog.Info("caddy: dynamic routing disabled (CADDY_ADMIN_URL not set)")
+	}
 
 	// Health (public, no auth)
 	healthHandler := health.NewHandler(pool)
@@ -220,6 +244,24 @@ func securityHeaders(next http.Handler) http.Handler {
 			"default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:")
 		next.ServeHTTP(w, r)
 	})
+}
+
+// tenantStoreAdapter wraps *tenant.Store to satisfy caddy.TenantLister
+// without creating a circular import (tenant doesn't import caddy).
+type tenantStoreAdapter struct {
+	store *tenant.Store
+}
+
+func (a *tenantStoreAdapter) ListActiveWithIP(ctx context.Context) ([]caddy.TenantRoute, error) {
+	tenants, err := a.store.ListActiveWithIP(ctx)
+	if err != nil {
+		return nil, err
+	}
+	routes := make([]caddy.TenantRoute, len(tenants))
+	for i, t := range tenants {
+		routes[i] = caddy.TenantRoute{Subdomain: t.Subdomain, LXCIP: t.LXCIP}
+	}
+	return routes, nil
 }
 
 // bearerAuth returns middleware that validates Authorization: Bearer <token> header.

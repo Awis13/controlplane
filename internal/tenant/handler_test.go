@@ -264,7 +264,7 @@ func (m *mockProvisioner) Provision(_, _, _, _ string, _ int) {
 	}
 }
 
-func (m *mockProvisioner) Deprovision(_ context.Context, _, _ string, _, _ int) error {
+func (m *mockProvisioner) Deprovision(_ context.Context, _, _, _ string, _, _ int) error {
 	m.mu.Lock()
 	m.deprovisionCalled = true
 	m.mu.Unlock()

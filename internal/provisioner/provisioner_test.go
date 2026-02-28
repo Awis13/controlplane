@@ -3,6 +3,7 @@ package provisioner
 import (
 	"context"
 	"errors"
+	"fmt"
 	"sync"
 	"testing"
 	"time"
@@ -523,7 +524,7 @@ func TestDeprovision_HappyPath(t *testing.T) {
 	mockClient := &mockProxmoxClient{}
 	p := setupProvisioner(nodeStore, tenantStore, projectStore, mockClient, n.ID)
 
-	err := p.Deprovision(context.Background(), "tenant-1", n.ID, 105, proj.RAMMB)
+	err := p.Deprovision(context.Background(), "tenant-1", n.ID, "myapp", 105, proj.RAMMB)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -567,7 +568,7 @@ func TestDeprovision_AlreadyStopped(t *testing.T) {
 	}
 	p := setupProvisioner(nodeStore, tenantStore, projectStore, mockClient, n.ID)
 
-	err := p.Deprovision(context.Background(), "tenant-1", n.ID, 105, proj.RAMMB)
+	err := p.Deprovision(context.Background(), "tenant-1", n.ID, "myapp", 105, proj.RAMMB)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -602,7 +603,7 @@ func TestDeprovision_StopWaitError_ContinuesWithDelete(t *testing.T) {
 	}
 	p := setupProvisioner(nodeStore, tenantStore, projectStore, mockClient, n.ID)
 
-	err := p.Deprovision(context.Background(), "tenant-1", n.ID, 105, proj.RAMMB)
+	err := p.Deprovision(context.Background(), "tenant-1", n.ID, "myapp", 105, proj.RAMMB)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -631,7 +632,7 @@ func TestDeprovision_DeleteError(t *testing.T) {
 	}
 	p := setupProvisioner(nodeStore, tenantStore, projectStore, mockClient, n.ID)
 
-	err := p.Deprovision(context.Background(), "tenant-1", n.ID, 105, proj.RAMMB)
+	err := p.Deprovision(context.Background(), "tenant-1", n.ID, "myapp", 105, proj.RAMMB)
 	if err == nil {
 		t.Fatal("expected error from delete failure")
 	}
@@ -667,7 +668,7 @@ func TestDeprovision_DeleteWaitError(t *testing.T) {
 	}
 	p := setupProvisioner(nodeStore, tenantStore, projectStore, mockClient, n.ID)
 
-	err := p.Deprovision(context.Background(), "tenant-1", n.ID, 105, proj.RAMMB)
+	err := p.Deprovision(context.Background(), "tenant-1", n.ID, "myapp", 105, proj.RAMMB)
 	if err == nil {
 		t.Fatal("expected error from delete wait failure")
 	}
@@ -694,7 +695,7 @@ func TestDeprovision_StateConflict(t *testing.T) {
 	mockClient := &mockProxmoxClient{}
 	p := setupProvisioner(nodeStore, tenantStore, projectStore, mockClient, n.ID)
 
-	err := p.Deprovision(context.Background(), "tenant-1", n.ID, 105, 1536)
+	err := p.Deprovision(context.Background(), "tenant-1", n.ID, "myapp", 105, 1536)
 	if err == nil {
 		t.Fatal("expected error from state conflict")
 	}
@@ -769,6 +770,122 @@ func TestGetClient_EmptyToken(t *testing.T) {
 	_, err := p.getClient(context.Background(), n.ID)
 	if err == nil {
 		t.Fatal("expected error for empty token")
+	}
+}
+
+// --- CaddyClient tests ---
+
+type mockCaddyClient struct {
+	mu              sync.Mutex
+	addedRoutes     map[string]string
+	removedRoutes   []string
+	removeRouteErr  error
+}
+
+func newMockCaddyClient() *mockCaddyClient {
+	return &mockCaddyClient{
+		addedRoutes: make(map[string]string),
+	}
+}
+
+func (m *mockCaddyClient) AddRoute(_ context.Context, subdomain, targetIP string) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.addedRoutes[subdomain] = targetIP
+	return nil
+}
+
+func (m *mockCaddyClient) RemoveRoute(_ context.Context, subdomain string) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.removedRoutes = append(m.removedRoutes, subdomain)
+	return m.removeRouteErr
+}
+
+func TestDeprovision_WithCaddyClient_RemovesRoute(t *testing.T) {
+	nodeStore := newMockNodeStore()
+	tenantStore := newMockTenantStore()
+	projectStore := newMockProjectStore()
+
+	proj := testProject()
+	n := testNode()
+	projectStore.projects[proj.ID] = proj
+	nodeStore.nodes[n.ID] = n
+	nodeStore.ram[n.ID] = proj.RAMMB
+
+	mockClient := &mockProxmoxClient{}
+	p := setupProvisioner(nodeStore, tenantStore, projectStore, mockClient, n.ID)
+
+	caddyMock := newMockCaddyClient()
+	p.WithCaddyClient(caddyMock)
+
+	err := p.Deprovision(context.Background(), "tenant-1", n.ID, "mystudio", 105, proj.RAMMB)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	caddyMock.mu.Lock()
+	defer caddyMock.mu.Unlock()
+	if len(caddyMock.removedRoutes) != 1 || caddyMock.removedRoutes[0] != "mystudio" {
+		t.Errorf("expected RemoveRoute('mystudio'), got %v", caddyMock.removedRoutes)
+	}
+}
+
+func TestDeprovision_CaddyClientError_DoesNotFail(t *testing.T) {
+	nodeStore := newMockNodeStore()
+	tenantStore := newMockTenantStore()
+	projectStore := newMockProjectStore()
+
+	proj := testProject()
+	n := testNode()
+	projectStore.projects[proj.ID] = proj
+	nodeStore.nodes[n.ID] = n
+	nodeStore.ram[n.ID] = proj.RAMMB
+
+	mockClient := &mockProxmoxClient{}
+	p := setupProvisioner(nodeStore, tenantStore, projectStore, mockClient, n.ID)
+
+	caddyMock := newMockCaddyClient()
+	caddyMock.removeRouteErr = fmt.Errorf("caddy unreachable")
+	p.WithCaddyClient(caddyMock)
+
+	// Deprovision should succeed even if Caddy fails
+	err := p.Deprovision(context.Background(), "tenant-1", n.ID, "mystudio", 105, proj.RAMMB)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	tenantStore.mu.Lock()
+	defer tenantStore.mu.Unlock()
+	if tenantStore.statuses["tenant-1"] != "deleted" {
+		t.Errorf("expected tenant status 'deleted', got %q", tenantStore.statuses["tenant-1"])
+	}
+}
+
+func TestDeprovision_NilCaddyClient_NoPanic(t *testing.T) {
+	nodeStore := newMockNodeStore()
+	tenantStore := newMockTenantStore()
+	projectStore := newMockProjectStore()
+
+	proj := testProject()
+	n := testNode()
+	projectStore.projects[proj.ID] = proj
+	nodeStore.nodes[n.ID] = n
+	nodeStore.ram[n.ID] = proj.RAMMB
+
+	mockClient := &mockProxmoxClient{}
+	p := setupProvisioner(nodeStore, tenantStore, projectStore, mockClient, n.ID)
+	// No WithCaddyClient — caddyClient is nil
+
+	err := p.Deprovision(context.Background(), "tenant-1", n.ID, "mystudio", 105, proj.RAMMB)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	tenantStore.mu.Lock()
+	defer tenantStore.mu.Unlock()
+	if tenantStore.statuses["tenant-1"] != "deleted" {
+		t.Errorf("expected tenant status 'deleted', got %q", tenantStore.statuses["tenant-1"])
 	}
 }
 

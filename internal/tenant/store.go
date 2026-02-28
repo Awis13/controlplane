@@ -19,12 +19,12 @@ func NewStore(pool *pgxpool.Pool) *Store {
 }
 
 // tenantColumns is the list of columns selected in all tenant queries.
-const tenantColumns = `id, name, project_id, node_id, lxc_id, subdomain, status, error_message, owner_id, stripe_subscription_id, stripe_customer_id, health_status, health_checked_at, created_at, updated_at`
+const tenantColumns = `id, name, project_id, node_id, lxc_id, lxc_ip, subdomain, status, error_message, owner_id, stripe_subscription_id, stripe_customer_id, health_status, health_checked_at, created_at, updated_at`
 
 // scanTenant scans a single row into a Tenant struct.
 func scanTenant(row pgx.Row) (*Tenant, error) {
 	var t Tenant
-	err := row.Scan(&t.ID, &t.Name, &t.ProjectID, &t.NodeID, &t.LXCID,
+	err := row.Scan(&t.ID, &t.Name, &t.ProjectID, &t.NodeID, &t.LXCID, &t.LXCIP,
 		&t.Subdomain, &t.Status, &t.ErrorMessage, &t.OwnerID, &t.StripeSubscriptionID,
 		&t.StripeCustomerID, &t.HealthStatus, &t.HealthCheckedAt, &t.CreatedAt, &t.UpdatedAt)
 	if err != nil {
@@ -100,7 +100,7 @@ func (s *Store) ListPaginated(ctx context.Context, limit, offset int, status, no
 	var total int
 	for rows.Next() {
 		var t Tenant
-		err := rows.Scan(&t.ID, &t.Name, &t.ProjectID, &t.NodeID, &t.LXCID,
+		err := rows.Scan(&t.ID, &t.Name, &t.ProjectID, &t.NodeID, &t.LXCID, &t.LXCIP,
 			&t.Subdomain, &t.Status, &t.ErrorMessage, &t.OwnerID, &t.StripeSubscriptionID,
 			&t.StripeCustomerID, &t.HealthStatus, &t.HealthCheckedAt, &t.CreatedAt, &t.UpdatedAt, &total)
 		if err != nil {
@@ -330,4 +330,49 @@ func (s *Store) SetDeleted(ctx context.Context, id string) error {
 		return ErrStateConflict
 	}
 	return nil
+}
+
+// SetLXCIP sets the LXC container IP for a tenant.
+func (s *Store) SetLXCIP(ctx context.Context, id string, ip string) error {
+	tag, err := s.pool.Exec(ctx,
+		`UPDATE tenants SET lxc_ip = $2 WHERE id = $1`,
+		id, ip)
+	if err != nil {
+		return fmt.Errorf("set tenant lxc_ip: %w", err)
+	}
+	if tag.RowsAffected() == 0 {
+		return pgx.ErrNoRows
+	}
+	return nil
+}
+
+// ActiveTenant is a lightweight struct for route reconciliation.
+type ActiveTenant struct {
+	Subdomain string
+	LXCIP     string
+}
+
+// ListActiveWithIP returns all active tenants that have an lxc_ip set.
+func (s *Store) ListActiveWithIP(ctx context.Context) ([]ActiveTenant, error) {
+	rows, err := s.pool.Query(ctx,
+		`SELECT subdomain, lxc_ip FROM tenants
+		 WHERE status = 'active' AND lxc_ip IS NOT NULL AND lxc_ip != ''`)
+	if err != nil {
+		return nil, fmt.Errorf("query active tenants with ip: %w", err)
+	}
+	defer rows.Close()
+
+	var tenants []ActiveTenant
+	for rows.Next() {
+		var t ActiveTenant
+		if err := rows.Scan(&t.Subdomain, &t.LXCIP); err != nil {
+			return nil, fmt.Errorf("scan active tenant: %w", err)
+		}
+		tenants = append(tenants, t)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("iterate active tenants: %w", err)
+	}
+
+	return tenants, nil
 }

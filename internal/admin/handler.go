@@ -53,7 +53,7 @@ type TenantStore interface {
 
 type Provisioner interface {
 	Provision(tenantID, nodeID, projectID, subdomain string, ramMB int)
-	Deprovision(ctx context.Context, tenantID, nodeID string, lxcID, ramMB int) error
+	Deprovision(ctx context.Context, tenantID, nodeID, subdomain string, lxcID, ramMB int) error
 	Suspend(ctx context.Context, tenantID, nodeID string, lxcID int) error
 	Resume(ctx context.Context, tenantID, nodeID string, lxcID int) error
 	InvalidateClient(nodeID string)

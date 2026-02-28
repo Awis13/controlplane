@@ -11,6 +11,7 @@ type Tenant struct {
 	ProjectID            string     `json:"project_id"`
 	NodeID               string     `json:"node_id"`
 	LXCID                *int       `json:"lxc_id,omitempty"`
+	LXCIP                *string    `json:"lxc_ip,omitempty"`
 	Subdomain            string     `json:"subdomain"`
 	Status               string     `json:"status"`
 	ErrorMessage         *string    `json:"error_message,omitempty"`
