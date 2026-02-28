@@ -86,6 +86,57 @@
   </div>
 </div>
 
+<!-- Private key alert (показывается один раз при создании WG peer) -->
+{{if .PrivateKey}}
+<div class="detail-card alert-card">
+  <h2 class="text-danger">&#9888; Сохраните приватный ключ! Он показывается только один раз.</h2>
+  <pre class="config-block selectable">{{.PrivateKey}}</pre>
+</div>
+{{end}}
+
+<!-- Connectivity -->
+<div class="detail-grid">
+  <div class="detail-card">
+    <h2>Connectivity</h2>
+
+    <!-- SSH -->
+    {{if .Tenant.LXCIP}}
+    <div class="detail-row">
+      <span class="detail-label">SSH</span>
+      <span class="detail-value mono">ssh root@{{derefStr .Tenant.LXCIP}}</span>
+    </div>
+    {{end}}
+
+    <!-- WireGuard -->
+    {{if .WGPeer}}
+    <h3>WireGuard</h3>
+    <div class="detail-row">
+      <span class="detail-label">WG IP</span>
+      <span class="detail-value mono">{{.WGPeer.WgIP}}</span>
+    </div>
+    <div class="detail-row">
+      <span class="detail-label">Public Key</span>
+      <span class="detail-value mono">{{.WGPeer.PublicKey}}</span>
+    </div>
+    <div class="detail-row">
+      <span class="detail-label">Peer</span>
+      <span class="detail-value"><a href="/admin/network/peers/{{.WGPeer.ID}}">{{.WGPeer.Name}}</a></span>
+    </div>
+    <pre class="config-block">{{.WGConfig}}</pre>
+    {{if .WGQRBase64}}
+    <h3>QR Code</h3>
+    <img src="data:image/png;base64,{{.WGQRBase64}}" alt="WireGuard QR Code" class="qr-image">
+    {{end}}
+    {{else if .WGEnabled}}
+    <div class="mt-16">
+      <button hx-post="/admin/tenants/{{.Tenant.ID}}/wg-peer"
+              hx-confirm="Create WireGuard peer for {{.Tenant.Name}}?"
+              hx-target="body">Create WG Peer</button>
+    </div>
+    {{end}}
+  </div>
+</div>
+
 <!-- Audit log entries for this tenant -->
 {{if .AuditEntries}}
 <h2 class="mb-16">Recent Activity</h2>

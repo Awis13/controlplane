@@ -153,22 +153,25 @@ func (w *mockWaiter) Wait(_ context.Context, _ ...proxmox.WaitOption) error {
 // --- Mock Proxmox client (implements ProxmoxClient with Waiter return) ---
 
 type mockProxmoxClient struct {
-	mu             sync.Mutex
-	nextID         int
-	nextIDErr      error
-	cloneErr       error
-	cloneWaitErr   error
-	startErr       error
-	startWaitErr   error
-	stopErr        error
-	stopWaitErr    error
-	deleteErr      error
-	deleteWaitErr  error
-	cloneCalled    bool
-	startCalled    bool
-	stopCalled     bool
-	deleteCalled   bool
-	deletedIDs     []int
+	mu                    sync.Mutex
+	nextID                int
+	nextIDErr             error
+	cloneErr              error
+	cloneWaitErr          error
+	startErr              error
+	startWaitErr          error
+	stopErr               error
+	stopWaitErr           error
+	deleteErr             error
+	deleteWaitErr         error
+	mountPointsErr        error
+	cloneCalled           bool
+	startCalled           bool
+	stopCalled            bool
+	deleteCalled          bool
+	mountPointsCalled     bool
+	deletedIDs            []int
+	mountPointsReceived   map[string]string
 }
 
 func (m *mockProxmoxClient) GetNextID(_ context.Context) (int, error) {
@@ -223,6 +226,14 @@ func (m *mockProxmoxClient) DeleteContainer(_ context.Context, vmid int, _ bool)
 
 func (m *mockProxmoxClient) ConfigureNetwork(_ context.Context, _ int, _ string) error {
 	return nil
+}
+
+func (m *mockProxmoxClient) ConfigureMountPoints(_ context.Context, _ int, mounts map[string]string) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.mountPointsCalled = true
+	m.mountPointsReceived = mounts
+	return m.mountPointsErr
 }
 
 // --- Helpers ---
@@ -301,6 +312,15 @@ func TestProvision_HappyPath(t *testing.T) {
 	defer mockClient.mu.Unlock()
 	if !mockClient.cloneCalled {
 		t.Error("expected clone to be called")
+	}
+	if !mockClient.mountPointsCalled {
+		t.Error("expected mount points to be configured")
+	}
+	if mp0, ok := mockClient.mountPointsReceived["mp0"]; !ok || mp0 != "/mnt/tenants/105/visuals,mp=/root/freeRadio/content/visuals" {
+		t.Errorf("unexpected mp0: %q", mp0)
+	}
+	if mp1, ok := mockClient.mountPointsReceived["mp1"]; !ok || mp1 != "/mnt/tenants/105/music,mp=/root/freeRadio/content/music" {
+		t.Errorf("unexpected mp1: %q", mp1)
 	}
 	if !mockClient.startCalled {
 		t.Error("expected start to be called")
@@ -427,6 +447,55 @@ func TestProvision_CloneWaitError(t *testing.T) {
 		t.Errorf("expected tenant status 'error', got %q", tenantStore.statuses["tenant-1"])
 	}
 
+	nodeStore.mu.Lock()
+	defer nodeStore.mu.Unlock()
+	if nodeStore.ram[n.ID] != 0 {
+		t.Errorf("expected ram to be released, got %d", nodeStore.ram[n.ID])
+	}
+}
+
+func TestProvision_MountPointsError_TriggersCleanup(t *testing.T) {
+	nodeStore := newMockNodeStore()
+	tenantStore := newMockTenantStore()
+	projectStore := newMockProjectStore()
+
+	proj := testProject()
+	n := testNode()
+	projectStore.projects[proj.ID] = proj
+	nodeStore.nodes[n.ID] = n
+	nodeStore.ram[n.ID] = proj.RAMMB
+
+	mockClient := &mockProxmoxClient{
+		nextID:         105,
+		mountPointsErr: errors.New("mount point config failed"),
+	}
+	p := setupProvisioner(nodeStore, tenantStore, projectStore, mockClient, n.ID)
+
+	waitForProvision(p, "tenant-1", n.ID, proj.ID, "myapp", proj.RAMMB)
+
+	tenantStore.mu.Lock()
+	defer tenantStore.mu.Unlock()
+
+	if tenantStore.statuses["tenant-1"] != "error" {
+		t.Errorf("expected tenant status 'error', got %q", tenantStore.statuses["tenant-1"])
+	}
+
+	// Cleanup should have attempted to delete the container
+	mockClient.mu.Lock()
+	defer mockClient.mu.Unlock()
+	if !mockClient.deleteCalled {
+		t.Error("expected delete to be called for cleanup")
+	}
+	if len(mockClient.deletedIDs) != 1 || mockClient.deletedIDs[0] != 105 {
+		t.Errorf("expected delete of LXC 105, got %v", mockClient.deletedIDs)
+	}
+
+	// Start should NOT have been called
+	if mockClient.startCalled {
+		t.Error("start should not be called after mount point failure")
+	}
+
+	// RAM should be released
 	nodeStore.mu.Lock()
 	defer nodeStore.mu.Unlock()
 	if nodeStore.ram[n.ID] != 0 {

@@ -33,6 +33,7 @@ type WireGuardStore interface {
 	List(ctx context.Context) ([]wireguard.Peer, error)
 	ListByType(ctx context.Context, peerType string) ([]wireguard.Peer, error)
 	GetByID(ctx context.Context, id string) (*wireguard.Peer, error)
+	GetByTenantID(ctx context.Context, tenantID string) (*wireguard.Peer, error)
 	Update(ctx context.Context, id string, req wireguard.UpdatePeerRequest) (*wireguard.Peer, error)
 	Delete(ctx context.Context, id string) error
 	SetEnabled(ctx context.Context, id string, enabled bool) error
