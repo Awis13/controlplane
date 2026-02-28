@@ -143,6 +143,24 @@ func (c *Client) ConfigureNetwork(ctx context.Context, vmid int, net0Value strin
 	return nil
 }
 
+// ConfigureMountPoints sets bind mount points on a container.
+// Should be called on a stopped container before starting it.
+// mounts is a map of mount point keys to values, e.g. {"mp0": "/host/path,mp=/container/path"}.
+func (c *Client) ConfigureMountPoints(ctx context.Context, vmid int, mounts map[string]string) error {
+	node, err := c.resolveNode(ctx)
+	if err != nil {
+		return err
+	}
+	params := url.Values{}
+	for key, value := range mounts {
+		params.Set(key, value)
+	}
+	if err := c.put(ctx, fmt.Sprintf("nodes/%s/lxc/%d/config", node, vmid), params); err != nil {
+		return fmt.Errorf("configure mount points: %w", err)
+	}
+	return nil
+}
+
 // DeleteContainer removes an LXC container. If force is true, the container
 // is stopped first if running.
 // Returns a Task that can be used to wait for the delete operation to complete.

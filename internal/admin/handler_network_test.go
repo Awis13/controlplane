@@ -53,6 +53,15 @@ func (m *mockWGStore) GetByID(_ context.Context, id string) (*wireguard.Peer, er
 	return p, nil
 }
 
+func (m *mockWGStore) GetByTenantID(_ context.Context, tenantID string) (*wireguard.Peer, error) {
+	for _, p := range m.peers {
+		if p.TenantID != nil && *p.TenantID == tenantID {
+			return p, nil
+		}
+	}
+	return nil, nil
+}
+
 func (m *mockWGStore) Update(_ context.Context, id string, req wireguard.UpdatePeerRequest) (*wireguard.Peer, error) {
 	if m.updateErr != nil {
 		return nil, m.updateErr

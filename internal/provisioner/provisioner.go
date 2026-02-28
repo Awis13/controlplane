@@ -59,6 +59,7 @@ type ProxmoxClient interface {
 	StopContainer(ctx context.Context, vmid int) (Waiter, error)
 	DeleteContainer(ctx context.Context, vmid int, force bool) (Waiter, error)
 	ConfigureNetwork(ctx context.Context, vmid int, net0Value string) error
+	ConfigureMountPoints(ctx context.Context, vmid int, mounts map[string]string) error
 }
 
 // proxmoxAdapter wraps a real *proxmox.Client to satisfy ProxmoxClient interface.
@@ -90,6 +91,10 @@ func (a *proxmoxAdapter) DeleteContainer(ctx context.Context, vmid int, force bo
 
 func (a *proxmoxAdapter) ConfigureNetwork(ctx context.Context, vmid int, net0Value string) error {
 	return a.client.ConfigureNetwork(ctx, vmid, net0Value)
+}
+
+func (a *proxmoxAdapter) ConfigureMountPoints(ctx context.Context, vmid int, mounts map[string]string) error {
+	return a.client.ConfigureMountPoints(ctx, vmid, mounts)
 }
 
 // ClientFactory creates Proxmox clients. Allows injection in tests.
@@ -306,6 +311,18 @@ func (p *Provisioner) doProvision(tenantID, nodeID, projectID, subdomain string,
 			log.Error("provision: set lxc ip", "error", err)
 			// Non-fatal — continue
 		}
+	}
+
+	// Configure bind mount points for shared media storage
+	mounts := map[string]string{
+		"mp0": fmt.Sprintf("/mnt/tenants/%d/visuals,mp=/root/freeRadio/content/visuals", newID),
+		"mp1": fmt.Sprintf("/mnt/tenants/%d/music,mp=/root/freeRadio/content/music", newID),
+	}
+	log.Info("provision: configuring mount points", "mounts", mounts)
+	if err := client.ConfigureMountPoints(ctx, newID, mounts); err != nil {
+		log.Error("provision: configure mount points", "error", err)
+		p.cleanupAndError(ctx, client, tenantID, nodeID, ramMB, newID, "provisioning failed: mount point config error")
+		return
 	}
 
 	// Start container

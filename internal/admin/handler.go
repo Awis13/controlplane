@@ -166,6 +166,7 @@ func (h *Handler) Routes() chi.Router {
 		r.Delete("/tenants/{id}", h.deleteTenant)
 		r.Post("/tenants/{id}/suspend", h.suspendTenant)
 		r.Post("/tenants/{id}/resume", h.resumeTenant)
+		r.Post("/tenants/{id}/wg-peer", h.createTenantPeer)
 		r.Get("/tenants/{id}/row", h.tenantRow)
 
 		// Network (WireGuard peers)

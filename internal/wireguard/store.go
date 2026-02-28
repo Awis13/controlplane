@@ -224,6 +224,19 @@ func (s *Store) GetNextAvailableIP(ctx context.Context, subnet string) (string, 
 	return "", fmt.Errorf("no available IPs in subnet %s", subnet)
 }
 
+// GetByTenantID возвращает пир, привязанный к тенанту. Nil если не найден.
+func (s *Store) GetByTenantID(ctx context.Context, tenantID string) (*Peer, error) {
+	p, err := scanPeer(s.pool.QueryRow(ctx,
+		`SELECT `+peerColumns+` FROM wireguard_peers WHERE tenant_id = $1 LIMIT 1`, tenantID))
+	if err != nil {
+		if err == pgx.ErrNoRows {
+			return nil, nil
+		}
+		return nil, fmt.Errorf("query peer by tenant: %w", err)
+	}
+	return p, nil
+}
+
 // ListEnabled возвращает все включённые пиры.
 func (s *Store) ListEnabled(ctx context.Context) ([]Peer, error) {
 	rows, err := s.pool.Query(ctx,

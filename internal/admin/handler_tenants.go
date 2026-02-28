@@ -1,6 +1,7 @@
 package admin
 
 import (
+	"encoding/base64"
 	"errors"
 	"log/slog"
 	"net/http"
@@ -13,6 +14,7 @@ import (
 	"controlplane/internal/project"
 	"controlplane/internal/response"
 	"controlplane/internal/tenant"
+	"controlplane/internal/wireguard"
 )
 
 func (h *Handler) tenantsList(w http.ResponseWriter, r *http.Request) {
@@ -329,12 +331,37 @@ func (h *Handler) tenantDetail(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
+	// WireGuard peer для тенанта
+	var wgPeer *wireguard.Peer
+	var wgConfig, wgQRBase64 string
+	wgEnabled := h.wgStore != nil
+
+	if h.wgStore != nil {
+		wgPeer, err = h.wgStore.GetByTenantID(r.Context(), t.ID)
+		if err != nil {
+			slog.Error("admin: get wg peer for tenant", "error", err)
+		}
+		if wgPeer != nil && h.wgService != nil {
+			wgConfig = h.wgService.BuildPeerConfig(wgPeer, "<PRIVATE_KEY>")
+			qrPNG, qrErr := h.wgService.GenerateQRCode(wgConfig)
+			if qrErr == nil {
+				wgQRBase64 = base64.StdEncoding.EncodeToString(qrPNG)
+			} else {
+				slog.Warn("admin: не удалось сгенерировать QR для тенанта", "error", qrErr)
+			}
+		}
+	}
+
 	data := struct {
 		pageData
 		Tenant       tenant.Tenant
 		ProjectName  string
 		NodeName     string
 		AuditEntries []audit.Entry
+		WGPeer       *wireguard.Peer
+		WGConfig     string
+		WGQRBase64   string
+		WGEnabled    bool
 	}{
 		pageData: newPage(r, "Tenant: "+t.Name, "tenants", []breadcrumb{
 			{Label: "Tenants", URL: "/admin/tenants"},
@@ -344,6 +371,10 @@ func (h *Handler) tenantDetail(w http.ResponseWriter, r *http.Request) {
 		ProjectName:  enriched.ProjectName,
 		NodeName:     enriched.NodeName,
 		AuditEntries: auditEntries,
+		WGPeer:       wgPeer,
+		WGConfig:     wgConfig,
+		WGQRBase64:   wgQRBase64,
+		WGEnabled:    wgEnabled,
 	}
 
 	if err := h.tmpl.RenderPage(w, "tenant_detail", data); err != nil {
@@ -447,4 +478,117 @@ func (h *Handler) resumeTenant(w http.ResponseWriter, r *http.Request) {
 
 	w.Header().Set("HX-Redirect", "/admin/tenants/"+id)
 	w.WriteHeader(http.StatusOK)
+}
+
+func (h *Handler) createTenantPeer(w http.ResponseWriter, r *http.Request) {
+	id := chi.URLParam(r, "id")
+	if !response.ValidUUID(id) {
+		h.renderFlash(w, "flash_error", "Invalid tenant ID")
+		return
+	}
+
+	if h.wgService == nil {
+		h.renderFlash(w, "flash_error", "WireGuard not configured")
+		return
+	}
+
+	t, err := h.tenants.GetByID(r.Context(), id)
+	if err != nil || t == nil {
+		h.renderFlash(w, "flash_error", "Tenant not found")
+		return
+	}
+
+	if t.Status != "active" {
+		h.renderFlash(w, "flash_error", "Tenant must be active to create WG peer")
+		return
+	}
+
+	// Проверяем что peer ещё не существует
+	existing, err := h.wgStore.GetByTenantID(r.Context(), t.ID)
+	if err != nil {
+		slog.Error("admin: check existing wg peer", "error", err)
+		h.renderFlash(w, "flash_error", "Failed to check existing peer")
+		return
+	}
+	if existing != nil {
+		h.renderFlash(w, "flash_error", "WireGuard peer already exists for this tenant")
+		return
+	}
+
+	req := wireguard.CreatePeerRequest{
+		Name:     "tenant-" + t.Name,
+		Type:     "user",
+		TenantID: t.ID,
+	}
+
+	peer, privateKey, err := h.wgService.CreatePeer(r.Context(), req)
+	if err != nil {
+		var pgErr *pgconn.PgError
+		if errors.As(err, &pgErr) && pgErr.Code == "23505" {
+			h.renderFlash(w, "flash_error", "Peer with this public key or IP already exists")
+			return
+		}
+		slog.Error("admin: create tenant wg peer", "error", err)
+		h.renderFlash(w, "flash_error", "Failed to create WG peer")
+		return
+	}
+
+	// Применяем к wg0
+	if applyErr := h.wgService.ApplyPeer(peer); applyErr != nil {
+		slog.Warn("admin: не удалось применить пир к wg0", "peer", peer.Name, "error", applyErr)
+	}
+
+	if h.auditStore != nil {
+		h.auditStore.Log(r.Context(), "create", "wireguard_peer", peer.ID, map[string]string{
+			"name":      peer.Name,
+			"tenant_id": t.ID,
+		})
+	}
+
+	// Рендерим tenant detail с приватным ключом
+	enriched := h.enrichSingle(r.Context(), *t)
+
+	var auditEntries []audit.Entry
+	if h.auditStore != nil {
+		auditEntries, _ = h.auditStore.ListByEntity(r.Context(), "tenant", id, 20)
+	}
+
+	config := h.wgService.BuildPeerConfig(peer, privateKey)
+
+	qrPNG, qrErr := h.wgService.GenerateQRCode(config)
+	var qrBase64 string
+	if qrErr == nil {
+		qrBase64 = base64.StdEncoding.EncodeToString(qrPNG)
+	}
+
+	data := struct {
+		pageData
+		Tenant       tenant.Tenant
+		ProjectName  string
+		NodeName     string
+		AuditEntries []audit.Entry
+		WGPeer       *wireguard.Peer
+		WGConfig     string
+		WGQRBase64   string
+		WGEnabled    bool
+		PrivateKey   string
+	}{
+		pageData: newPage(r, "Tenant: "+t.Name, "tenants", []breadcrumb{
+			{Label: "Tenants", URL: "/admin/tenants"},
+			{Label: t.Name},
+		}),
+		Tenant:       *t,
+		ProjectName:  enriched.ProjectName,
+		NodeName:     enriched.NodeName,
+		AuditEntries: auditEntries,
+		WGPeer:       peer,
+		WGConfig:     config,
+		WGQRBase64:   qrBase64,
+		WGEnabled:    true,
+		PrivateKey:   privateKey,
+	}
+
+	if err := h.tmpl.RenderPage(w, "tenant_detail", data); err != nil {
+		slog.Error("admin: render tenant detail after wg peer create", "error", err)
+	}
 }
