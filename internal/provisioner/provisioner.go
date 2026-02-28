@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"log/slog"
 	"net/http"
+	"strings"
 	"sync"
 	"time"
 
@@ -287,7 +288,12 @@ func (p *Provisioner) doProvision(tenantID, nodeID, projectID, subdomain string,
 		}
 		log = log.With("lxc_ip", lxcIP)
 
-		net0 := fmt.Sprintf("name=eth0,bridge=vmbr0,ip=%s/24,gw=%s,firewall=1,type=veth", lxcIP, proj.Gateway)
+		// Extract prefix length from CIDR (e.g. "10.10.10.0/24" → "24")
+		prefixLen := "24"
+		if parts := strings.SplitN(proj.NetworkCIDR, "/", 2); len(parts) == 2 {
+			prefixLen = parts[1]
+		}
+		net0 := fmt.Sprintf("name=eth0,bridge=vmbr0,ip=%s/%s,gw=%s,firewall=1,type=veth", lxcIP, prefixLen, proj.Gateway)
 		log.Info("provision: configuring network", "net0", net0)
 		if err := client.ConfigureNetwork(ctx, newID, net0); err != nil {
 			log.Error("provision: configure network", "error", err)
