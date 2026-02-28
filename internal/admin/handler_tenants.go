@@ -362,6 +362,7 @@ func (h *Handler) tenantDetail(w http.ResponseWriter, r *http.Request) {
 		WGConfig     string
 		WGQRBase64   string
 		WGEnabled    bool
+		PrivateKey   string
 	}{
 		pageData: newPage(r, "Tenant: "+t.Name, "tenants", []breadcrumb{
 			{Label: "Tenants", URL: "/admin/tenants"},
