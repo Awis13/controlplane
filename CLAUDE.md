@@ -84,7 +84,7 @@ controlplane/
 - Proxmox client cache invalidated on token rotation
 - DB-first state transitions with rollback for suspend/resume
 - Provisioner shutdown with 10s timeout on SIGTERM
-- Docker: non-root user, bound to 127.0.0.1
+- Docker: runs as root (NET_ADMIN required for WireGuard), network_mode: host, bound to Tailscale IP
 
 ## Notes
 

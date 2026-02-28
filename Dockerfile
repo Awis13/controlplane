@@ -10,12 +10,9 @@ RUN CGO_ENABLED=0 GOOS=linux go build -trimpath -ldflags="-s -w" -o /controlplan
 
 FROM alpine:3.21
 
-RUN apk --no-cache add ca-certificates tzdata && \
-    addgroup -S app && adduser -S app -G app
+RUN apk --no-cache add ca-certificates tzdata wireguard-tools
 
 COPY --from=builder /controlplane /usr/local/bin/controlplane
-
-USER app
 
 EXPOSE 8080
 
