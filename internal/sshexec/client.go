@@ -46,11 +46,9 @@ func (c *Client) ExecInContainer(ctx context.Context, sshHost string, vmid int, 
 // ExecOnHost выполняет команду непосредственно на Proxmox ноде (не внутри контейнера).
 // sshHost — SSH адрес Proxmox ноды (извлекается из proxmox_url).
 // command — shell команда для выполнения на хосте.
+// ВАЖНО: экранирование не выполняется — вызывающий код отвечает за безопасность команды.
 func (c *Client) ExecOnHost(ctx context.Context, sshHost string, command string) error {
-	if err := c.execCommand(ctx, sshHost, command); err != nil {
-		return fmt.Errorf("ssh exec: %w", err)
-	}
-	return nil
+	return c.execCommand(ctx, sshHost, command)
 }
 
 // execCommand — общий хелпер для выполнения произвольной команды через SSH.
@@ -109,6 +107,8 @@ func (c *Client) execCommand(ctx context.Context, sshHost string, fullCommand st
 	select {
 	case <-ctx.Done():
 		_ = session.Signal(ssh.SIGKILL)
+		_ = session.Close()
+		<-done // дожидаемся завершения горутины
 		return ctx.Err()
 	case err := <-done:
 		return err

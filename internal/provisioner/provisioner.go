@@ -277,6 +277,19 @@ func (p *Provisioner) doProvision(tenantID, nodeID, projectID, subdomain string,
 	}
 	templateID := proj.TemplateID
 
+	// Get node (нужен для SSH host позже)
+	nodeInfo, err := p.nodeStore.GetByID(ctx, nodeID)
+	if err != nil {
+		log.Error("provision: get node", "error", err)
+		p.setError(ctx, tenantID, nodeID, ramMB, "provisioning failed: node lookup error")
+		return
+	}
+	if nodeInfo == nil {
+		log.Error("provision: node not found")
+		p.setError(ctx, tenantID, nodeID, ramMB, "provisioning failed: node not found")
+		return
+	}
+
 	// Get Proxmox client
 	client, err := p.getClient(ctx, nodeID)
 	if err != nil {
@@ -347,13 +360,7 @@ func (p *Provisioner) doProvision(tenantID, nodeID, projectID, subdomain string,
 	// API tokens не могут создавать bind mounts (403 "mount point type bind is only allowed for root@pam"),
 	// поэтому при наличии SSH клиента используем pct set через SSH.
 	if p.sshClient != nil {
-		n, err := p.nodeStore.GetByID(ctx, nodeID)
-		if err != nil || n == nil {
-			log.Error("provision: get node for ssh mount points", "error", err)
-			p.cleanupAndError(ctx, client, tenantID, nodeID, ramMB, newID, "provisioning failed: mount point config error")
-			return
-		}
-		sshHost, err := sshexec.ExtractHost(n.ProxmoxURL)
+		sshHost, err := sshexec.ExtractHost(nodeInfo.ProxmoxURL)
 		if err != nil {
 			log.Error("provision: extract ssh host for mount points", "error", err)
 			p.cleanupAndError(ctx, client, tenantID, nodeID, ramMB, newID, "provisioning failed: mount point config error")
@@ -410,10 +417,7 @@ func (p *Provisioner) doProvision(tenantID, nodeID, projectID, subdomain string,
 		if token, err := generateToken(); err != nil {
 			log.Warn("provision: generate dashboard token", "error", err)
 		} else {
-			n, err := p.nodeStore.GetByID(ctx, nodeID)
-			if err != nil || n == nil {
-				log.Warn("provision: get node for ssh host", "error", err)
-			} else if sshHost, err := sshexec.ExtractHost(n.ProxmoxURL); err != nil {
+			if sshHost, err := sshexec.ExtractHost(nodeInfo.ProxmoxURL); err != nil {
 				log.Warn("provision: extract ssh host from proxmox url", "error", err)
 			} else {
 				cmd := fmt.Sprintf("sed -i '/^DASHBOARD_TOKEN=/d' /root/freeRadio/.env && echo 'DASHBOARD_TOKEN=%s' >> /root/freeRadio/.env", token)

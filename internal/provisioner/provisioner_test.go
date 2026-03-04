@@ -1370,7 +1370,7 @@ func (m *dynamicMockSSHExec) ExecOnHost(_ context.Context, sshHost string, comma
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	m.callCount++
-	if m.callCount >= m.failOnCall {
+	if m.callCount == m.failOnCall {
 		return m.err
 	}
 	return nil
