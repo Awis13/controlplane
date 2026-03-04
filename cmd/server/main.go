@@ -92,8 +92,9 @@ func main() {
 		os.Exit(1)
 	}
 
-	// Stop poller
+	// Stop poller and wait for goroutine to exit
 	pollerCancel()
+	poller.Wait()
 
 	shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), 15*time.Second)
 	defer shutdownCancel()

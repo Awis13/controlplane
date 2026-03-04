@@ -107,16 +107,24 @@ func parseCORSOrigins(raw string) []string {
 	return origins
 }
 
-// parseDuration parses a duration from an env var (in seconds).
+// parseDuration parses a duration from an env var.
+// Accepts both Go duration format ("30s", "1m") and plain seconds ("30").
 // Falls back to the default if not set or invalid.
 func parseDuration(key string, fallback time.Duration) time.Duration {
 	v := os.Getenv(key)
 	if v == "" {
 		return fallback
 	}
-	sec, err := strconv.Atoi(v)
-	if err != nil || sec <= 0 {
-		return fallback
+
+	// Сначала пробуем Go-формат (30s, 1m, 500ms)
+	if d, err := time.ParseDuration(v); err == nil && d > 0 {
+		return d
 	}
-	return time.Duration(sec) * time.Second
+
+	// Фолбэк: простые секунды (для обратной совместимости)
+	if sec, err := strconv.Atoi(v); err == nil && sec > 0 {
+		return time.Duration(sec) * time.Second
+	}
+
+	return fallback
 }

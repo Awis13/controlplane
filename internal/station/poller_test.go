@@ -8,15 +8,17 @@ import (
 	"sync"
 	"testing"
 	"time"
+
+	"controlplane/internal/tenant"
 )
 
 // --- Mock tenant lister ---
 
 type mockPollerTenantLister struct {
-	tenants []PollableTenant
+	tenants []tenant.PollableTenant
 }
 
-func (m *mockPollerTenantLister) ListPollable(_ context.Context) ([]PollableTenant, error) {
+func (m *mockPollerTenantLister) ListPollable(_ context.Context) ([]tenant.PollableTenant, error) {
 	return m.tenants, nil
 }
 
@@ -74,13 +76,14 @@ func TestPoller_PollOnce_LiveStation(t *testing.T) {
 	addr := srv.Listener.Addr().String()
 
 	tenantLister := &mockPollerTenantLister{
-		tenants: []PollableTenant{
+		tenants: []tenant.PollableTenant{
 			{ID: "tenant-1", LXCIP: addr}, // LXCIP includes port for test
 		},
 	}
 	stationUpdater := newMockPollerStationUpdater()
 
 	p := NewPoller(tenantLister, stationUpdater, 10*time.Second)
+	p.WithSkipIPCheck()
 	// Override HTTP client to use test server's port (URL is http://addr:port/api/status)
 	// We need to intercept the URL building. Instead, use a custom transport.
 	p.WithHTTPClient(&http.Client{
@@ -132,11 +135,12 @@ func TestPoller_PollOnce_StandbyStation(t *testing.T) {
 
 	addr := srv.Listener.Addr().String()
 	tenantLister := &mockPollerTenantLister{
-		tenants: []PollableTenant{{ID: "tenant-2", LXCIP: addr}},
+		tenants: []tenant.PollableTenant{{ID: "tenant-2", LXCIP: addr}},
 	}
 	stationUpdater := newMockPollerStationUpdater()
 
 	p := NewPoller(tenantLister, stationUpdater, 10*time.Second)
+	p.WithSkipIPCheck()
 	p.WithHTTPClient(&http.Client{
 		Timeout:   5 * time.Second,
 		Transport: &rewriteTransport{base: http.DefaultTransport, testURL: srv.URL},
@@ -163,7 +167,7 @@ func TestPoller_PollOnce_StandbyStation(t *testing.T) {
 
 func TestPoller_PollOnce_UnreachableStation(t *testing.T) {
 	tenantLister := &mockPollerTenantLister{
-		tenants: []PollableTenant{{ID: "tenant-3", LXCIP: "192.0.2.1"}}, // non-routable
+		tenants: []tenant.PollableTenant{{ID: "tenant-3", LXCIP: "10.10.10.99"}}, // allowed IP but unreachable
 	}
 	stationUpdater := newMockPollerStationUpdater()
 
@@ -195,11 +199,12 @@ func TestPoller_PollOnce_BadJSON(t *testing.T) {
 
 	addr := srv.Listener.Addr().String()
 	tenantLister := &mockPollerTenantLister{
-		tenants: []PollableTenant{{ID: "tenant-4", LXCIP: addr}},
+		tenants: []tenant.PollableTenant{{ID: "tenant-4", LXCIP: addr}},
 	}
 	stationUpdater := newMockPollerStationUpdater()
 
 	p := NewPoller(tenantLister, stationUpdater, 10*time.Second)
+	p.WithSkipIPCheck()
 	p.WithHTTPClient(&http.Client{
 		Timeout:   5 * time.Second,
 		Transport: &rewriteTransport{base: http.DefaultTransport, testURL: srv.URL},
@@ -224,11 +229,12 @@ func TestPoller_PollOnce_HTTP500(t *testing.T) {
 
 	addr := srv.Listener.Addr().String()
 	tenantLister := &mockPollerTenantLister{
-		tenants: []PollableTenant{{ID: "tenant-5", LXCIP: addr}},
+		tenants: []tenant.PollableTenant{{ID: "tenant-5", LXCIP: addr}},
 	}
 	stationUpdater := newMockPollerStationUpdater()
 
 	p := NewPoller(tenantLister, stationUpdater, 10*time.Second)
+	p.WithSkipIPCheck()
 	p.WithHTTPClient(&http.Client{
 		Timeout:   5 * time.Second,
 		Transport: &rewriteTransport{base: http.DefaultTransport, testURL: srv.URL},
@@ -247,11 +253,14 @@ func TestPoller_PollOnce_HTTP500(t *testing.T) {
 
 func TestPoller_ContextCancellation(t *testing.T) {
 	tenantLister := &mockPollerTenantLister{
-		tenants: []PollableTenant{{ID: "tenant-6", LXCIP: "192.0.2.1"}},
+		tenants: []tenant.PollableTenant{{ID: "tenant-6", LXCIP: "10.10.10.99"}},
 	}
 	stationUpdater := newMockPollerStationUpdater()
 
 	p := NewPoller(tenantLister, stationUpdater, 50*time.Millisecond)
+	p.WithHTTPClient(&http.Client{
+		Timeout: 100 * time.Millisecond,
+	})
 
 	ctx, cancel := context.WithCancel(context.Background())
 
@@ -270,6 +279,48 @@ func TestPoller_ContextCancellation(t *testing.T) {
 		// ok
 	case <-time.After(2 * time.Second):
 		t.Fatal("poller did not stop after context cancellation")
+	}
+}
+
+func TestPoller_SSRF_RejectsLoopback(t *testing.T) {
+	if isAllowedIP("127.0.0.1") {
+		t.Error("loopback should be rejected")
+	}
+}
+
+func TestPoller_SSRF_RejectsLinkLocal(t *testing.T) {
+	if isAllowedIP("169.254.1.1") {
+		t.Error("link-local should be rejected")
+	}
+}
+
+func TestPoller_SSRF_RejectsUnspecified(t *testing.T) {
+	if isAllowedIP("0.0.0.0") {
+		t.Error("unspecified should be rejected")
+	}
+}
+
+func TestPoller_SSRF_RejectsPublicIP(t *testing.T) {
+	if isAllowedIP("8.8.8.8") {
+		t.Error("public IP should be rejected")
+	}
+}
+
+func TestPoller_SSRF_Allows10Network(t *testing.T) {
+	if !isAllowedIP("10.10.10.2") {
+		t.Error("10.10.10.2 should be allowed")
+	}
+}
+
+func TestPoller_SSRF_RejectsInvalidIP(t *testing.T) {
+	if isAllowedIP("not-an-ip") {
+		t.Error("invalid IP should be rejected")
+	}
+}
+
+func TestPoller_SSRF_AllowsIPWithPort(t *testing.T) {
+	if !isAllowedIP("10.10.10.2:80") {
+		t.Error("10.10.10.2:80 should be allowed")
 	}
 }
 

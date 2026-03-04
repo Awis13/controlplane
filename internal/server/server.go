@@ -279,16 +279,8 @@ type pollerTenantStoreAdapter struct {
 	store *tenant.Store
 }
 
-func (a *pollerTenantStoreAdapter) ListPollable(ctx context.Context) ([]station.PollableTenant, error) {
-	tenants, err := a.store.ListPollable(ctx)
-	if err != nil {
-		return nil, err
-	}
-	result := make([]station.PollableTenant, len(tenants))
-	for i, t := range tenants {
-		result[i] = station.PollableTenant{ID: t.ID, LXCIP: t.LXCIP}
-	}
-	return result, nil
+func (a *pollerTenantStoreAdapter) ListPollable(ctx context.Context) ([]tenant.PollableTenant, error) {
+	return a.store.ListPollable(ctx)
 }
 
 // bearerAuth returns middleware that validates Authorization: Bearer <token> header.
