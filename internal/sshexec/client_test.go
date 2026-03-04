@@ -11,6 +11,23 @@ import (
 	"golang.org/x/crypto/ssh"
 )
 
+func TestShellEscape(t *testing.T) {
+	tests := []struct {
+		input, want string
+	}{
+		{"hello", "hello"},
+		{"it's", `it'\''s`},
+		{"a'b'c", `a'\''b'\''c`},
+		{"abc123def", "abc123def"},
+	}
+	for _, tt := range tests {
+		got := shellEscape(tt.input)
+		if got != tt.want {
+			t.Errorf("shellEscape(%q) = %q, want %q", tt.input, got, tt.want)
+		}
+	}
+}
+
 func TestExtractHost(t *testing.T) {
 	tests := []struct {
 		name    string

@@ -25,6 +25,12 @@ func NewClient(keyPath string) *Client {
 	}
 }
 
+// shellEscape escapes a string for safe use inside single-quoted bash arguments.
+// Replaces each ' with '\'' (end quote, escaped quote, start quote).
+func shellEscape(s string) string {
+	return strings.ReplaceAll(s, "'", `'\''`)
+}
+
 // ExecInContainer выполняет команду внутри LXC контейнера через pct exec.
 // sshHost — SSH адрес Proxmox ноды (извлекается из proxmox_url).
 // vmid — ID LXC контейнера.
@@ -45,6 +51,8 @@ func (c *Client) ExecInContainer(ctx context.Context, sshHost string, vmid int, 
 		Auth: []ssh.AuthMethod{
 			ssh.PublicKeys(signer),
 		},
+		// InsecureIgnoreHostKey is acceptable here — SSH traffic goes over WireGuard
+		// trusted network (10.10.0.0/24). Proxmox nodes are not reachable without WG.
 		HostKeyCallback: ssh.InsecureIgnoreHostKey(),
 	}
 
@@ -76,7 +84,7 @@ func (c *Client) ExecInContainer(ctx context.Context, sshHost string, vmid int, 
 	// Закрываем сессию при отмене контекста
 	done := make(chan error, 1)
 	go func() {
-		cmd := fmt.Sprintf("pct exec %d -- bash -c '%s'", vmid, command)
+		cmd := fmt.Sprintf("pct exec %d -- bash -c '%s'", vmid, shellEscape(command))
 		done <- session.Run(cmd)
 	}()
 

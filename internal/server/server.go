@@ -5,6 +5,7 @@ import (
 	"crypto/subtle"
 	"fmt"
 	"log/slog"
+	"os"
 	"net/http"
 	"strings"
 	"time"
@@ -65,9 +66,13 @@ func New(pool *pgxpool.Pool, cfg *config.Config) (http.Handler, *provisioner.Pro
 
 	// SSH exec для записи dashboard token в контейнер
 	if cfg.SSHKeyPath != "" {
-		sshClient := sshexec.NewClient(cfg.SSHKeyPath)
-		prov.WithSSHClient(sshClient)
-		slog.Info("sshexec: enabled", "key_path", cfg.SSHKeyPath)
+		if _, err := os.Stat(cfg.SSHKeyPath); err != nil {
+			slog.Warn("SSH key not found, dashboard token provisioning disabled", "path", cfg.SSHKeyPath, "error", err)
+		} else {
+			sshClient := sshexec.NewClient(cfg.SSHKeyPath)
+			prov.WithSSHClient(sshClient)
+			slog.Info("sshexec: enabled", "key_path", cfg.SSHKeyPath)
+		}
 	}
 
 	// Station status poller
