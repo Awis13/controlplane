@@ -2,6 +2,8 @@ package provisioner
 
 import (
 	"context"
+	crypto_rand "crypto/rand"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -14,6 +16,7 @@ import (
 	"controlplane/internal/node"
 	"controlplane/internal/project"
 	"controlplane/internal/proxmox"
+	"controlplane/internal/sshexec"
 	"controlplane/internal/tenant"
 )
 
@@ -38,6 +41,7 @@ type TenantStore interface {
 	SetLXCIP(ctx context.Context, id string, ip string) error
 	GetNextAvailableIP(ctx context.Context, cidr string) (string, error)
 	SetHealthStatus(ctx context.Context, id string, status string) error
+	SetDashboardToken(ctx context.Context, id string, token string) error
 	GetByID(ctx context.Context, id string) (*tenant.Tenant, error)
 }
 
@@ -131,6 +135,7 @@ type Provisioner struct {
 	caddyClient    CaddyClient              // optional: Caddy route management
 	stationCreator StationCreator           // optional: auto-create station on provisioning
 	caddyDomain    string                   // domain for station stream URLs
+	sshClient      *sshexec.Client          // optional: SSH exec для записи токена в контейнер
 }
 
 // New creates a new Provisioner.
@@ -160,6 +165,11 @@ func (p *Provisioner) WithCaddyClient(c CaddyClient) {
 func (p *Provisioner) WithStationCreator(sc StationCreator, caddyDomain string) {
 	p.stationCreator = sc
 	p.caddyDomain = caddyDomain
+}
+
+// WithSSHClient sets the SSH client for executing commands in LXC containers.
+func (p *Provisioner) WithSSHClient(c *sshexec.Client) {
+	p.sshClient = c
 }
 
 // InvalidateClient removes the cached Proxmox client for a node,
@@ -351,6 +361,29 @@ func (p *Provisioner) doProvision(tenantID, nodeID, projectID, subdomain string,
 		log.Error("provision: wait for start", "error", err)
 		p.cleanupAndError(ctx, client, tenantID, nodeID, ramMB, newID, "provisioning failed: start did not complete")
 		return
+	}
+
+	// Генерация и запись DASHBOARD_TOKEN (best-effort, не блокирует provisioning)
+	if p.sshClient != nil {
+		if token, err := generateToken(); err != nil {
+			log.Warn("provision: generate dashboard token", "error", err)
+		} else {
+			n, err := p.nodeStore.GetByID(ctx, nodeID)
+			if err != nil || n == nil {
+				log.Warn("provision: get node for ssh host", "error", err)
+			} else if sshHost, err := sshexec.ExtractHost(n.ProxmoxURL); err != nil {
+				log.Warn("provision: extract ssh host from proxmox url", "error", err)
+			} else {
+				cmd := fmt.Sprintf("sed -i '/^DASHBOARD_TOKEN=/d' /root/freeRadio/.env && echo 'DASHBOARD_TOKEN=%s' >> /root/freeRadio/.env", token)
+				if err := p.sshClient.ExecInContainer(ctx, sshHost, newID, cmd); err != nil {
+					log.Warn("provision: write dashboard token to container", "error", err)
+				} else if err := p.tenantStore.SetDashboardToken(ctx, tenantID, token); err != nil {
+					log.Warn("provision: save dashboard token to db", "error", err)
+				} else {
+					log.Info("provision: dashboard token set")
+				}
+			}
+		}
 	}
 
 	// Mark as active
@@ -566,4 +599,13 @@ func (p *Provisioner) cleanupAndError(ctx context.Context, client ProxmoxClient,
 		}
 	}
 	p.setError(ctx, tenantID, nodeID, ramMB, errMsg)
+}
+
+// generateToken генерирует криптографически случайный токен (64 hex символа).
+func generateToken() (string, error) {
+	b := make([]byte, 32)
+	if _, err := crypto_rand.Read(b); err != nil {
+		return "", fmt.Errorf("crypto/rand: %w", err)
+	}
+	return hex.EncodeToString(b), nil
 }

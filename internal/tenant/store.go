@@ -20,14 +20,14 @@ func NewStore(pool *pgxpool.Pool) *Store {
 }
 
 // tenantColumns is the list of columns selected in all tenant queries.
-const tenantColumns = `id, name, project_id, node_id, lxc_id, lxc_ip, subdomain, status, error_message, owner_id, stripe_subscription_id, stripe_customer_id, health_status, health_checked_at, created_at, updated_at`
+const tenantColumns = `id, name, project_id, node_id, lxc_id, lxc_ip, subdomain, status, error_message, owner_id, stripe_subscription_id, stripe_customer_id, dashboard_token, health_status, health_checked_at, created_at, updated_at`
 
 // scanTenant scans a single row into a Tenant struct.
 func scanTenant(row pgx.Row) (*Tenant, error) {
 	var t Tenant
 	err := row.Scan(&t.ID, &t.Name, &t.ProjectID, &t.NodeID, &t.LXCID, &t.LXCIP,
 		&t.Subdomain, &t.Status, &t.ErrorMessage, &t.OwnerID, &t.StripeSubscriptionID,
-		&t.StripeCustomerID, &t.HealthStatus, &t.HealthCheckedAt, &t.CreatedAt, &t.UpdatedAt)
+		&t.StripeCustomerID, &t.DashboardToken, &t.HealthStatus, &t.HealthCheckedAt, &t.CreatedAt, &t.UpdatedAt)
 	if err != nil {
 		return nil, err
 	}
@@ -103,7 +103,7 @@ func (s *Store) ListPaginated(ctx context.Context, limit, offset int, status, no
 		var t Tenant
 		err := rows.Scan(&t.ID, &t.Name, &t.ProjectID, &t.NodeID, &t.LXCID, &t.LXCIP,
 			&t.Subdomain, &t.Status, &t.ErrorMessage, &t.OwnerID, &t.StripeSubscriptionID,
-			&t.StripeCustomerID, &t.HealthStatus, &t.HealthCheckedAt, &t.CreatedAt, &t.UpdatedAt, &total)
+			&t.StripeCustomerID, &t.DashboardToken, &t.HealthStatus, &t.HealthCheckedAt, &t.CreatedAt, &t.UpdatedAt, &total)
 		if err != nil {
 			return nil, 0, fmt.Errorf("scan tenant: %w", err)
 		}
@@ -442,6 +442,20 @@ func (s *Store) SetHealthStatus(ctx context.Context, id string, status string) e
 		id, status)
 	if err != nil {
 		return fmt.Errorf("set health status: %w", err)
+	}
+	return nil
+}
+
+// SetDashboardToken сохраняет dashboard token для тенанта.
+func (s *Store) SetDashboardToken(ctx context.Context, id string, token string) error {
+	tag, err := s.pool.Exec(ctx,
+		`UPDATE tenants SET dashboard_token = $2 WHERE id = $1`,
+		id, token)
+	if err != nil {
+		return fmt.Errorf("set dashboard token: %w", err)
+	}
+	if tag.RowsAffected() == 0 {
+		return pgx.ErrNoRows
 	}
 	return nil
 }

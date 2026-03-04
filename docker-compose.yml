@@ -41,6 +41,8 @@ services:
       CADDY_ADMIN_URL: ${CADDY_ADMIN_URL:-}
       CADDY_SERVER_NAME: ${CADDY_SERVER_NAME:-srv1}
       CADDY_DOMAIN: ${CADDY_DOMAIN:-freeradio.app}
+    volumes:
+      - /root/.ssh/id_ed25519:/root/.ssh/id_ed25519:ro
     depends_on:
       postgres:
         condition: service_healthy

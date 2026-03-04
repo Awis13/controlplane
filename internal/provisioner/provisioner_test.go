@@ -58,21 +58,23 @@ func (m *mockNodeStore) ReleaseRAM(_ context.Context, nodeID string, ramMB int) 
 }
 
 type mockTenantStore struct {
-	mu       sync.Mutex
-	statuses map[string]string
-	lxcIDs   map[string]int
-	errors   map[string]string
-	tenants  map[string]*tenant.Tenant
+	mu              sync.Mutex
+	statuses        map[string]string
+	lxcIDs          map[string]int
+	errors          map[string]string
+	tenants         map[string]*tenant.Tenant
+	dashboardTokens map[string]string
 
 	setDeletingErr error
 }
 
 func newMockTenantStore() *mockTenantStore {
 	return &mockTenantStore{
-		statuses: make(map[string]string),
-		lxcIDs:   make(map[string]int),
-		errors:   make(map[string]string),
-		tenants:  make(map[string]*tenant.Tenant),
+		statuses:        make(map[string]string),
+		lxcIDs:          make(map[string]int),
+		errors:          make(map[string]string),
+		tenants:         make(map[string]*tenant.Tenant),
+		dashboardTokens: make(map[string]string),
 	}
 }
 
@@ -134,6 +136,13 @@ func (m *mockTenantStore) GetByID(_ context.Context, id string) (*tenant.Tenant,
 		return nil, nil
 	}
 	return t, nil
+}
+
+func (m *mockTenantStore) SetDashboardToken(_ context.Context, id string, token string) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.dashboardTokens[id] = token
+	return nil
 }
 
 type mockProjectStore struct {
