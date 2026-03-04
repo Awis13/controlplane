@@ -368,7 +368,7 @@ func (p *Provisioner) doProvision(tenantID, nodeID, projectID, subdomain string,
 		}
 
 		// Создаём директории на хосте
-		mkdirCmd := fmt.Sprintf("mkdir -p /mnt/tenants/%d/visuals /mnt/tenants/%d/music", newID, newID)
+		mkdirCmd := fmt.Sprintf("mkdir -p /mnt/tenants/%d/visuals /mnt/tenants/%d/music && chmod 777 /mnt/tenants/%d/visuals /mnt/tenants/%d/music", newID, newID, newID, newID)
 		log.Info("provision: creating host directories for mount points", "cmd", mkdirCmd)
 		if err := p.sshClient.ExecOnHost(ctx, sshHost, mkdirCmd); err != nil {
 			log.Error("provision: create host directories", "error", err)

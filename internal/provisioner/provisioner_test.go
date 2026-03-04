@@ -1426,7 +1426,7 @@ func TestProvision_MountPointsViaSSH_HappyPath(t *testing.T) {
 	if mkdirCall.SSHHost != "10.0.0.1" {
 		t.Errorf("mkdir ssh host = %q, want '10.0.0.1'", mkdirCall.SSHHost)
 	}
-	expectedMkdir := "mkdir -p /mnt/tenants/105/visuals /mnt/tenants/105/music"
+	expectedMkdir := "mkdir -p /mnt/tenants/105/visuals /mnt/tenants/105/music && chmod 777 /mnt/tenants/105/visuals /mnt/tenants/105/music"
 	if mkdirCall.Command != expectedMkdir {
 		t.Errorf("mkdir command = %q, want %q", mkdirCall.Command, expectedMkdir)
 	}
