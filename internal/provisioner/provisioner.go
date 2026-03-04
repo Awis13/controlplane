@@ -38,11 +38,17 @@ type TenantStore interface {
 	SetLXCIP(ctx context.Context, id string, ip string) error
 	GetNextAvailableIP(ctx context.Context, cidr string) (string, error)
 	SetHealthStatus(ctx context.Context, id string, status string) error
+	GetByID(ctx context.Context, id string) (*tenant.Tenant, error)
 }
 
 // ProjectStore defines what the provisioner needs from the project store.
 type ProjectStore interface {
 	GetByID(ctx context.Context, id string) (*project.Project, error)
+}
+
+// StationCreator defines what the provisioner needs to auto-create stations.
+type StationCreator interface {
+	AutoCreateStation(ctx context.Context, tenantID, name, subdomain, ownerID, caddyDomain string) error
 }
 
 // Waiter can wait for an async operation to complete.
@@ -113,16 +119,18 @@ type CaddyClient interface {
 
 // Provisioner handles async provisioning and deprovisioning of tenant LXC containers.
 type Provisioner struct {
-	nodeStore     NodeStore
-	tenantStore   TenantStore
-	projectStore  ProjectStore
-	encryptionKey string
-	clientFactory ClientFactory
-	clients       map[string]ProxmoxClient // keyed by node ID, lazy-initialized
-	mu            sync.RWMutex             // guards clients map
-	sem           chan struct{}             // bounded concurrency for provision goroutines
-	wg            sync.WaitGroup           // tracks in-flight provisions for graceful shutdown
-	caddyClient   CaddyClient              // optional: Caddy route management
+	nodeStore      NodeStore
+	tenantStore    TenantStore
+	projectStore   ProjectStore
+	encryptionKey  string
+	clientFactory  ClientFactory
+	clients        map[string]ProxmoxClient // keyed by node ID, lazy-initialized
+	mu             sync.RWMutex             // guards clients map
+	sem            chan struct{}             // bounded concurrency for provision goroutines
+	wg             sync.WaitGroup           // tracks in-flight provisions for graceful shutdown
+	caddyClient    CaddyClient              // optional: Caddy route management
+	stationCreator StationCreator           // optional: auto-create station on provisioning
+	caddyDomain    string                   // domain for station stream URLs
 }
 
 // New creates a new Provisioner.
@@ -146,6 +154,12 @@ func (p *Provisioner) WithClientFactory(f ClientFactory) {
 // WithCaddyClient sets the Caddy client for dynamic route management.
 func (p *Provisioner) WithCaddyClient(c CaddyClient) {
 	p.caddyClient = c
+}
+
+// WithStationCreator sets the station creator for auto-creating stations on provisioning.
+func (p *Provisioner) WithStationCreator(sc StationCreator, caddyDomain string) {
+	p.stationCreator = sc
+	p.caddyDomain = caddyDomain
 }
 
 // InvalidateClient removes the cached Proxmox client for a node,
@@ -293,7 +307,7 @@ func (p *Provisioner) doProvision(tenantID, nodeID, projectID, subdomain string,
 		}
 		log = log.With("lxc_ip", lxcIP)
 
-		// Extract prefix length from CIDR (e.g. "10.10.10.0/24" → "24")
+		// Extract prefix length from CIDR (e.g. "10.10.10.0/24" -> "24")
 		prefixLen := "24"
 		if parts := strings.SplitN(proj.NetworkCIDR, "/", 2); len(parts) == 2 {
 			prefixLen = parts[1]
@@ -344,6 +358,24 @@ func (p *Provisioner) doProvision(tenantID, nodeID, projectID, subdomain string,
 		log.Error("provision: set active", "error", err)
 		p.cleanupAndError(ctx, client, tenantID, nodeID, ramMB, newID, "provisioning failed: could not update status")
 		return
+	}
+
+	// Auto-create station record (best-effort, don't fail provisioning)
+	if p.stationCreator != nil {
+		t, err := p.tenantStore.GetByID(ctx, tenantID)
+		if err != nil {
+			log.Error("provision: get tenant for station creation", "error", err)
+		} else if t != nil {
+			ownerID := ""
+			if t.OwnerID != nil {
+				ownerID = *t.OwnerID
+			}
+			if err := p.stationCreator.AutoCreateStation(ctx, tenantID, t.Name, subdomain, ownerID, p.caddyDomain); err != nil {
+				log.Error("provision: auto-create station", "error", err)
+			} else {
+				log.Info("provision: station auto-created", "subdomain", subdomain)
+			}
+		}
 	}
 
 	// Add Caddy route (best-effort, don't fail provisioning)

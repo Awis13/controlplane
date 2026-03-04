@@ -19,6 +19,11 @@ type Station struct {
 	IsOnline    bool      `json:"is_online"`
 	CreatedAt   time.Time `json:"created_at"`
 	UpdatedAt   time.Time `json:"updated_at"`
+
+	// Live fields — populated from poller cache, not stored in DB.
+	ListenersCount int     `json:"listeners_count,omitempty"`
+	NowPlaying     string  `json:"now_playing,omitempty"`
+	BPM            float64 `json:"bpm,omitempty"`
 }
 
 type CreateStationRequest struct {

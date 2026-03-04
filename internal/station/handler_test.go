@@ -114,6 +114,16 @@ func (m *mockStationStore) Delete(_ context.Context, id string) error {
 	return nil
 }
 
+// --- Mock status provider ---
+
+type mockStatusProvider struct {
+	statuses map[string]*StationStatus
+}
+
+func (m *mockStatusProvider) GetStatus(tenantID string) *StationStatus {
+	return m.statuses[tenantID]
+}
+
 // --- Test helpers ---
 
 const validStationID = "44444444-4444-4444-4444-444444444444"
@@ -185,6 +195,130 @@ func TestList_ReturnsPublicOnly(t *testing.T) {
 	}
 	if len(result) != 1 {
 		t.Errorf("expected 1 public station, got %d", len(result))
+	}
+}
+
+func TestList_EnrichedWithPollerData(t *testing.T) {
+	tenantID := "11111111-1111-1111-1111-111111111111"
+	store := newMockStationStore()
+	store.addStation(&Station{
+		ID:       "1",
+		Name:     "Live Radio",
+		Slug:     "live-radio",
+		TenantID: &tenantID,
+		IsPublic: true,
+	})
+
+	poller := &mockStatusProvider{
+		statuses: map[string]*StationStatus{
+			tenantID: {
+				IsOnline:       true,
+				ListenersCount: 99,
+				NowPlaying:     "Track A",
+				BPM:            140.0,
+			},
+		},
+	}
+
+	h := NewHandler(store, nil)
+	h.WithPoller(poller)
+	r := stationRouter(h)
+
+	req := httptest.NewRequest("GET", "/stations", nil)
+	w := httptest.NewRecorder()
+	r.ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", w.Code, w.Body.String())
+	}
+
+	var result []Station
+	if err := json.NewDecoder(w.Body).Decode(&result); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if len(result) != 1 {
+		t.Fatalf("expected 1 station, got %d", len(result))
+	}
+	if result[0].ListenersCount != 99 {
+		t.Errorf("listeners_count = %d, want 99", result[0].ListenersCount)
+	}
+	if result[0].NowPlaying != "Track A" {
+		t.Errorf("now_playing = %q, want 'Track A'", result[0].NowPlaying)
+	}
+	if result[0].BPM != 140.0 {
+		t.Errorf("bpm = %f, want 140.0", result[0].BPM)
+	}
+}
+
+func TestList_NoPollerNoEnrichment(t *testing.T) {
+	tenantID := "11111111-1111-1111-1111-111111111111"
+	store := newMockStationStore()
+	store.addStation(&Station{
+		ID:       "1",
+		Name:     "Radio",
+		Slug:     "radio-st",
+		TenantID: &tenantID,
+		IsPublic: true,
+	})
+
+	h := NewHandler(store, nil) // no poller
+	r := stationRouter(h)
+
+	req := httptest.NewRequest("GET", "/stations", nil)
+	w := httptest.NewRecorder()
+	r.ServeHTTP(w, req)
+
+	var result []Station
+	json.NewDecoder(w.Body).Decode(&result)
+	if len(result) != 1 {
+		t.Fatalf("expected 1 station, got %d", len(result))
+	}
+	if result[0].ListenersCount != 0 {
+		t.Errorf("expected 0 listeners without poller, got %d", result[0].ListenersCount)
+	}
+}
+
+func TestGetBySlug_EnrichedWithPollerData(t *testing.T) {
+	tenantID := "22222222-2222-2222-2222-222222222222"
+	store := newMockStationStore()
+	store.addStation(&Station{
+		ID:       validStationID,
+		Name:     "Enriched Radio",
+		Slug:     "enriched-radio",
+		TenantID: &tenantID,
+		IsPublic: true,
+	})
+
+	poller := &mockStatusProvider{
+		statuses: map[string]*StationStatus{
+			tenantID: {
+				IsOnline:       true,
+				ListenersCount: 7,
+				NowPlaying:     "Track B",
+				BPM:            155.0,
+			},
+		},
+	}
+
+	h := NewHandler(store, nil)
+	h.WithPoller(poller)
+	r := stationRouter(h)
+
+	req := httptest.NewRequest("GET", "/stations/enriched-radio", nil)
+	w := httptest.NewRecorder()
+	r.ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d", w.Code)
+	}
+
+	var st Station
+	json.NewDecoder(w.Body).Decode(&st)
+	if st.ListenersCount != 7 {
+		t.Errorf("listeners_count = %d, want 7", st.ListenersCount)
+	}
+	if st.NowPlaying != "Track B" {
+		t.Errorf("now_playing = %q, want 'Track B'", st.NowPlaying)
 	}
 }
 

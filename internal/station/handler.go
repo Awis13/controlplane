@@ -25,16 +25,27 @@ type StationStore interface {
 	Delete(ctx context.Context, id string) error
 }
 
+// StatusProvider provides live station status (implemented by Poller).
+type StatusProvider interface {
+	GetStatus(tenantID string) *StationStatus
+}
+
 var slugRegexp = regexp.MustCompile(`^[a-z0-9][a-z0-9-]*[a-z0-9]$`)
 
 // Handler handles station HTTP requests.
 type Handler struct {
 	store      StationStore
 	auditStore *audit.Store
+	poller     StatusProvider // optional: enriches List/Get with live data
 }
 
 func NewHandler(store StationStore, auditStore *audit.Store) *Handler {
 	return &Handler{store: store, auditStore: auditStore}
+}
+
+// WithPoller sets the status provider for live enrichment.
+func (h *Handler) WithPoller(p StatusProvider) {
+	h.poller = p
 }
 
 // validSlug checks that a slug is lowercase alphanumeric with hyphens, 2-63 chars.
@@ -52,6 +63,22 @@ func (h *Handler) List(w http.ResponseWriter, r *http.Request) {
 	if stations == nil {
 		stations = []Station{}
 	}
+
+	// Enrich with live poller data
+	if h.poller != nil {
+		for i := range stations {
+			if stations[i].TenantID == nil {
+				continue
+			}
+			status := h.poller.GetStatus(*stations[i].TenantID)
+			if status != nil {
+				stations[i].ListenersCount = status.ListenersCount
+				stations[i].NowPlaying = status.NowPlaying
+				stations[i].BPM = status.BPM
+			}
+		}
+	}
+
 	response.JSON(w, http.StatusOK, stations)
 }
 
@@ -72,6 +99,17 @@ func (h *Handler) GetBySlug(w http.ResponseWriter, r *http.Request) {
 		response.Error(w, http.StatusNotFound, "station not found")
 		return
 	}
+
+	// Enrich with live poller data
+	if h.poller != nil && st.TenantID != nil {
+		status := h.poller.GetStatus(*st.TenantID)
+		if status != nil {
+			st.ListenersCount = status.ListenersCount
+			st.NowPlaying = status.NowPlaying
+			st.BPM = status.BPM
+		}
+	}
+
 	response.JSON(w, http.StatusOK, st)
 }
 

@@ -53,7 +53,7 @@ func main() {
 	}
 
 	// Create HTTP server
-	handler, prov, err := server.New(pool, cfg)
+	handler, prov, poller, err := server.New(pool, cfg)
 	if err != nil {
 		slog.Error("failed to create server", "error", err)
 		os.Exit(1)
@@ -66,6 +66,10 @@ func main() {
 		WriteTimeout:      30 * time.Second,
 		IdleTimeout:       60 * time.Second,
 	}
+
+	// Start station status poller
+	pollerCtx, pollerCancel := context.WithCancel(context.Background())
+	go poller.Run(pollerCtx)
 
 	// Use error channel instead of os.Exit in goroutine
 	errCh := make(chan error, 1)
@@ -87,6 +91,9 @@ func main() {
 		slog.Error("server failed", "error", err)
 		os.Exit(1)
 	}
+
+	// Stop poller
+	pollerCancel()
 
 	shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), 15*time.Second)
 	defer shutdownCancel()

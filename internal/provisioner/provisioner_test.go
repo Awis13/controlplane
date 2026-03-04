@@ -62,6 +62,7 @@ type mockTenantStore struct {
 	statuses map[string]string
 	lxcIDs   map[string]int
 	errors   map[string]string
+	tenants  map[string]*tenant.Tenant
 
 	setDeletingErr error
 }
@@ -71,6 +72,7 @@ func newMockTenantStore() *mockTenantStore {
 		statuses: make(map[string]string),
 		lxcIDs:   make(map[string]int),
 		errors:   make(map[string]string),
+		tenants:  make(map[string]*tenant.Tenant),
 	}
 }
 
@@ -124,6 +126,16 @@ func (m *mockTenantStore) SetHealthStatus(_ context.Context, id string, status s
 	return nil
 }
 
+func (m *mockTenantStore) GetByID(_ context.Context, id string) (*tenant.Tenant, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	t, ok := m.tenants[id]
+	if !ok {
+		return nil, nil
+	}
+	return t, nil
+}
+
 type mockProjectStore struct {
 	projects map[string]*project.Project
 }
@@ -138,6 +150,35 @@ func (m *mockProjectStore) GetByID(_ context.Context, id string) (*project.Proje
 		return nil, nil
 	}
 	return p, nil
+}
+
+// --- Mock station creator ---
+
+type mockStationCreator struct {
+	mu      sync.Mutex
+	calls   []stationCreateCall
+	err     error
+}
+
+type stationCreateCall struct {
+	TenantID    string
+	Name        string
+	Subdomain   string
+	OwnerID     string
+	CaddyDomain string
+}
+
+func (m *mockStationCreator) AutoCreateStation(_ context.Context, tenantID, name, subdomain, ownerID, caddyDomain string) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.calls = append(m.calls, stationCreateCall{
+		TenantID:    tenantID,
+		Name:        name,
+		Subdomain:   subdomain,
+		OwnerID:     ownerID,
+		CaddyDomain: caddyDomain,
+	})
+	return m.err
 }
 
 // --- Mock task (implements Waiter) ---
@@ -324,6 +365,119 @@ func TestProvision_HappyPath(t *testing.T) {
 	}
 	if !mockClient.startCalled {
 		t.Error("expected start to be called")
+	}
+}
+
+func TestProvision_AutoCreatesStation(t *testing.T) {
+	nodeStore := newMockNodeStore()
+	tenantStore := newMockTenantStore()
+	projectStore := newMockProjectStore()
+
+	proj := testProject()
+	n := testNode()
+	projectStore.projects[proj.ID] = proj
+	nodeStore.nodes[n.ID] = n
+
+	ownerID := "owner-123"
+	tenantStore.tenants["tenant-1"] = &tenant.Tenant{
+		ID:      "tenant-1",
+		Name:    "My Station",
+		OwnerID: &ownerID,
+	}
+
+	mockClient := &mockProxmoxClient{nextID: 105}
+	p := setupProvisioner(nodeStore, tenantStore, projectStore, mockClient, n.ID)
+
+	sc := &mockStationCreator{}
+	p.WithStationCreator(sc, "freeradio.app")
+
+	waitForProvision(p, "tenant-1", n.ID, proj.ID, "my-station", proj.RAMMB)
+
+	tenantStore.mu.Lock()
+	status := tenantStore.statuses["tenant-1"]
+	tenantStore.mu.Unlock()
+
+	if status != "active" {
+		t.Fatalf("expected tenant status 'active', got %q", status)
+	}
+
+	sc.mu.Lock()
+	defer sc.mu.Unlock()
+
+	if len(sc.calls) != 1 {
+		t.Fatalf("expected 1 station create call, got %d", len(sc.calls))
+	}
+	call := sc.calls[0]
+	if call.TenantID != "tenant-1" {
+		t.Errorf("tenant_id = %q, want 'tenant-1'", call.TenantID)
+	}
+	if call.Name != "My Station" {
+		t.Errorf("name = %q, want 'My Station'", call.Name)
+	}
+	if call.Subdomain != "my-station" {
+		t.Errorf("subdomain = %q, want 'my-station'", call.Subdomain)
+	}
+	if call.OwnerID != "owner-123" {
+		t.Errorf("owner_id = %q, want 'owner-123'", call.OwnerID)
+	}
+	if call.CaddyDomain != "freeradio.app" {
+		t.Errorf("caddy_domain = %q, want 'freeradio.app'", call.CaddyDomain)
+	}
+}
+
+func TestProvision_StationCreatorError_DoesNotFailProvisioning(t *testing.T) {
+	nodeStore := newMockNodeStore()
+	tenantStore := newMockTenantStore()
+	projectStore := newMockProjectStore()
+
+	proj := testProject()
+	n := testNode()
+	projectStore.projects[proj.ID] = proj
+	nodeStore.nodes[n.ID] = n
+
+	tenantStore.tenants["tenant-1"] = &tenant.Tenant{
+		ID:   "tenant-1",
+		Name: "Failing Station",
+	}
+
+	mockClient := &mockProxmoxClient{nextID: 105}
+	p := setupProvisioner(nodeStore, tenantStore, projectStore, mockClient, n.ID)
+
+	sc := &mockStationCreator{err: fmt.Errorf("db error")}
+	p.WithStationCreator(sc, "freeradio.app")
+
+	waitForProvision(p, "tenant-1", n.ID, proj.ID, "fail-station", proj.RAMMB)
+
+	tenantStore.mu.Lock()
+	defer tenantStore.mu.Unlock()
+
+	// Provisioning should still succeed
+	if tenantStore.statuses["tenant-1"] != "active" {
+		t.Errorf("expected tenant status 'active', got %q", tenantStore.statuses["tenant-1"])
+	}
+}
+
+func TestProvision_NoStationCreator_NoPanic(t *testing.T) {
+	nodeStore := newMockNodeStore()
+	tenantStore := newMockTenantStore()
+	projectStore := newMockProjectStore()
+
+	proj := testProject()
+	n := testNode()
+	projectStore.projects[proj.ID] = proj
+	nodeStore.nodes[n.ID] = n
+
+	mockClient := &mockProxmoxClient{nextID: 105}
+	p := setupProvisioner(nodeStore, tenantStore, projectStore, mockClient, n.ID)
+	// No WithStationCreator — should not panic
+
+	waitForProvision(p, "tenant-1", n.ID, proj.ID, "myapp", proj.RAMMB)
+
+	tenantStore.mu.Lock()
+	defer tenantStore.mu.Unlock()
+
+	if tenantStore.statuses["tenant-1"] != "active" {
+		t.Errorf("expected tenant status 'active', got %q", tenantStore.statuses["tenant-1"])
 	}
 }
 

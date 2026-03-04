@@ -3,7 +3,9 @@ package config
 import (
 	"fmt"
 	"os"
+	"strconv"
 	"strings"
+	"time"
 )
 
 type Config struct {
@@ -24,6 +26,7 @@ type Config struct {
 	CaddyAdminURL   string // optional: Caddy Admin API URL (e.g. http://172.17.0.1:2019)
 	CaddyServerName string // optional: Caddy server name (default: srv1)
 	CaddyDomain     string // optional: domain for tenant routes (default: freeradio.app)
+	PollerInterval  time.Duration // optional: station status poll interval (default: 10s)
 }
 
 // Load reads configuration from environment variables.
@@ -66,6 +69,7 @@ func Load() (*Config, error) {
 		CaddyAdminURL:   os.Getenv("CADDY_ADMIN_URL"),
 		CaddyServerName: getEnv("CADDY_SERVER_NAME", "srv1"),
 		CaddyDomain:     getEnv("CADDY_DOMAIN", "freeradio.app"),
+		PollerInterval:  parseDuration("POLLER_INTERVAL", 10*time.Second),
 	}, nil
 }
 
@@ -101,4 +105,18 @@ func parseCORSOrigins(raw string) []string {
 		}
 	}
 	return origins
+}
+
+// parseDuration parses a duration from an env var (in seconds).
+// Falls back to the default if not set or invalid.
+func parseDuration(key string, fallback time.Duration) time.Duration {
+	v := os.Getenv(key)
+	if v == "" {
+		return fallback
+	}
+	sec, err := strconv.Atoi(v)
+	if err != nil || sec <= 0 {
+		return fallback
+	}
+	return time.Duration(sec) * time.Second
 }

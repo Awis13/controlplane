@@ -85,6 +85,19 @@ func (s *Store) GetByID(ctx context.Context, id string) (*Station, error) {
 	return st, nil
 }
 
+// GetByTenantID returns a station by its tenant_id.
+func (s *Store) GetByTenantID(ctx context.Context, tenantID string) (*Station, error) {
+	st, err := scanStation(s.pool.QueryRow(ctx,
+		`SELECT `+stationColumns+` FROM stations WHERE tenant_id = $1`, tenantID))
+	if err != nil {
+		if err == pgx.ErrNoRows {
+			return nil, nil
+		}
+		return nil, fmt.Errorf("query station by tenant: %w", err)
+	}
+	return st, nil
+}
+
 // Create inserts a new station and returns it.
 func (s *Store) Create(ctx context.Context, req CreateStationRequest) (*Station, error) {
 	st, err := scanStation(s.pool.QueryRow(ctx,
@@ -164,6 +177,17 @@ func (s *Store) Update(ctx context.Context, id string, req UpdateStationRequest)
 		return nil, fmt.Errorf("update station: %w", err)
 	}
 	return st, nil
+}
+
+// SetOnline updates the is_online flag for a station identified by tenant_id.
+func (s *Store) SetOnline(ctx context.Context, tenantID string, online bool) error {
+	_, err := s.pool.Exec(ctx,
+		`UPDATE stations SET is_online = $2 WHERE tenant_id = $1`,
+		tenantID, online)
+	if err != nil {
+		return fmt.Errorf("set station online: %w", err)
+	}
+	return nil
 }
 
 // Delete removes a station by ID.
