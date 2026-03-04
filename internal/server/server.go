@@ -34,7 +34,8 @@ import (
 
 // New creates and configures the HTTP server with all routes.
 // The returned Provisioner should be shut down via Shutdown() during graceful shutdown.
-func New(pool *pgxpool.Pool, cfg *config.Config) (http.Handler, *provisioner.Provisioner, error) {
+// The returned Poller should be started in a goroutine and stopped via context cancellation.
+func New(pool *pgxpool.Pool, cfg *config.Config) (http.Handler, *provisioner.Provisioner, *station.Poller, error) {
 	r := chi.NewRouter()
 
 	r.Use(middleware.RequestID)
@@ -56,6 +57,14 @@ func New(pool *pgxpool.Pool, cfg *config.Config) (http.Handler, *provisioner.Pro
 	userStore := user.NewStore(pool)
 	auditStore := audit.NewStore(pool)
 	prov := provisioner.New(nodeStore, tenantStore, projectStore, cfg.EncryptionKey)
+
+	// Station auto-creation on provisioning
+	stationCreator := station.NewCreator(stationStore)
+	prov.WithStationCreator(stationCreator, cfg.CaddyDomain)
+
+	// Station status poller
+	pollerTenantAdapter := &pollerTenantStoreAdapter{store: tenantStore}
+	poller := station.NewPoller(pollerTenantAdapter, stationStore, cfg.PollerInterval)
 
 	// Caddy dynamic routing (optional)
 	if cfg.CaddyAdminURL != "" {
@@ -101,14 +110,14 @@ func New(pool *pgxpool.Pool, cfg *config.Config) (http.Handler, *provisioner.Pro
 		RPOrigins:     []string{rpOrigin},
 	})
 	if err != nil {
-		return nil, nil, fmt.Errorf("webauthn: %w", err)
+		return nil, nil, nil, fmt.Errorf("webauthn: %w", err)
 	}
 	waStore := admin.NewWebAuthnStore(pool)
 
 	// Admin UI (auth via WebAuthn)
 	adminHandler, err := admin.NewHandler(nodeStore, projectStore, tenantStore, auditStore, prov, cfg.EncryptionKey, cfg.SetupToken, wa, waStore)
 	if err != nil {
-		return nil, nil, fmt.Errorf("admin handler: %w", err)
+		return nil, nil, nil, fmt.Errorf("admin handler: %w", err)
 	}
 	// WireGuard peer management (optional — requires WG_HUB_PUBLIC_KEY)
 	wgStore := wireguard.NewStore(pool)
@@ -116,7 +125,7 @@ func New(pool *pgxpool.Pool, cfg *config.Config) (http.Handler, *provisioner.Pro
 		wgService := wireguard.NewService(wgStore, cfg.EncryptionKey, cfg.WGHubPublicKey, cfg.WGHubEndpoint, cfg.WGNetworkCIDR)
 		adminHandler.SetWireGuard(wgService, wgStore)
 
-		// Регистрируем API-хэндлеры для WireGuard
+		// Register WireGuard API handlers
 		wgHandler := wireguard.NewHandler(wgService, auditStore)
 		r.Route("/api/v1/wireguard", func(r chi.Router) {
 			r.Use(bearerAuth(cfg.APIToken))
@@ -131,7 +140,7 @@ func New(pool *pgxpool.Pool, cfg *config.Config) (http.Handler, *provisioner.Pro
 			r.Get("/peers/{id}/qr", wgHandler.GetPeerQR)
 		})
 
-		// Синхронизируем пиры с wg0 при старте
+		// Sync peers with wg0 on startup
 		go func() {
 			if err := wgService.SyncPeers(context.Background()); err != nil {
 				slog.Warn("wireguard: initial sync failed", "error", err)
@@ -149,6 +158,7 @@ func New(pool *pgxpool.Pool, cfg *config.Config) (http.Handler, *provisioner.Pro
 
 	// Stations — public read endpoints (no auth)
 	stationHandler := station.NewHandler(stationStore, auditStore)
+	stationHandler.WithPoller(poller)
 	r.Route("/api/v1/stations", func(r chi.Router) {
 		r.Use(httprate.LimitByIP(100, time.Minute))
 
@@ -230,7 +240,7 @@ func New(pool *pgxpool.Pool, cfg *config.Config) (http.Handler, *provisioner.Pro
 	})
 
 	slog.Info("routes registered", "cors_origins", cfg.CORSOrigins)
-	return r, prov, nil
+	return r, prov, poller, nil
 }
 
 // securityHeaders adds standard security headers to all responses.
@@ -262,6 +272,15 @@ func (a *tenantStoreAdapter) ListActiveWithIP(ctx context.Context) ([]caddy.Tena
 		routes[i] = caddy.TenantRoute{Subdomain: t.Subdomain, LXCIP: t.LXCIP}
 	}
 	return routes, nil
+}
+
+// pollerTenantStoreAdapter wraps *tenant.Store to satisfy station.PollerTenantLister.
+type pollerTenantStoreAdapter struct {
+	store *tenant.Store
+}
+
+func (a *pollerTenantStoreAdapter) ListPollable(ctx context.Context) ([]tenant.PollableTenant, error) {
+	return a.store.ListPollable(ctx)
 }
 
 // bearerAuth returns middleware that validates Authorization: Bearer <token> header.
