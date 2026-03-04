@@ -5,6 +5,7 @@ import (
 	"crypto/subtle"
 	"fmt"
 	"log/slog"
+	"os"
 	"net/http"
 	"strings"
 	"time"
@@ -25,6 +26,7 @@ import (
 	"controlplane/internal/node"
 	"controlplane/internal/project"
 	"controlplane/internal/provisioner"
+	"controlplane/internal/sshexec"
 	"controlplane/internal/response"
 	"controlplane/internal/station"
 	"controlplane/internal/tenant"
@@ -61,6 +63,17 @@ func New(pool *pgxpool.Pool, cfg *config.Config) (http.Handler, *provisioner.Pro
 	// Station auto-creation on provisioning
 	stationCreator := station.NewCreator(stationStore)
 	prov.WithStationCreator(stationCreator, cfg.CaddyDomain)
+
+	// SSH exec для записи dashboard token в контейнер
+	if cfg.SSHKeyPath != "" {
+		if _, err := os.Stat(cfg.SSHKeyPath); err != nil {
+			slog.Warn("SSH key not found, dashboard token provisioning disabled", "path", cfg.SSHKeyPath, "error", err)
+		} else {
+			sshClient := sshexec.NewClient(cfg.SSHKeyPath)
+			prov.WithSSHClient(sshClient)
+			slog.Info("sshexec: enabled", "key_path", cfg.SSHKeyPath)
+		}
+	}
 
 	// Station status poller
 	pollerTenantAdapter := &pollerTenantStoreAdapter{store: tenantStore}
