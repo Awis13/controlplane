@@ -20,6 +20,12 @@ import (
 	"controlplane/internal/tenant"
 )
 
+// SSHExec определяет SSH операции, необходимые провизионеру.
+type SSHExec interface {
+	ExecInContainer(ctx context.Context, sshHost string, vmid int, command string) error
+	ExecOnHost(ctx context.Context, sshHost string, command string) error
+}
+
 const (
 	provisionTimeout  = 10 * time.Minute
 	maxConcurrentJobs = 10
@@ -135,7 +141,7 @@ type Provisioner struct {
 	caddyClient    CaddyClient              // optional: Caddy route management
 	stationCreator StationCreator           // optional: auto-create station on provisioning
 	caddyDomain    string                   // domain for station stream URLs
-	sshClient      *sshexec.Client          // optional: SSH exec для записи токена в контейнер
+	sshClient      SSHExec                  // optional: SSH exec для записи токена и mount points
 }
 
 // New creates a new Provisioner.
@@ -167,8 +173,8 @@ func (p *Provisioner) WithStationCreator(sc StationCreator, caddyDomain string) 
 	p.caddyDomain = caddyDomain
 }
 
-// WithSSHClient sets the SSH client for executing commands in LXC containers.
-func (p *Provisioner) WithSSHClient(c *sshexec.Client) {
+// WithSSHClient sets the SSH client for executing commands on Proxmox hosts and in LXC containers.
+func (p *Provisioner) WithSSHClient(c SSHExec) {
 	p.sshClient = c
 }
 
@@ -337,16 +343,52 @@ func (p *Provisioner) doProvision(tenantID, nodeID, projectID, subdomain string,
 		}
 	}
 
-	// Configure bind mount points for shared media storage
-	mounts := map[string]string{
-		"mp0": fmt.Sprintf("/mnt/tenants/%d/visuals,mp=/root/freeRadio/content/visuals", newID),
-		"mp1": fmt.Sprintf("/mnt/tenants/%d/music,mp=/root/freeRadio/content/music", newID),
-	}
-	log.Info("provision: configuring mount points", "mounts", mounts)
-	if err := client.ConfigureMountPoints(ctx, newID, mounts); err != nil {
-		log.Error("provision: configure mount points", "error", err)
-		p.cleanupAndError(ctx, client, tenantID, nodeID, ramMB, newID, "provisioning failed: mount point config error")
-		return
+	// Configure bind mount points for shared media storage.
+	// API tokens не могут создавать bind mounts (403 "mount point type bind is only allowed for root@pam"),
+	// поэтому при наличии SSH клиента используем pct set через SSH.
+	if p.sshClient != nil {
+		n, err := p.nodeStore.GetByID(ctx, nodeID)
+		if err != nil || n == nil {
+			log.Error("provision: get node for ssh mount points", "error", err)
+			p.cleanupAndError(ctx, client, tenantID, nodeID, ramMB, newID, "provisioning failed: mount point config error")
+			return
+		}
+		sshHost, err := sshexec.ExtractHost(n.ProxmoxURL)
+		if err != nil {
+			log.Error("provision: extract ssh host for mount points", "error", err)
+			p.cleanupAndError(ctx, client, tenantID, nodeID, ramMB, newID, "provisioning failed: mount point config error")
+			return
+		}
+
+		// Создаём директории на хосте
+		mkdirCmd := fmt.Sprintf("mkdir -p /mnt/tenants/%d/visuals /mnt/tenants/%d/music", newID, newID)
+		log.Info("provision: creating host directories for mount points", "cmd", mkdirCmd)
+		if err := p.sshClient.ExecOnHost(ctx, sshHost, mkdirCmd); err != nil {
+			log.Error("provision: create host directories", "error", err)
+			p.cleanupAndError(ctx, client, tenantID, nodeID, ramMB, newID, "provisioning failed: mount point config error")
+			return
+		}
+
+		// Настраиваем mount points через pct set
+		pctCmd := fmt.Sprintf("pct set %d -mp0 /mnt/tenants/%d/visuals,mp=/root/freeRadio/content/visuals -mp1 /mnt/tenants/%d/music,mp=/root/freeRadio/content/music", newID, newID, newID)
+		log.Info("provision: configuring mount points via SSH", "cmd", pctCmd)
+		if err := p.sshClient.ExecOnHost(ctx, sshHost, pctCmd); err != nil {
+			log.Error("provision: configure mount points via ssh", "error", err)
+			p.cleanupAndError(ctx, client, tenantID, nodeID, ramMB, newID, "provisioning failed: mount point config error")
+			return
+		}
+	} else {
+		// Fallback на API (работает с root@pam password auth, но не с API tokens)
+		mounts := map[string]string{
+			"mp0": fmt.Sprintf("/mnt/tenants/%d/visuals,mp=/root/freeRadio/content/visuals", newID),
+			"mp1": fmt.Sprintf("/mnt/tenants/%d/music,mp=/root/freeRadio/content/music", newID),
+		}
+		log.Info("provision: configuring mount points via API", "mounts", mounts)
+		if err := client.ConfigureMountPoints(ctx, newID, mounts); err != nil {
+			log.Error("provision: configure mount points", "error", err)
+			p.cleanupAndError(ctx, client, tenantID, nodeID, ramMB, newID, "provisioning failed: mount point config error")
+			return
+		}
 	}
 
 	// Start container

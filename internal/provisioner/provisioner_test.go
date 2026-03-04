@@ -286,6 +286,36 @@ func (m *mockProxmoxClient) ConfigureMountPoints(_ context.Context, _ int, mount
 	return m.mountPointsErr
 }
 
+// --- Mock SSH client (implements SSHExec) ---
+
+type mockSSHExec struct {
+	mu              sync.Mutex
+	execOnHostCalls []sshExecCall
+	execInCtrCalls  []sshExecCall
+	execOnHostErr   error
+	execInCtrErr    error
+}
+
+type sshExecCall struct {
+	SSHHost string
+	VMID    int    // только для ExecInContainer
+	Command string
+}
+
+func (m *mockSSHExec) ExecOnHost(_ context.Context, sshHost string, command string) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.execOnHostCalls = append(m.execOnHostCalls, sshExecCall{SSHHost: sshHost, Command: command})
+	return m.execOnHostErr
+}
+
+func (m *mockSSHExec) ExecInContainer(_ context.Context, sshHost string, vmid int, command string) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.execInCtrCalls = append(m.execInCtrCalls, sshExecCall{SSHHost: sshHost, VMID: vmid, Command: command})
+	return m.execInCtrErr
+}
+
 // --- Helpers ---
 
 func testProject() *project.Project {
@@ -1324,6 +1354,171 @@ func TestDeprovision_RealDeleteError_StillFails(t *testing.T) {
 
 	if tenantStore.statuses["tenant-1"] != "error" {
 		t.Errorf("expected tenant status 'error', got %q", tenantStore.statuses["tenant-1"])
+	}
+}
+
+// --- dynamicMockSSHExec: мок, который ломается на N-м вызове ExecOnHost ---
+
+type dynamicMockSSHExec struct {
+	mu         sync.Mutex
+	callCount  int
+	failOnCall int    // номер вызова (1-based), на котором вернуть ошибку
+	err        error
+}
+
+func (m *dynamicMockSSHExec) ExecOnHost(_ context.Context, sshHost string, command string) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.callCount++
+	if m.callCount >= m.failOnCall {
+		return m.err
+	}
+	return nil
+}
+
+func (m *dynamicMockSSHExec) ExecInContainer(_ context.Context, sshHost string, vmid int, command string) error {
+	return nil
+}
+
+// --- SSH mount point tests ---
+
+func TestProvision_MountPointsViaSSH_HappyPath(t *testing.T) {
+	nodeStore := newMockNodeStore()
+	tenantStore := newMockTenantStore()
+	projectStore := newMockProjectStore()
+
+	proj := testProject()
+	n := testNode()
+	projectStore.projects[proj.ID] = proj
+	nodeStore.nodes[n.ID] = n
+
+	mockClient := &mockProxmoxClient{nextID: 105}
+	p := setupProvisioner(nodeStore, tenantStore, projectStore, mockClient, n.ID)
+
+	sshMock := &mockSSHExec{}
+	p.WithSSHClient(sshMock)
+
+	waitForProvision(p, "tenant-1", n.ID, proj.ID, "myapp", proj.RAMMB)
+
+	tenantStore.mu.Lock()
+	defer tenantStore.mu.Unlock()
+
+	if tenantStore.statuses["tenant-1"] != "active" {
+		t.Errorf("expected tenant status 'active', got %q", tenantStore.statuses["tenant-1"])
+	}
+
+	// API mount points НЕ должны вызываться при наличии SSH клиента
+	mockClient.mu.Lock()
+	if mockClient.mountPointsCalled {
+		t.Error("API ConfigureMountPoints should NOT be called when SSH client is set")
+	}
+	mockClient.mu.Unlock()
+
+	// Проверяем SSH вызовы: mkdir + pct set
+	sshMock.mu.Lock()
+	defer sshMock.mu.Unlock()
+
+	if len(sshMock.execOnHostCalls) < 2 {
+		t.Fatalf("expected at least 2 ExecOnHost calls (mkdir + pct set), got %d", len(sshMock.execOnHostCalls))
+	}
+
+	mkdirCall := sshMock.execOnHostCalls[0]
+	if mkdirCall.SSHHost != "10.0.0.1" {
+		t.Errorf("mkdir ssh host = %q, want '10.0.0.1'", mkdirCall.SSHHost)
+	}
+	expectedMkdir := "mkdir -p /mnt/tenants/105/visuals /mnt/tenants/105/music"
+	if mkdirCall.Command != expectedMkdir {
+		t.Errorf("mkdir command = %q, want %q", mkdirCall.Command, expectedMkdir)
+	}
+
+	pctCall := sshMock.execOnHostCalls[1]
+	expectedPct := "pct set 105 -mp0 /mnt/tenants/105/visuals,mp=/root/freeRadio/content/visuals -mp1 /mnt/tenants/105/music,mp=/root/freeRadio/content/music"
+	if pctCall.Command != expectedPct {
+		t.Errorf("pct set command = %q, want %q", pctCall.Command, expectedPct)
+	}
+}
+
+func TestProvision_MountPointsViaSSH_MkdirError(t *testing.T) {
+	nodeStore := newMockNodeStore()
+	tenantStore := newMockTenantStore()
+	projectStore := newMockProjectStore()
+
+	proj := testProject()
+	n := testNode()
+	projectStore.projects[proj.ID] = proj
+	nodeStore.nodes[n.ID] = n
+	nodeStore.ram[n.ID] = proj.RAMMB
+
+	mockClient := &mockProxmoxClient{nextID: 105}
+	p := setupProvisioner(nodeStore, tenantStore, projectStore, mockClient, n.ID)
+
+	sshMock := &mockSSHExec{execOnHostErr: fmt.Errorf("ssh: permission denied")}
+	p.WithSSHClient(sshMock)
+
+	waitForProvision(p, "tenant-1", n.ID, proj.ID, "myapp", proj.RAMMB)
+
+	tenantStore.mu.Lock()
+	defer tenantStore.mu.Unlock()
+
+	if tenantStore.statuses["tenant-1"] != "error" {
+		t.Errorf("expected tenant status 'error', got %q", tenantStore.statuses["tenant-1"])
+	}
+
+	// Cleanup должен удалить контейнер
+	mockClient.mu.Lock()
+	defer mockClient.mu.Unlock()
+	if !mockClient.deleteCalled {
+		t.Error("expected delete to be called for cleanup")
+	}
+
+	// Start НЕ должен вызываться
+	if mockClient.startCalled {
+		t.Error("start should not be called after SSH mount failure")
+	}
+
+	// RAM должна быть освобождена
+	nodeStore.mu.Lock()
+	defer nodeStore.mu.Unlock()
+	if nodeStore.ram[n.ID] != 0 {
+		t.Errorf("expected ram to be released, got %d", nodeStore.ram[n.ID])
+	}
+}
+
+func TestProvision_MountPointsViaSSH_PctSetError(t *testing.T) {
+	nodeStore := newMockNodeStore()
+	tenantStore := newMockTenantStore()
+	projectStore := newMockProjectStore()
+
+	proj := testProject()
+	n := testNode()
+	projectStore.projects[proj.ID] = proj
+	nodeStore.nodes[n.ID] = n
+	nodeStore.ram[n.ID] = proj.RAMMB
+
+	mockClient := &mockProxmoxClient{nextID: 105}
+	p := setupProvisioner(nodeStore, tenantStore, projectStore, mockClient, n.ID)
+
+	// mkdir ок, pct set — ошибка (failOnCall=2 значит второй вызов ExecOnHost)
+	dynamicSSH := &dynamicMockSSHExec{
+		failOnCall: 2,
+		err:        fmt.Errorf("pct set: exit status 1"),
+	}
+	p.WithSSHClient(dynamicSSH)
+
+	waitForProvision(p, "tenant-1", n.ID, proj.ID, "myapp", proj.RAMMB)
+
+	tenantStore.mu.Lock()
+	defer tenantStore.mu.Unlock()
+
+	if tenantStore.statuses["tenant-1"] != "error" {
+		t.Errorf("expected tenant status 'error', got %q", tenantStore.statuses["tenant-1"])
+	}
+
+	// Cleanup должен удалить контейнер
+	mockClient.mu.Lock()
+	defer mockClient.mu.Unlock()
+	if !mockClient.deleteCalled {
+		t.Error("expected delete to be called for cleanup")
 	}
 }
 
