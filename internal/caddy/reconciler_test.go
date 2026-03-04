@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"sync"
+	"strings"
 	"testing"
 )
 
@@ -23,11 +24,21 @@ func (m *mockTenantLister) ListActiveWithIP(_ context.Context) ([]TenantRoute, e
 	return m.tenants, nil
 }
 
-func TestReconcile_AllRoutesAdded(t *testing.T) {
+func TestReconcile_AllRoutesUpserted(t *testing.T) {
 	var mu sync.Mutex
 	addedRoutes := map[string]string{}
+	var requestLog []string
 
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		requestLog = append(requestLog, r.Method+" "+r.URL.Path)
+		mu.Unlock()
+
+		if r.Method == http.MethodDelete {
+			// Simulate route doesn't exist yet (first reconcile)
+			w.WriteHeader(http.StatusNotFound)
+			return
+		}
 		if r.Method == http.MethodPost {
 			var route caddyRoute
 			json.NewDecoder(r.Body).Decode(&route)
@@ -64,6 +75,22 @@ func TestReconcile_AllRoutesAdded(t *testing.T) {
 
 	mu.Lock()
 	defer mu.Unlock()
+
+	// Each tenant should have DELETE + POST = 6 total requests
+	if len(requestLog) != 6 {
+		t.Errorf("expected 6 requests (3xDELETE + 3xPOST), got %d: %v", len(requestLog), requestLog)
+	}
+
+	// Verify DELETE comes before POST for each tenant (sequential processing)
+	for i := 0; i < len(requestLog)-1; i += 2 {
+		if !strings.HasPrefix(requestLog[i], "DELETE") {
+			t.Errorf("request %d should be DELETE, got %q", i, requestLog[i])
+		}
+		if !strings.HasPrefix(requestLog[i+1], "POST") {
+			t.Errorf("request %d should be POST, got %q", i+1, requestLog[i+1])
+		}
+	}
+
 	if len(addedRoutes) != 3 {
 		t.Errorf("expected 3 routes added, got %d", len(addedRoutes))
 	}
@@ -73,16 +100,22 @@ func TestReconcile_AllRoutesAdded(t *testing.T) {
 }
 
 func TestReconcile_SomeRoutesFail(t *testing.T) {
-	callCount := 0
+	postCount := 0
 	var mu sync.Mutex
 
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodDelete {
+			// All deletes succeed (or 404)
+			w.WriteHeader(http.StatusNotFound)
+			return
+		}
+		// POST handling
 		mu.Lock()
-		callCount++
-		n := callCount
+		postCount++
+		n := postCount
 		mu.Unlock()
 
-		// Fail the second call
+		// Fail the second POST (second tenant)
 		if n == 2 {
 			w.WriteHeader(http.StatusInternalServerError)
 			w.Write([]byte("internal error"))

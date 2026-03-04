@@ -197,6 +197,18 @@ func (c *Client) ListRoutes(ctx context.Context) ([]Route, error) {
 	return result, nil
 }
 
+// UpsertRoute ensures a route exists for the subdomain by removing any existing one first (DELETE+POST).
+// This is idempotent: if the route does not exist, the DELETE returns 404 (which RemoveRoute treats as success).
+func (c *Client) UpsertRoute(ctx context.Context, subdomain, targetIP string) error {
+	if err := c.RemoveRoute(ctx, subdomain); err != nil {
+		return fmt.Errorf("caddy: upsert route %q: delete failed: %w", subdomain, err)
+	}
+	if err := c.AddRoute(ctx, subdomain, targetIP); err != nil {
+		return fmt.Errorf("caddy: upsert route %q: add failed: %w", subdomain, err)
+	}
+	return nil
+}
+
 // readErrorBody reads the response body and returns a formatted error string.
 func readErrorBody(resp *http.Response) string {
 	body, _ := io.ReadAll(io.LimitReader(resp.Body, int64(maxBodySnippet)))

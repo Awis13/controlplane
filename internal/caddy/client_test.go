@@ -279,3 +279,108 @@ func TestListRoutes_ServerError(t *testing.T) {
 		t.Fatal("expected error")
 	}
 }
+
+
+func TestUpsertRoute_HappyPath(t *testing.T) {
+	var methods []string
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		methods = append(methods, r.Method)
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer srv.Close()
+
+	c := NewClient(srv.URL, "srv1", "freeradio.app")
+	err := c.UpsertRoute(context.Background(), "mystudio", "10.10.10.5")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	if len(methods) != 2 {
+		t.Fatalf("expected 2 requests (DELETE+POST), got %d", len(methods))
+	}
+	if methods[0] != http.MethodDelete {
+		t.Errorf("first request should be DELETE, got %s", methods[0])
+	}
+	if methods[1] != http.MethodPost {
+		t.Errorf("second request should be POST, got %s", methods[1])
+	}
+}
+
+func TestUpsertRoute_RouteDidNotExist(t *testing.T) {
+	var methods []string
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		methods = append(methods, r.Method)
+		if r.Method == http.MethodDelete {
+			w.WriteHeader(http.StatusNotFound) // route doesn't exist — fine
+			return
+		}
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer srv.Close()
+
+	c := NewClient(srv.URL, "srv1", "freeradio.app")
+	err := c.UpsertRoute(context.Background(), "newstudio", "10.10.10.8")
+	if err != nil {
+		t.Fatalf("expected no error when DELETE returns 404, got: %v", err)
+	}
+
+	if len(methods) != 2 {
+		t.Fatalf("expected 2 requests (DELETE+POST), got %d", len(methods))
+	}
+}
+
+func TestUpsertRoute_DeleteFails(t *testing.T) {
+	var methods []string
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		methods = append(methods, r.Method)
+		if r.Method == http.MethodDelete {
+			w.WriteHeader(http.StatusInternalServerError)
+			w.Write([]byte("delete failed"))
+			return
+		}
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer srv.Close()
+
+	c := NewClient(srv.URL, "srv1", "freeradio.app")
+	err := c.UpsertRoute(context.Background(), "mystudio", "10.10.10.5")
+	if err == nil {
+		t.Fatal("expected error when DELETE returns 500")
+	}
+
+	if !strings.Contains(err.Error(), "delete failed") {
+		t.Errorf("expected error to mention delete, got: %v", err)
+	}
+
+	// POST should NOT have been called
+	for _, m := range methods {
+		if m == http.MethodPost {
+			t.Error("POST should not be called when DELETE fails")
+		}
+	}
+}
+
+func TestUpsertRoute_PostFails(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodDelete {
+			w.WriteHeader(http.StatusOK)
+			return
+		}
+		w.WriteHeader(http.StatusInternalServerError)
+		w.Write([]byte("post failed"))
+	}))
+	defer srv.Close()
+
+	c := NewClient(srv.URL, "srv1", "freeradio.app")
+	err := c.UpsertRoute(context.Background(), "mystudio", "10.10.10.5")
+	if err == nil {
+		t.Fatal("expected error when POST returns 500")
+	}
+
+	if !strings.Contains(err.Error(), "add failed") {
+		t.Errorf("expected error to mention add, got: %v", err)
+	}
+}

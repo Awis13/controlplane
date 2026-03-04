@@ -38,12 +38,12 @@ func Reconcile(ctx context.Context, client *Client, lister TenantLister) (*Recon
 
 	result := &ReconcileResult{}
 	for _, t := range tenants {
-		if err := client.AddRoute(ctx, t.Subdomain, t.LXCIP); err != nil {
-			slog.Error("caddy: reconcile: failed to add route",
+		if err := client.UpsertRoute(ctx, t.Subdomain, t.LXCIP); err != nil {
+			slog.Error("caddy: reconcile: failed to upsert route",
 				"subdomain", t.Subdomain, "lxc_ip", t.LXCIP, "error", err)
 			result.Failed++
 		} else {
-			slog.Info("caddy: reconcile: route added",
+			slog.Info("caddy: reconcile: route upserted",
 				"subdomain", t.Subdomain, "target", t.LXCIP)
 			result.Success++
 		}
