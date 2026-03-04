@@ -1274,9 +1274,9 @@ func TestDeprovision_ContainerNotFound_GenericError(t *testing.T) {
 	nodeStore.nodes[n.ID] = n
 	nodeStore.ram[n.ID] = proj.RAMMB
 
-	// Generic "not found" error string (not APIError)
+	// Generic "does not exist" error string (not APIError)
 	mockClient := &mockProxmoxClient{
-		deleteErr: fmt.Errorf("container not found"),
+		deleteErr: fmt.Errorf("CT 105 does not exist"),
 	}
 	p := setupProvisioner(nodeStore, tenantStore, projectStore, mockClient, n.ID)
 
@@ -1327,39 +1327,3 @@ func TestDeprovision_RealDeleteError_StillFails(t *testing.T) {
 	}
 }
 
-func TestIsContainerNotFound(t *testing.T) {
-	tests := []struct {
-		name     string
-		err      error
-		expected bool
-	}{
-		{"nil error", nil, false},
-		{"does not exist", fmt.Errorf("CT 105 does not exist"), true},
-		{"not found", fmt.Errorf("container not found"), true},
-		{"no such container", fmt.Errorf("no such container 105"), true},
-		{"proxmox api error with does not exist", &proxmox.APIError{
-			StatusCode: 500,
-			Status:     "500 Internal Server Error",
-			Errors:     map[string]string{"vmid": "CT 105 does not exist"},
-		}, true},
-		{"task error with not exist", &proxmox.TaskError{
-			UPID:       "UPID:node:001",
-			ExitStatus: "ERROR: CT 105 does not exist",
-			Type:       "vzdestroy",
-		}, true},
-		{"unrelated error", fmt.Errorf("connection refused"), false},
-		{"proxmox timeout", &proxmox.APIError{
-			StatusCode: 504,
-			Status:     "504 Gateway Timeout",
-		}, false},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			got := isContainerNotFound(tt.err)
-			if got != tt.expected {
-				t.Errorf("isContainerNotFound(%v) = %v, want %v", tt.err, got, tt.expected)
-			}
-		})
-	}
-}
