@@ -1178,3 +1178,188 @@ func TestProvision_BoundedConcurrency(t *testing.T) {
 		}
 	}
 }
+
+// --- Deprovision: container not found tests ---
+
+func TestDeprovision_ContainerNotFound_DeleteReturnsNotFound(t *testing.T) {
+	nodeStore := newMockNodeStore()
+	tenantStore := newMockTenantStore()
+	projectStore := newMockProjectStore()
+
+	proj := testProject()
+	n := testNode()
+	projectStore.projects[proj.ID] = proj
+	nodeStore.nodes[n.ID] = n
+	nodeStore.ram[n.ID] = proj.RAMMB
+
+	// Simulate Proxmox returning "does not exist" when container is already gone
+	mockClient := &mockProxmoxClient{
+		deleteErr: &proxmox.APIError{
+			StatusCode: 500,
+			Status:     "500 Internal Server Error",
+			Errors:     map[string]string{"vmid": "CT 105 does not exist"},
+		},
+	}
+	p := setupProvisioner(nodeStore, tenantStore, projectStore, mockClient, n.ID)
+
+	err := p.Deprovision(context.Background(), "tenant-1", n.ID, "myapp", 105, proj.RAMMB)
+	if err != nil {
+		t.Fatalf("expected no error when container already gone, got: %v", err)
+	}
+
+	tenantStore.mu.Lock()
+	defer tenantStore.mu.Unlock()
+
+	if tenantStore.statuses["tenant-1"] != "deleted" {
+		t.Errorf("expected tenant status 'deleted', got %q", tenantStore.statuses["tenant-1"])
+	}
+
+	// RAM should be released
+	nodeStore.mu.Lock()
+	defer nodeStore.mu.Unlock()
+	if nodeStore.ram[n.ID] != 0 {
+		t.Errorf("expected ram to be released, got %d", nodeStore.ram[n.ID])
+	}
+}
+
+func TestDeprovision_ContainerNotFound_OnWait(t *testing.T) {
+	nodeStore := newMockNodeStore()
+	tenantStore := newMockTenantStore()
+	projectStore := newMockProjectStore()
+
+	proj := testProject()
+	n := testNode()
+	projectStore.projects[proj.ID] = proj
+	nodeStore.nodes[n.ID] = n
+	nodeStore.ram[n.ID] = proj.RAMMB
+
+	// DeleteContainer succeeds but Wait returns "not found" (task reports container gone)
+	mockClient := &mockProxmoxClient{
+		deleteWaitErr: &proxmox.TaskError{
+			UPID:       "UPID:node:001:task",
+			ExitStatus: "ERROR: CT 105 does not exist",
+			Type:       "vzdestroy",
+		},
+	}
+	p := setupProvisioner(nodeStore, tenantStore, projectStore, mockClient, n.ID)
+
+	err := p.Deprovision(context.Background(), "tenant-1", n.ID, "myapp", 105, proj.RAMMB)
+	if err != nil {
+		t.Fatalf("expected no error when container gone during wait, got: %v", err)
+	}
+
+	tenantStore.mu.Lock()
+	defer tenantStore.mu.Unlock()
+
+	if tenantStore.statuses["tenant-1"] != "deleted" {
+		t.Errorf("expected tenant status 'deleted', got %q", tenantStore.statuses["tenant-1"])
+	}
+
+	// RAM should be released
+	nodeStore.mu.Lock()
+	defer nodeStore.mu.Unlock()
+	if nodeStore.ram[n.ID] != 0 {
+		t.Errorf("expected ram to be released, got %d", nodeStore.ram[n.ID])
+	}
+}
+
+func TestDeprovision_ContainerNotFound_GenericError(t *testing.T) {
+	nodeStore := newMockNodeStore()
+	tenantStore := newMockTenantStore()
+	projectStore := newMockProjectStore()
+
+	proj := testProject()
+	n := testNode()
+	projectStore.projects[proj.ID] = proj
+	nodeStore.nodes[n.ID] = n
+	nodeStore.ram[n.ID] = proj.RAMMB
+
+	// Generic "not found" error string (not APIError)
+	mockClient := &mockProxmoxClient{
+		deleteErr: fmt.Errorf("container not found"),
+	}
+	p := setupProvisioner(nodeStore, tenantStore, projectStore, mockClient, n.ID)
+
+	err := p.Deprovision(context.Background(), "tenant-1", n.ID, "myapp", 105, proj.RAMMB)
+	if err != nil {
+		t.Fatalf("expected no error when container not found, got: %v", err)
+	}
+
+	tenantStore.mu.Lock()
+	defer tenantStore.mu.Unlock()
+
+	if tenantStore.statuses["tenant-1"] != "deleted" {
+		t.Errorf("expected tenant status 'deleted', got %q", tenantStore.statuses["tenant-1"])
+	}
+}
+
+func TestDeprovision_RealDeleteError_StillFails(t *testing.T) {
+	nodeStore := newMockNodeStore()
+	tenantStore := newMockTenantStore()
+	projectStore := newMockProjectStore()
+
+	proj := testProject()
+	n := testNode()
+	projectStore.projects[proj.ID] = proj
+	nodeStore.nodes[n.ID] = n
+	nodeStore.ram[n.ID] = proj.RAMMB
+
+	// A real error (not "not found") should still fail
+	mockClient := &mockProxmoxClient{
+		deleteErr: &proxmox.APIError{
+			StatusCode: 500,
+			Status:     "500 Internal Server Error",
+			Errors:     map[string]string{"node": "connection refused"},
+		},
+	}
+	p := setupProvisioner(nodeStore, tenantStore, projectStore, mockClient, n.ID)
+
+	err := p.Deprovision(context.Background(), "tenant-1", n.ID, "myapp", 105, proj.RAMMB)
+	if err == nil {
+		t.Fatal("expected error for real delete failure")
+	}
+
+	tenantStore.mu.Lock()
+	defer tenantStore.mu.Unlock()
+
+	if tenantStore.statuses["tenant-1"] != "error" {
+		t.Errorf("expected tenant status 'error', got %q", tenantStore.statuses["tenant-1"])
+	}
+}
+
+func TestIsContainerNotFound(t *testing.T) {
+	tests := []struct {
+		name     string
+		err      error
+		expected bool
+	}{
+		{"nil error", nil, false},
+		{"does not exist", fmt.Errorf("CT 105 does not exist"), true},
+		{"not found", fmt.Errorf("container not found"), true},
+		{"no such container", fmt.Errorf("no such container 105"), true},
+		{"proxmox api error with does not exist", &proxmox.APIError{
+			StatusCode: 500,
+			Status:     "500 Internal Server Error",
+			Errors:     map[string]string{"vmid": "CT 105 does not exist"},
+		}, true},
+		{"task error with not exist", &proxmox.TaskError{
+			UPID:       "UPID:node:001",
+			ExitStatus: "ERROR: CT 105 does not exist",
+			Type:       "vzdestroy",
+		}, true},
+		{"unrelated error", fmt.Errorf("connection refused"), false},
+		{"proxmox timeout", &proxmox.APIError{
+			StatusCode: 504,
+			Status:     "504 Gateway Timeout",
+		}, false},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := isContainerNotFound(tt.err)
+			if got != tt.expected {
+				t.Errorf("isContainerNotFound(%v) = %v, want %v", tt.err, got, tt.expected)
+			}
+		})
+	}
+}

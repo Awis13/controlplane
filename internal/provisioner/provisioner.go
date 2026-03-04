@@ -495,13 +495,21 @@ func (p *Provisioner) Deprovision(ctx context.Context, tenantID, nodeID, subdoma
 	log.Info("deprovision: deleting container")
 	deleteTask, err := client.DeleteContainer(ctx, lxcID, true)
 	if err != nil {
-		_ = p.tenantStore.SetError(ctx, tenantID, "deprovision failed: container delete error")
-		return fmt.Errorf("delete container: %w", err)
-	}
-
-	if err := deleteTask.Wait(ctx); err != nil {
-		_ = p.tenantStore.SetError(ctx, tenantID, "deprovision failed: container delete did not complete")
-		return fmt.Errorf("delete task failed: %w", err)
+		if isContainerNotFound(err) {
+			log.Info("deprovision: container already gone, continuing", "lxc_id", lxcID)
+		} else {
+			_ = p.tenantStore.SetError(ctx, tenantID, "deprovision failed: container delete error")
+			return fmt.Errorf("delete container: %w", err)
+		}
+	} else {
+		if err := deleteTask.Wait(ctx); err != nil {
+			if isContainerNotFound(err) {
+				log.Info("deprovision: container gone during delete wait", "lxc_id", lxcID)
+			} else {
+				_ = p.tenantStore.SetError(ctx, tenantID, "deprovision failed: container delete did not complete")
+				return fmt.Errorf("delete task failed: %w", err)
+			}
+		}
 	}
 
 	// Release RAM
@@ -599,6 +607,20 @@ func (p *Provisioner) cleanupAndError(ctx context.Context, client ProxmoxClient,
 		}
 	}
 	p.setError(ctx, tenantID, nodeID, ramMB, errMsg)
+}
+
+// isContainerNotFound checks if a Proxmox error indicates the container doesn't exist.
+// This handles cases where a container was already deleted (e.g. by cleanupAndError)
+// but we still need to mark the tenant as deleted.
+func isContainerNotFound(err error) bool {
+	if err == nil {
+		return false
+	}
+	msg := strings.ToLower(err.Error())
+	return strings.Contains(msg, "does not exist") ||
+		strings.Contains(msg, "no such") ||
+		strings.Contains(msg, "not found") ||
+		strings.Contains(msg, "not exist")
 }
 
 // generateToken генерирует криптографически случайный токен (64 hex символа).
