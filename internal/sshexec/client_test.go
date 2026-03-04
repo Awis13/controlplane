@@ -119,6 +119,53 @@ func TestExecInContainer_InvalidKeyContent(t *testing.T) {
 	}
 }
 
+func TestExecOnHost_InvalidKeyPath(t *testing.T) {
+	c := NewClient("/nonexistent/path/id_ed25519")
+	err := c.ExecOnHost(t.Context(), "10.10.0.2", "echo hello")
+	if err == nil {
+		t.Error("expected error for invalid key path")
+	}
+}
+
+func TestExecOnHost_InvalidKeyContent(t *testing.T) {
+	tmpDir := t.TempDir()
+	keyPath := filepath.Join(tmpDir, "bad_key")
+	if err := os.WriteFile(keyPath, []byte("not a valid key"), 0600); err != nil {
+		t.Fatal(err)
+	}
+
+	c := NewClient(keyPath)
+	err := c.ExecOnHost(t.Context(), "10.10.0.2", "echo hello")
+	if err == nil {
+		t.Error("expected error for invalid key content")
+	}
+}
+
+func TestExecOnHost_ValidKeyConnectionRefused(t *testing.T) {
+	// Генерируем реальный ED25519 ключ
+	_, priv, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	pemBlock, err := ssh.MarshalPrivateKey(priv, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	tmpDir := t.TempDir()
+	keyPath := filepath.Join(tmpDir, "id_ed25519")
+	if err := os.WriteFile(keyPath, pem.EncodeToMemory(pemBlock), 0600); err != nil {
+		t.Fatal(err)
+	}
+
+	c := NewClient(keyPath)
+	err = c.ExecOnHost(t.Context(), "127.0.0.1", "echo hello")
+	if err == nil {
+		t.Error("expected connection error")
+	}
+}
+
 func TestExecInContainer_ValidKeyConnectionRefused(t *testing.T) {
 	// Генерируем реальный ED25519 ключ
 	_, priv, err := ed25519.GenerateKey(rand.Reader)

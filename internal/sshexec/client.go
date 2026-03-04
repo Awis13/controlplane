@@ -36,6 +36,23 @@ func shellEscape(s string) string {
 // vmid — ID LXC контейнера.
 // command — shell команда для выполнения внутри контейнера.
 func (c *Client) ExecInContainer(ctx context.Context, sshHost string, vmid int, command string) error {
+	cmd := fmt.Sprintf("pct exec %d -- bash -c '%s'", vmid, shellEscape(command))
+	if err := c.execCommand(ctx, sshHost, cmd); err != nil {
+		return fmt.Errorf("pct exec: %w", err)
+	}
+	return nil
+}
+
+// ExecOnHost выполняет команду непосредственно на Proxmox ноде (не внутри контейнера).
+// sshHost — SSH адрес Proxmox ноды (извлекается из proxmox_url).
+// command — shell команда для выполнения на хосте.
+// ВАЖНО: экранирование не выполняется — вызывающий код отвечает за безопасность команды.
+func (c *Client) ExecOnHost(ctx context.Context, sshHost string, command string) error {
+	return c.execCommand(ctx, sshHost, command)
+}
+
+// execCommand — общий хелпер для выполнения произвольной команды через SSH.
+func (c *Client) execCommand(ctx context.Context, sshHost string, fullCommand string) error {
 	keyBytes, err := os.ReadFile(c.keyPath)
 	if err != nil {
 		return fmt.Errorf("read ssh key: %w", err)
@@ -84,19 +101,17 @@ func (c *Client) ExecInContainer(ctx context.Context, sshHost string, vmid int, 
 	// Закрываем сессию при отмене контекста
 	done := make(chan error, 1)
 	go func() {
-		cmd := fmt.Sprintf("pct exec %d -- bash -c '%s'", vmid, shellEscape(command))
-		done <- session.Run(cmd)
+		done <- session.Run(fullCommand)
 	}()
 
 	select {
 	case <-ctx.Done():
 		_ = session.Signal(ssh.SIGKILL)
+		_ = session.Close()
+		<-done // дожидаемся завершения горутины
 		return ctx.Err()
 	case err := <-done:
-		if err != nil {
-			return fmt.Errorf("pct exec: %w", err)
-		}
-		return nil
+		return err
 	}
 }
 
