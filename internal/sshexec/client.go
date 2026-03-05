@@ -11,13 +11,13 @@ import (
 	"golang.org/x/crypto/ssh"
 )
 
-// Client выполняет команды на удалённых хостах через SSH.
+// Client executes commands on remote hosts via SSH.
 type Client struct {
 	keyPath string
 	user    string
 }
 
-// NewClient создаёт новый SSH exec клиент.
+// NewClient creates a new SSH exec client.
 func NewClient(keyPath string) *Client {
 	return &Client{
 		keyPath: keyPath,
@@ -31,10 +31,10 @@ func shellEscape(s string) string {
 	return strings.ReplaceAll(s, "'", `'\''`)
 }
 
-// ExecInContainer выполняет команду внутри LXC контейнера через pct exec.
-// sshHost — SSH адрес Proxmox ноды (извлекается из proxmox_url).
-// vmid — ID LXC контейнера.
-// command — shell команда для выполнения внутри контейнера.
+// ExecInContainer runs a command inside an LXC container via pct exec.
+// sshHost is the Proxmox node SSH address (extracted from proxmox_url).
+// vmid is the LXC container ID.
+// command is the shell command to execute inside the container.
 func (c *Client) ExecInContainer(ctx context.Context, sshHost string, vmid int, command string) error {
 	cmd := fmt.Sprintf("pct exec %d -- bash -c '%s'", vmid, shellEscape(command))
 	if err := c.execCommand(ctx, sshHost, cmd); err != nil {
@@ -43,15 +43,15 @@ func (c *Client) ExecInContainer(ctx context.Context, sshHost string, vmid int, 
 	return nil
 }
 
-// ExecOnHost выполняет команду непосредственно на Proxmox ноде (не внутри контейнера).
-// sshHost — SSH адрес Proxmox ноды (извлекается из proxmox_url).
-// command — shell команда для выполнения на хосте.
-// ВАЖНО: экранирование не выполняется — вызывающий код отвечает за безопасность команды.
+// ExecOnHost runs a command directly on the Proxmox node (not inside a container).
+// sshHost is the Proxmox node SSH address (extracted from proxmox_url).
+// command is the shell command to execute on the host.
+// NOTE: no escaping is performed — the caller is responsible for command safety.
 func (c *Client) ExecOnHost(ctx context.Context, sshHost string, command string) error {
 	return c.execCommand(ctx, sshHost, command)
 }
 
-// execCommand — общий хелпер для выполнения произвольной команды через SSH.
+// execCommand is a shared helper for executing an arbitrary command via SSH.
 func (c *Client) execCommand(ctx context.Context, sshHost string, fullCommand string) error {
 	keyBytes, err := os.ReadFile(c.keyPath)
 	if err != nil {
@@ -75,7 +75,7 @@ func (c *Client) execCommand(ctx context.Context, sshHost string, fullCommand st
 
 	addr := net.JoinHostPort(sshHost, "22")
 
-	// Используем контекст для таймаута подключения
+	// Use context for connection timeout
 	var conn net.Conn
 	dialer := &net.Dialer{}
 	conn, err = dialer.DialContext(ctx, "tcp", addr)
@@ -98,7 +98,7 @@ func (c *Client) execCommand(ctx context.Context, sshHost string, fullCommand st
 	}
 	defer session.Close()
 
-	// Закрываем сессию при отмене контекста
+	// Close session on context cancellation
 	done := make(chan error, 1)
 	go func() {
 		done <- session.Run(fullCommand)
@@ -108,17 +108,17 @@ func (c *Client) execCommand(ctx context.Context, sshHost string, fullCommand st
 	case <-ctx.Done():
 		_ = session.Signal(ssh.SIGKILL)
 		_ = session.Close()
-		<-done // дожидаемся завершения горутины
+		<-done // wait for goroutine to finish
 		return ctx.Err()
 	case err := <-done:
 		return err
 	}
 }
 
-// ExtractHost парсит URL и возвращает только hostname (без порта).
+// ExtractHost parses a URL and returns only the hostname (without port).
 // "https://10.10.0.2:8006" → "10.10.0.2"
 func ExtractHost(rawURL string) (string, error) {
-	// Добавляем схему если отсутствует
+	// Add scheme if missing
 	if !strings.Contains(rawURL, "://") {
 		rawURL = "https://" + rawURL
 	}

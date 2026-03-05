@@ -54,7 +54,7 @@ func JWTAuth(userStore *user.Store, tokenStore *TokenStore, jwtSecret string) fu
 				return
 			}
 
-			// Проверяем отозван ли токен по jti
+			// Check if token is revoked by jti
 			if jti, ok := claims["jti"].(string); ok && jti != "" && tokenStore != nil {
 				revoked, err := tokenStore.IsRevoked(r.Context(), jti)
 				if err != nil {

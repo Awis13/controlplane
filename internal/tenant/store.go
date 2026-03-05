@@ -446,7 +446,7 @@ func (s *Store) SetHealthStatus(ctx context.Context, id string, status string) e
 	return nil
 }
 
-// SetDashboardToken сохраняет dashboard token для тенанта.
+// SetDashboardToken saves the dashboard token for a tenant.
 func (s *Store) SetDashboardToken(ctx context.Context, id string, token string) error {
 	tag, err := s.pool.Exec(ctx,
 		`UPDATE tenants SET dashboard_token = $2 WHERE id = $1`,

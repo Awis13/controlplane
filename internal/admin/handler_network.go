@@ -16,7 +16,7 @@ import (
 	"controlplane/internal/wireguard"
 )
 
-// WireGuardService определяет операции WireGuard, нужные для admin UI.
+// WireGuardService defines WireGuard operations needed by the admin UI.
 type WireGuardService interface {
 	CreatePeer(ctx context.Context, req wireguard.CreatePeerRequest) (*wireguard.Peer, string, error)
 	BuildPeerConfig(peer *wireguard.Peer, privateKey string) string
@@ -28,7 +28,7 @@ type WireGuardService interface {
 	HubEndpoint() string
 }
 
-// WireGuardStore определяет операции хранилища WireGuard для admin UI.
+// WireGuardStore defines WireGuard store operations for the admin UI.
 type WireGuardStore interface {
 	List(ctx context.Context) ([]wireguard.Peer, error)
 	ListByType(ctx context.Context, peerType string) ([]wireguard.Peer, error)
@@ -39,14 +39,14 @@ type WireGuardStore interface {
 	SetEnabled(ctx context.Context, id string, enabled bool) error
 }
 
-// networkPage отображает страницу управления WireGuard сетью.
+// networkPage renders the WireGuard network management page.
 func (h *Handler) networkPage(w http.ResponseWriter, r *http.Request) {
 	if h.wgStore == nil {
 		http.Error(w, "WireGuard not configured", 500)
 		return
 	}
 
-	// Получаем все пиры одним запросом
+	// Fetch all peers in one query
 	allPeers, err := h.wgStore.List(r.Context())
 	if err != nil {
 		slog.Error("admin: list peers", "error", err)
@@ -54,7 +54,7 @@ func (h *Handler) networkPage(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Считаем статистику по типам
+	// Count stats by type
 	var adminCount, nodeCount, userCount, enabledCount int
 	for _, p := range allPeers {
 		switch p.Type {
@@ -70,7 +70,7 @@ func (h *Handler) networkPage(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	// Фильтруем in-memory если указан тип
+	// Filter in-memory if type is specified
 	filterType := r.URL.Query().Get("type")
 	peers := allPeers
 	if filterType != "" && wireguard.ValidPeerTypes[filterType] {
@@ -108,7 +108,7 @@ func (h *Handler) networkPage(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-// createPeerAdmin создаёт новый WireGuard пир через HTMX форму.
+// createPeerAdmin creates a new WireGuard peer via HTMX form.
 func (h *Handler) createPeerAdmin(w http.ResponseWriter, r *http.Request) {
 	if h.wgService == nil {
 		h.renderFlash(w, "flash_error", "WireGuard not configured")
@@ -136,7 +136,7 @@ func (h *Handler) createPeerAdmin(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Валидация AllowedIPs если указаны
+	// Validate AllowedIPs if provided
 	if allowedIPs != "" {
 		if err := wireguard.ValidateAllowedIPs(allowedIPs); err != nil {
 			h.renderFlash(w, "flash_error", "Invalid AllowedIPs: "+err.Error())
@@ -164,9 +164,9 @@ func (h *Handler) createPeerAdmin(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Пытаемся применить к wg0
+	// Try to apply to wg0
 	if applyErr := h.wgService.ApplyPeer(peer); applyErr != nil {
-		slog.Warn("admin: не удалось применить пир к wg0", "peer", peer.Name, "error", applyErr)
+		slog.Warn("admin: failed to apply peer to wg0", "peer", peer.Name, "error", applyErr)
 	}
 
 	if h.auditStore != nil {
@@ -176,7 +176,7 @@ func (h *Handler) createPeerAdmin(w http.ResponseWriter, r *http.Request) {
 		})
 	}
 
-	// Рендерим страницу деталей пира с приватным ключом (показывается один раз)
+	// Render peer detail page with private key (shown once)
 	config := h.wgService.BuildPeerConfig(peer, privateKey)
 
 	qrPNG, qrErr := h.wgService.GenerateQRCode(config)
@@ -184,7 +184,7 @@ func (h *Handler) createPeerAdmin(w http.ResponseWriter, r *http.Request) {
 	if qrErr == nil {
 		qrBase64 = base64.StdEncoding.EncodeToString(qrPNG)
 	} else {
-		slog.Warn("admin: не удалось сгенерировать QR", "error", qrErr)
+		slog.Warn("admin: failed to generate QR", "error", qrErr)
 	}
 
 	data := struct {
@@ -209,7 +209,7 @@ func (h *Handler) createPeerAdmin(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-// peerDetail отображает детальную страницу пира.
+// peerDetail renders the peer detail page.
 func (h *Handler) peerDetail(w http.ResponseWriter, r *http.Request) {
 	if h.wgStore == nil {
 		http.Error(w, "WireGuard not configured", 500)
@@ -233,16 +233,16 @@ func (h *Handler) peerDetail(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Конфиг без приватного ключа
+	// Config without private key
 	config := h.wgService.BuildPeerConfig(peer, "<PRIVATE_KEY>")
 
-	// QR код
+	// QR code
 	qrPNG, err := h.wgService.GenerateQRCode(config)
 	var qrBase64 string
 	if err == nil {
 		qrBase64 = base64.StdEncoding.EncodeToString(qrPNG)
 	} else {
-		slog.Warn("admin: не удалось сгенерировать QR", "error", err)
+		slog.Warn("admin: failed to generate QR", "error", err)
 	}
 
 	data := struct {
@@ -266,7 +266,7 @@ func (h *Handler) peerDetail(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-// updatePeerAdmin обновляет пир через admin UI.
+// updatePeerAdmin updates a peer via the admin UI.
 func (h *Handler) updatePeerAdmin(w http.ResponseWriter, r *http.Request) {
 	id := chi.URLParam(r, "id")
 	if !response.ValidUUID(id) {
@@ -307,7 +307,7 @@ func (h *Handler) updatePeerAdmin(w http.ResponseWriter, r *http.Request) {
 	w.WriteHeader(http.StatusOK)
 }
 
-// deletePeerAdmin удаляет пир через admin UI.
+// deletePeerAdmin deletes a peer via the admin UI.
 func (h *Handler) deletePeerAdmin(w http.ResponseWriter, r *http.Request) {
 	id := chi.URLParam(r, "id")
 	if !response.ValidUUID(id) {
@@ -326,12 +326,12 @@ func (h *Handler) deletePeerAdmin(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Удаляем из wg0
+	// Remove from wg0
 	if removeErr := h.wgService.RemovePeer(peer.PublicKey); removeErr != nil {
-		slog.Warn("admin: не удалось удалить пир из wg0", "peer", peer.Name, "error", removeErr)
+		slog.Warn("admin: failed to remove peer from wg0", "peer", peer.Name, "error", removeErr)
 	}
 
-	// Удаляем из БД
+	// Delete from DB
 	if err := h.wgStore.Delete(r.Context(), id); err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
 			http.Error(w, "not found", 404)
@@ -352,7 +352,7 @@ func (h *Handler) deletePeerAdmin(w http.ResponseWriter, r *http.Request) {
 	w.WriteHeader(http.StatusOK)
 }
 
-// enablePeerAdmin включает пир через admin UI.
+// enablePeerAdmin enables a peer via the admin UI.
 func (h *Handler) enablePeerAdmin(w http.ResponseWriter, r *http.Request) {
 	id := chi.URLParam(r, "id")
 	if !response.ValidUUID(id) {
@@ -370,11 +370,11 @@ func (h *Handler) enablePeerAdmin(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Применяем к wg0
+	// Apply to wg0
 	peer, err := h.wgStore.GetByID(r.Context(), id)
 	if err == nil && peer != nil {
 		if applyErr := h.wgService.ApplyPeer(peer); applyErr != nil {
-			slog.Warn("admin: не удалось применить пир к wg0", "peer", peer.Name, "error", applyErr)
+			slog.Warn("admin: failed to apply peer to wg0", "peer", peer.Name, "error", applyErr)
 		}
 	}
 
@@ -387,7 +387,7 @@ func (h *Handler) enablePeerAdmin(w http.ResponseWriter, r *http.Request) {
 	w.WriteHeader(http.StatusOK)
 }
 
-// disablePeerAdmin отключает пир через admin UI.
+// disablePeerAdmin disables a peer via the admin UI.
 func (h *Handler) disablePeerAdmin(w http.ResponseWriter, r *http.Request) {
 	id := chi.URLParam(r, "id")
 	if !response.ValidUUID(id) {
@@ -412,9 +412,9 @@ func (h *Handler) disablePeerAdmin(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Удаляем из wg0
+	// Remove from wg0
 	if removeErr := h.wgService.RemovePeer(peer.PublicKey); removeErr != nil {
-		slog.Warn("admin: не удалось удалить пир из wg0", "peer", peer.Name, "error", removeErr)
+		slog.Warn("admin: failed to remove peer from wg0", "peer", peer.Name, "error", removeErr)
 	}
 
 	if h.auditStore != nil {

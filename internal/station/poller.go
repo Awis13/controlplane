@@ -41,7 +41,7 @@ type Poller struct {
 	httpClient      *http.Client
 	cache           sync.Map // key: tenantID (string), value: *StationStatus
 	wg              sync.WaitGroup
-	skipIPCheck     bool // только для тестов — пропускает SSRF-валидацию
+	skipIPCheck     bool // test-only — skips SSRF validation
 }
 
 // NewPoller creates a new station status poller.
@@ -124,7 +124,7 @@ func (p *Poller) poll(ctx context.Context) {
 			return
 		}
 
-		// SSRF protection: валидируем IP перед запросом
+		// SSRF protection: validate IP before request
 		if !p.skipIPCheck && !isAllowedIP(t.LXCIP) {
 			slog.Warn("poller: skipping tenant with disallowed IP", "tenant_id", t.ID, "ip", t.LXCIP)
 			continue
@@ -149,10 +149,10 @@ func (p *Poller) poll(ctx context.Context) {
 // Only allows private 10.x.x.x addresses (tenant LXC network).
 // Rejects loopback, link-local, unspecified, and non-10.x addresses.
 func isAllowedIP(ipStr string) bool {
-	// Может содержать порт (в тестах) — извлекаем только IP
+	// May contain port (in tests) — extract IP only
 	host, _, err := net.SplitHostPort(ipStr)
 	if err != nil {
-		// Нет порта — используем как есть
+		// No port — use as-is
 		host = ipStr
 	}
 
@@ -165,7 +165,7 @@ func isAllowedIP(ipStr string) bool {
 		return false
 	}
 
-	// Разрешаем только 10.0.0.0/8 (тенанты на 10.10.10.0/24)
+	// Allow only 10.0.0.0/8 (tenants on 10.10.10.0/24)
 	_, private10, _ := net.ParseCIDR("10.0.0.0/8")
 	return private10.Contains(ip)
 }

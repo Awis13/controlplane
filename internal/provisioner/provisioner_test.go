@@ -298,7 +298,7 @@ type mockSSHExec struct {
 
 type sshExecCall struct {
 	SSHHost string
-	VMID    int    // только для ExecInContainer
+	VMID    int    // only for ExecInContainer
 	Command string
 }
 
@@ -1357,12 +1357,12 @@ func TestDeprovision_RealDeleteError_StillFails(t *testing.T) {
 	}
 }
 
-// --- dynamicMockSSHExec: мок, который ломается на N-м вызове ExecOnHost ---
+// --- dynamicMockSSHExec: mock that fails on the N-th ExecOnHost call ---
 
 type dynamicMockSSHExec struct {
 	mu         sync.Mutex
 	callCount  int
-	failOnCall int    // номер вызова (1-based), на котором вернуть ошибку
+	failOnCall int    // call number (1-based) at which to return error
 	err        error
 }
 
@@ -1407,14 +1407,14 @@ func TestProvision_MountPointsViaSSH_HappyPath(t *testing.T) {
 		t.Errorf("expected tenant status 'active', got %q", tenantStore.statuses["tenant-1"])
 	}
 
-	// API mount points НЕ должны вызываться при наличии SSH клиента
+	// API mount points MUST NOT be called when SSH client is available
 	mockClient.mu.Lock()
 	if mockClient.mountPointsCalled {
 		t.Error("API ConfigureMountPoints should NOT be called when SSH client is set")
 	}
 	mockClient.mu.Unlock()
 
-	// Проверяем SSH вызовы: mkdir + pct set
+	// Check SSH calls: mkdir + pct set
 	sshMock.mu.Lock()
 	defer sshMock.mu.Unlock()
 
@@ -1464,19 +1464,19 @@ func TestProvision_MountPointsViaSSH_MkdirError(t *testing.T) {
 		t.Errorf("expected tenant status 'error', got %q", tenantStore.statuses["tenant-1"])
 	}
 
-	// Cleanup должен удалить контейнер
+	// Cleanup should delete container
 	mockClient.mu.Lock()
 	defer mockClient.mu.Unlock()
 	if !mockClient.deleteCalled {
 		t.Error("expected delete to be called for cleanup")
 	}
 
-	// Start НЕ должен вызываться
+	// Start MUST NOT be called
 	if mockClient.startCalled {
 		t.Error("start should not be called after SSH mount failure")
 	}
 
-	// RAM должна быть освобождена
+	// RAM should be released
 	nodeStore.mu.Lock()
 	defer nodeStore.mu.Unlock()
 	if nodeStore.ram[n.ID] != 0 {
@@ -1498,7 +1498,7 @@ func TestProvision_MountPointsViaSSH_PctSetError(t *testing.T) {
 	mockClient := &mockProxmoxClient{nextID: 105}
 	p := setupProvisioner(nodeStore, tenantStore, projectStore, mockClient, n.ID)
 
-	// mkdir ок, pct set — ошибка (failOnCall=2 значит второй вызов ExecOnHost)
+	// mkdir ok, pct set — error (failOnCall=2 means second ExecOnHost call)
 	dynamicSSH := &dynamicMockSSHExec{
 		failOnCall: 2,
 		err:        fmt.Errorf("pct set: exit status 1"),
@@ -1514,7 +1514,7 @@ func TestProvision_MountPointsViaSSH_PctSetError(t *testing.T) {
 		t.Errorf("expected tenant status 'error', got %q", tenantStore.statuses["tenant-1"])
 	}
 
-	// Cleanup должен удалить контейнер
+	// Cleanup should delete container
 	mockClient.mu.Lock()
 	defer mockClient.mu.Unlock()
 	if !mockClient.deleteCalled {

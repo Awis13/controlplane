@@ -7,7 +7,7 @@ import (
 )
 
 func TestScanPeerColumns(t *testing.T) {
-	// Проверяем что количество колонок в peerColumns соответствует полям Peer
+	// Check that peerColumns count matches Peer fields
 	cols := peerColumns
 	count := 0
 	for _, c := range cols {
@@ -15,7 +15,7 @@ func TestScanPeerColumns(t *testing.T) {
 			count++
 		}
 	}
-	count++ // n запятых = n+1 колонок
+	count++ // n commas = n+1 columns
 
 	expected := 12 // id, name, public_key, preshared_key_encrypted, wg_ip, allowed_ips, endpoint, type, tenant_id, enabled, created_at, updated_at
 	if count != expected {
@@ -142,7 +142,7 @@ func TestUpdatePeerRequestNilFields(t *testing.T) {
 }
 
 func TestGetNextAvailableIPSubnetParsing(t *testing.T) {
-	// Проверяем логику парсинга подсети (без БД)
+	// Check subnet parsing logic (no DB)
 	tests := []struct {
 		subnet string
 		valid  bool

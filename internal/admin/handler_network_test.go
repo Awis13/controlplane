@@ -106,7 +106,7 @@ func (m *mockWGStore) SetEnabled(_ context.Context, id string, enabled bool) err
 }
 
 func (m *mockWGStore) GetNextAvailableIP(_ context.Context, _ string) (string, error) {
-	// Простейшая логика: возвращаем IP на основе количества пиров
+	// Simple logic: return IP based on peer count
 	return fmt.Sprintf("10.10.0.%d", len(m.peers)+2), nil
 }
 
@@ -163,7 +163,7 @@ func (m *mockWGService) BuildPeerConfig(peer *wireguard.Peer, privateKey string)
 }
 
 func (m *mockWGService) GenerateQRCode(_ string) ([]byte, error) {
-	// Возвращаем минимальный PNG
+	// Return a minimal PNG
 	return []byte{0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a}, nil
 }
 
@@ -239,7 +239,7 @@ func TestNetworkPageWithFilter(t *testing.T) {
 
 func TestNetworkPageNotConfigured(t *testing.T) {
 	h, _, _, _, _ := testHandler(t)
-	// Не вызываем SetWireGuard — wgStore == nil
+	// Don't call SetWireGuard — wgStore == nil
 
 	w := doRequest(t, h, "GET", "/network", nil)
 

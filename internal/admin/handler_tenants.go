@@ -331,7 +331,7 @@ func (h *Handler) tenantDetail(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	// WireGuard peer для тенанта
+	// WireGuard peer for the tenant
 	var wgPeer *wireguard.Peer
 	var wgConfig, wgQRBase64 string
 	wgEnabled := h.wgStore != nil
@@ -347,7 +347,7 @@ func (h *Handler) tenantDetail(w http.ResponseWriter, r *http.Request) {
 			if qrErr == nil {
 				wgQRBase64 = base64.StdEncoding.EncodeToString(qrPNG)
 			} else {
-				slog.Warn("admin: не удалось сгенерировать QR для тенанта", "error", qrErr)
+				slog.Warn("admin: failed to generate QR for tenant", "error", qrErr)
 			}
 		}
 	}
@@ -504,7 +504,7 @@ func (h *Handler) createTenantPeer(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Проверяем что peer ещё не существует
+	// Check that peer doesn't already exist
 	existing, err := h.wgStore.GetByTenantID(r.Context(), t.ID)
 	if err != nil {
 		slog.Error("admin: check existing wg peer", "error", err)
@@ -534,9 +534,9 @@ func (h *Handler) createTenantPeer(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Применяем к wg0
+	// Apply to wg0
 	if applyErr := h.wgService.ApplyPeer(peer); applyErr != nil {
-		slog.Warn("admin: не удалось применить пир к wg0", "peer", peer.Name, "error", applyErr)
+		slog.Warn("admin: failed to apply peer to wg0", "peer", peer.Name, "error", applyErr)
 	}
 
 	if h.auditStore != nil {
@@ -546,7 +546,7 @@ func (h *Handler) createTenantPeer(w http.ResponseWriter, r *http.Request) {
 		})
 	}
 
-	// Рендерим tenant detail с приватным ключом
+	// Render tenant detail with private key
 	enriched := h.enrichSingle(r.Context(), *t)
 
 	var auditEntries []audit.Entry

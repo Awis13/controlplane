@@ -1,4 +1,4 @@
--- wireguard_peers: WireGuard VPN пиры для mesh-сети
+-- wireguard_peers: WireGuard VPN peers for the mesh network
 CREATE TABLE wireguard_peers (
     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
     name TEXT NOT NULL,

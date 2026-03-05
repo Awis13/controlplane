@@ -64,7 +64,7 @@ func New(pool *pgxpool.Pool, cfg *config.Config) (http.Handler, *provisioner.Pro
 	stationCreator := station.NewCreator(stationStore)
 	prov.WithStationCreator(stationCreator, cfg.CaddyDomain)
 
-	// SSH exec для записи dashboard token в контейнер
+	// SSH exec for writing dashboard token into container
 	if cfg.SSHKeyPath != "" {
 		if _, err := os.Stat(cfg.SSHKeyPath); err != nil {
 			slog.Warn("SSH key not found, dashboard token provisioning disabled", "path", cfg.SSHKeyPath, "error", err)

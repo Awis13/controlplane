@@ -15,7 +15,7 @@ import (
 	"controlplane/internal/response"
 )
 
-// PeerStore определяет интерфейс для операций с пирами (для тестирования).
+// PeerStore defines the interface for peer operations (for testing).
 type PeerStore interface {
 	List(ctx context.Context) ([]Peer, error)
 	ListByType(ctx context.Context, peerType string) ([]Peer, error)
@@ -28,13 +28,13 @@ type PeerStore interface {
 	ListEnabled(ctx context.Context) ([]Peer, error)
 }
 
-// Handler обрабатывает HTTP-запросы для WireGuard пиров.
+// Handler handles HTTP requests for WireGuard peers.
 type Handler struct {
 	service    *Service
 	auditStore *audit.Store
 }
 
-// NewHandler создаёт новый Handler для WireGuard пиров.
+// NewHandler creates a new Handler for WireGuard peers.
 func NewHandler(service *Service, auditStore *audit.Store) *Handler {
 	return &Handler{
 		service:    service,
@@ -44,7 +44,7 @@ func NewHandler(service *Service, auditStore *audit.Store) *Handler {
 
 // --- API handlers (JSON) ---
 
-// ListPeers возвращает список всех пиров в JSON.
+// ListPeers returns all peers as JSON.
 func (h *Handler) ListPeers(w http.ResponseWriter, r *http.Request) {
 	filterType := r.URL.Query().Get("type")
 
@@ -68,7 +68,7 @@ func (h *Handler) ListPeers(w http.ResponseWriter, r *http.Request) {
 	response.JSON(w, http.StatusOK, peers)
 }
 
-// GetPeer возвращает пир по ID.
+// GetPeer returns a peer by ID.
 func (h *Handler) GetPeer(w http.ResponseWriter, r *http.Request) {
 	id := chi.URLParam(r, "id")
 	if !response.ValidUUID(id) {
@@ -89,7 +89,7 @@ func (h *Handler) GetPeer(w http.ResponseWriter, r *http.Request) {
 	response.JSON(w, http.StatusOK, peer)
 }
 
-// CreatePeer создаёт нового пира (JSON API).
+// CreatePeer creates a new peer (JSON API).
 func (h *Handler) CreatePeer(w http.ResponseWriter, r *http.Request) {
 	var req CreatePeerRequest
 	if err := response.Decode(r, &req); err != nil {
@@ -137,7 +137,7 @@ func (h *Handler) CreatePeer(w http.ResponseWriter, r *http.Request) {
 		})
 	}
 
-	// Возвращаем пир + приватный ключ (только при создании)
+	// Return peer + private key (only on creation)
 	result := struct {
 		Peer       *Peer  `json:"peer"`
 		PrivateKey string `json:"private_key"`
@@ -151,7 +151,7 @@ func (h *Handler) CreatePeer(w http.ResponseWriter, r *http.Request) {
 	response.JSON(w, http.StatusCreated, result)
 }
 
-// UpdatePeer обновляет пир (JSON API).
+// UpdatePeer updates a peer (JSON API).
 func (h *Handler) UpdatePeer(w http.ResponseWriter, r *http.Request) {
 	id := chi.URLParam(r, "id")
 	if !response.ValidUUID(id) {
@@ -187,7 +187,7 @@ func (h *Handler) UpdatePeer(w http.ResponseWriter, r *http.Request) {
 	response.JSON(w, http.StatusOK, peer)
 }
 
-// DeletePeer удаляет пир из БД и wg0.
+// DeletePeer removes a peer from the DB and wg0.
 func (h *Handler) DeletePeer(w http.ResponseWriter, r *http.Request) {
 	id := chi.URLParam(r, "id")
 	if !response.ValidUUID(id) {
@@ -195,7 +195,7 @@ func (h *Handler) DeletePeer(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Получаем пир для public key (нужен для удаления из wg0)
+	// Get peer for public key (needed to remove from wg0)
 	peer, err := h.service.store.GetByID(r.Context(), id)
 	if err != nil {
 		slog.Error("wireguard: get peer for delete", "error", err)
@@ -207,12 +207,12 @@ func (h *Handler) DeletePeer(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Удаляем из wg0 (игнорируем ошибку — wg может быть недоступен)
+	// Remove from wg0 (ignore error — wg may be unavailable)
 	if err := h.service.RemovePeer(peer.PublicKey); err != nil {
-		slog.Warn("wireguard: не удалось удалить пир из wg0", "peer", peer.Name, "error", err)
+		slog.Warn("wireguard: failed to remove peer from wg0", "peer", peer.Name, "error", err)
 	}
 
-	// Удаляем из БД
+	// Delete from DB
 	if err := h.service.store.Delete(r.Context(), id); err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
 			response.Error(w, http.StatusNotFound, "peer not found")
@@ -232,7 +232,7 @@ func (h *Handler) DeletePeer(w http.ResponseWriter, r *http.Request) {
 	response.JSON(w, http.StatusOK, map[string]string{"status": "deleted"})
 }
 
-// EnablePeer включает пир.
+// EnablePeer enables a peer.
 func (h *Handler) EnablePeer(w http.ResponseWriter, r *http.Request) {
 	id := chi.URLParam(r, "id")
 	if !response.ValidUUID(id) {
@@ -250,11 +250,11 @@ func (h *Handler) EnablePeer(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Применяем к wg0
+	// Apply to wg0
 	peer, err := h.service.store.GetByID(r.Context(), id)
 	if err == nil && peer != nil {
 		if applyErr := h.service.ApplyPeer(peer); applyErr != nil {
-			slog.Warn("wireguard: не удалось применить пир к wg0", "peer", peer.Name, "error", applyErr)
+			slog.Warn("wireguard: failed to apply peer to wg0", "peer", peer.Name, "error", applyErr)
 		}
 	}
 
@@ -265,7 +265,7 @@ func (h *Handler) EnablePeer(w http.ResponseWriter, r *http.Request) {
 	response.JSON(w, http.StatusOK, map[string]string{"status": "enabled"})
 }
 
-// DisablePeer отключает пир.
+// DisablePeer disables a peer.
 func (h *Handler) DisablePeer(w http.ResponseWriter, r *http.Request) {
 	id := chi.URLParam(r, "id")
 	if !response.ValidUUID(id) {
@@ -273,7 +273,7 @@ func (h *Handler) DisablePeer(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Получаем пир до отключения (для public key)
+	// Get peer before disabling (for public key)
 	peer, err := h.service.store.GetByID(r.Context(), id)
 	if err != nil {
 		slog.Error("wireguard: get peer for disable", "error", err)
@@ -295,9 +295,9 @@ func (h *Handler) DisablePeer(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Удаляем из wg0
+	// Remove from wg0
 	if removeErr := h.service.RemovePeer(peer.PublicKey); removeErr != nil {
-		slog.Warn("wireguard: не удалось удалить пир из wg0", "peer", peer.Name, "error", removeErr)
+		slog.Warn("wireguard: failed to remove peer from wg0", "peer", peer.Name, "error", removeErr)
 	}
 
 	if h.auditStore != nil {
@@ -307,7 +307,7 @@ func (h *Handler) DisablePeer(w http.ResponseWriter, r *http.Request) {
 	response.JSON(w, http.StatusOK, map[string]string{"status": "disabled"})
 }
 
-// GetPeerConfig возвращает текстовый конфиг (без приватного ключа — только заглушка).
+// GetPeerConfig returns the text config (without private key — placeholder only).
 func (h *Handler) GetPeerConfig(w http.ResponseWriter, r *http.Request) {
 	id := chi.URLParam(r, "id")
 	if !response.ValidUUID(id) {
@@ -326,7 +326,7 @@ func (h *Handler) GetPeerConfig(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Конфиг без приватного ключа (он был показан только при создании)
+	// Config without private key (it was shown only on creation)
 	config := h.service.BuildPeerConfig(peer, "<PRIVATE_KEY>")
 
 	response.JSON(w, http.StatusOK, map[string]string{
@@ -334,7 +334,7 @@ func (h *Handler) GetPeerConfig(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
-// GetPeerQR возвращает QR-код как PNG (base64 encoded в JSON).
+// GetPeerQR returns a QR code as PNG (base64 encoded in JSON).
 func (h *Handler) GetPeerQR(w http.ResponseWriter, r *http.Request) {
 	id := chi.URLParam(r, "id")
 	if !response.ValidUUID(id) {
@@ -353,7 +353,7 @@ func (h *Handler) GetPeerQR(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// QR без приватного ключа (placeholder)
+	// QR without private key (placeholder)
 	config := h.service.BuildPeerConfig(peer, "<PRIVATE_KEY>")
 	png, err := h.service.GenerateQRCode(config)
 	if err != nil {

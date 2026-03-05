@@ -7,7 +7,7 @@ import (
 	"testing"
 )
 
-// testEncryptionKey — тестовый ключ шифрования (32 байта hex).
+// testEncryptionKey is a test encryption key (32 bytes hex).
 var testEncryptionKey = hex.EncodeToString([]byte("0123456789abcdef0123456789abcdef"))
 
 func TestGenerateKeypair(t *testing.T) {
@@ -28,7 +28,7 @@ func TestGenerateKeypair(t *testing.T) {
 		t.Error("private and public keys should not be equal")
 	}
 
-	// Проверяем что ключи — валидный base64 длиной 32 байта
+	// Check that keys are valid base64, 32 bytes long
 	privBytes, err := base64.StdEncoding.DecodeString(privKey)
 	if err != nil {
 		t.Fatalf("private key is not valid base64: %v", err)
@@ -130,7 +130,7 @@ func TestBuildPeerConfig(t *testing.T) {
 
 	config := svc.BuildPeerConfig(peer, privateKey)
 
-	// Проверяем наличие всех обязательных секций
+	// Check for all required sections
 	if !strings.Contains(config, "[Interface]") {
 		t.Error("config missing [Interface] section")
 	}
@@ -163,7 +163,7 @@ func TestBuildPeerConfig(t *testing.T) {
 func TestBuildPeerConfigWithPSK(t *testing.T) {
 	svc := NewService(nil, testEncryptionKey, "hub-pub-key", "1.2.3.4:51820", "10.10.0.0/24")
 
-	// Шифруем PSK
+	// Encrypt PSK
 	psk := "test-preshared-key-value"
 	encrypted, err := svc.EncryptPSK(psk)
 	if err != nil {
@@ -213,7 +213,7 @@ func TestGenerateQRCode(t *testing.T) {
 		t.Error("QR code PNG is empty")
 	}
 
-	// Проверяем PNG signature
+	// Check PNG signature
 	pngSig := []byte{0x89, 0x50, 0x4e, 0x47}
 	if len(png) < 4 || string(png[:4]) != string(pngSig) {
 		t.Error("QR code is not a valid PNG")

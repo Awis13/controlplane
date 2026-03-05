@@ -2,12 +2,12 @@ package wireguard
 
 import "time"
 
-// Peer представляет WireGuard пир в mesh-сети.
+// Peer represents a WireGuard peer in the mesh network.
 type Peer struct {
 	ID                    string    `json:"id"`
 	Name                  string    `json:"name"`
 	PublicKey             string    `json:"public_key"`
-	PresharedKeyEncrypted *string   `json:"-"` // зашифрованный preshared key, не отдаём в JSON
+	PresharedKeyEncrypted *string   `json:"-"` // encrypted preshared key, not exposed in JSON
 	WgIP                  string    `json:"wg_ip"`
 	AllowedIPs            string    `json:"allowed_ips"`
 	Endpoint              *string   `json:"endpoint,omitempty"`
@@ -18,23 +18,23 @@ type Peer struct {
 	UpdatedAt             time.Time `json:"updated_at"`
 }
 
-// CreatePeerRequest — запрос на создание нового пира.
+// CreatePeerRequest is a request to create a new peer.
 type CreatePeerRequest struct {
 	Name       string `json:"name"`
 	Type       string `json:"type"`        // admin, node, user
-	Endpoint   string `json:"endpoint"`    // необязательно
-	TenantID   string `json:"tenant_id"`   // необязательно, для user type
-	AllowedIPs string `json:"allowed_ips"` // необязательно, override
+	Endpoint   string `json:"endpoint"`    // optional
+	TenantID   string `json:"tenant_id"`   // optional, for user type
+	AllowedIPs string `json:"allowed_ips"` // optional, override
 }
 
-// UpdatePeerRequest — запрос на обновление пира. Nil поля не обновляются.
+// UpdatePeerRequest is a request to update a peer. Nil fields are not updated.
 type UpdatePeerRequest struct {
 	Name     *string `json:"name,omitempty"`
 	Endpoint *string `json:"endpoint,omitempty"`
 	Enabled  *bool   `json:"enabled,omitempty"`
 }
 
-// ValidPeerTypes — допустимые типы пиров.
+// ValidPeerTypes lists the valid peer types.
 var ValidPeerTypes = map[string]bool{
 	"admin": true,
 	"node":  true,

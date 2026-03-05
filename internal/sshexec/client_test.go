@@ -105,7 +105,7 @@ func TestExecInContainer_InvalidKeyPath(t *testing.T) {
 }
 
 func TestExecInContainer_InvalidKeyContent(t *testing.T) {
-	// Записываем мусор вместо ключа
+	// Write garbage instead of a valid key
 	tmpDir := t.TempDir()
 	keyPath := filepath.Join(tmpDir, "bad_key")
 	if err := os.WriteFile(keyPath, []byte("not a valid key"), 0600); err != nil {
@@ -142,7 +142,7 @@ func TestExecOnHost_InvalidKeyContent(t *testing.T) {
 }
 
 func TestExecOnHost_ValidKeyConnectionRefused(t *testing.T) {
-	// Генерируем реальный ED25519 ключ
+	// Generate a real ED25519 key
 	_, priv, err := ed25519.GenerateKey(rand.Reader)
 	if err != nil {
 		t.Fatal(err)
@@ -167,7 +167,7 @@ func TestExecOnHost_ValidKeyConnectionRefused(t *testing.T) {
 }
 
 func TestExecInContainer_ValidKeyConnectionRefused(t *testing.T) {
-	// Генерируем реальный ED25519 ключ
+	// Generate a real ED25519 key
 	_, priv, err := ed25519.GenerateKey(rand.Reader)
 	if err != nil {
 		t.Fatal(err)
@@ -185,7 +185,7 @@ func TestExecInContainer_ValidKeyConnectionRefused(t *testing.T) {
 	}
 
 	c := NewClient(keyPath)
-	// Подключаемся к localhost на порт, который не слушает
+	// Connect to localhost on a port that is not listening
 	err = c.ExecInContainer(t.Context(), "127.0.0.1", 100, "echo hello")
 	if err == nil {
 		t.Error("expected connection error")

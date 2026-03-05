@@ -11,12 +11,12 @@ func TestGenerateToken(t *testing.T) {
 		t.Fatalf("unexpected error: %v", err)
 	}
 
-	// Должен быть 64 hex символа (32 байта)
+	// Must be 64 hex chars (32 bytes)
 	if len(token) != 64 {
 		t.Errorf("token length = %d, want 64", len(token))
 	}
 
-	// Должен быть валидным hex
+	// Must be valid hex
 	_, err = hex.DecodeString(token)
 	if err != nil {
 		t.Errorf("token is not valid hex: %v", err)

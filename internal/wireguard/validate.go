@@ -9,12 +9,12 @@ import (
 	"strings"
 )
 
-// allowedSupernet — разрешённый диапазон для AllowedIPs пиров.
+// allowedSupernet is the allowed range for peer AllowedIPs.
 var allowedSupernet = netip.MustParsePrefix("10.10.0.0/16")
 
-// ValidateAllowedIPs проверяет, что AllowedIPs содержит валидные CIDR-адреса
-// в рамках разрешённой подсети (10.10.0.0/16). Отклоняет 0.0.0.0/0 и адреса
-// вне разрешённого диапазона.
+// ValidateAllowedIPs checks that AllowedIPs contains valid CIDR addresses
+// within the allowed subnet (10.10.0.0/16). Rejects 0.0.0.0/0 and addresses
+// outside the allowed range.
 func ValidateAllowedIPs(allowedIPs string) error {
 	parts := strings.Split(allowedIPs, ",")
 	if len(parts) == 0 {
@@ -32,19 +32,18 @@ func ValidateAllowedIPs(allowedIPs string) error {
 			return fmt.Errorf("invalid CIDR %q: %w", cidr, err)
 		}
 
-		// Отклоняем 0.0.0.0/0 — маршрут всего трафика
+		// Reject 0.0.0.0/0 — route-all traffic
 		if prefix.Bits() == 0 {
 			return fmt.Errorf("0.0.0.0/0 is not allowed — route-all traffic is prohibited")
 		}
 
-		// Проверяем что адрес входит в разрешённую подсеть
+		// Check that address is within the allowed subnet
 		if !allowedSupernet.Contains(prefix.Addr()) {
 			return fmt.Errorf("CIDR %q is outside allowed range %s", cidr, allowedSupernet)
 		}
 
-		// Проверяем что весь диапазон входит в разрешённую подсеть.
-		// Для этого достаточно проверить, что маска не шире чем у supernet
-		// при одинаковом network prefix.
+		// Check that the entire range fits within the allowed subnet.
+		// It suffices to check that the mask is not wider than the supernet's.
 		if prefix.Bits() < allowedSupernet.Bits() {
 			return fmt.Errorf("CIDR %q is wider than allowed range %s", cidr, allowedSupernet)
 		}
@@ -53,7 +52,7 @@ func ValidateAllowedIPs(allowedIPs string) error {
 	return nil
 }
 
-// ValidatePublicKey проверяет что строка — валидный WireGuard public key (32 байта base64).
+// ValidatePublicKey checks that the string is a valid WireGuard public key (32 bytes base64).
 func ValidatePublicKey(key string) error {
 	b, err := base64.StdEncoding.DecodeString(key)
 	if err != nil {
@@ -65,7 +64,7 @@ func ValidatePublicKey(key string) error {
 	return nil
 }
 
-// ValidateEndpoint проверяет формат host:port.
+// ValidateEndpoint checks the host:port format.
 func ValidateEndpoint(endpoint string) error {
 	host, portStr, err := net.SplitHostPort(endpoint)
 	if err != nil || host == "" {

@@ -118,12 +118,12 @@ func parseDuration(key string, fallback time.Duration) time.Duration {
 		return fallback
 	}
 
-	// Сначала пробуем Go-формат (30s, 1m, 500ms)
+	// Try Go duration format first (30s, 1m, 500ms)
 	if d, err := time.ParseDuration(v); err == nil && d > 0 {
 		return d
 	}
 
-	// Фолбэк: простые секунды (для обратной совместимости)
+	// Fallback: plain seconds (for backward compatibility)
 	if sec, err := strconv.Atoi(v); err == nil && sec > 0 {
 		return time.Duration(sec) * time.Second
 	}

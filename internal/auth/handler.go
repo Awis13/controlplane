@@ -129,7 +129,7 @@ func toUserView(u *user.User) *userView {
 
 // Register handles POST /api/v1/auth/register.
 func (h *Handler) Register(w http.ResponseWriter, r *http.Request) {
-	// Проверяем invite token если задан
+	// Check invite token if configured
 	if h.registrationToken != "" {
 		provided := r.Header.Get("X-Registration-Token")
 		if subtle.ConstantTimeCompare([]byte(provided), []byte(h.registrationToken)) != 1 {
@@ -231,7 +231,7 @@ func (h *Handler) Login(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Успешный логин — сбрасываем счётчик
+	// Successful login — reset counter
 	h.limiter.reset(req.Email)
 
 	token, err := h.generateToken(u)
@@ -255,7 +255,7 @@ func (h *Handler) Logout(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Извлекаем jti из текущего токена
+	// Extract jti from current token
 	authHeader := r.Header.Get("Authorization")
 	tokenStr := strings.TrimPrefix(authHeader, "Bearer ")
 
@@ -275,7 +275,7 @@ func (h *Handler) Logout(w http.ResponseWriter, r *http.Request) {
 
 	jti, _ := claims["jti"].(string)
 	if jti == "" {
-		// Старый токен без jti — просто OK
+		// Old token without jti — just OK
 		response.JSON(w, http.StatusOK, map[string]string{"status": "logged out"})
 		return
 	}

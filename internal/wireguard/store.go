@@ -10,7 +10,7 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
-// Store выполняет операции с БД для WireGuard пиров.
+// Store handles DB operations for WireGuard peers.
 type Store struct {
 	pool *pgxpool.Pool
 }
@@ -19,10 +19,10 @@ func NewStore(pool *pgxpool.Pool) *Store {
 	return &Store{pool: pool}
 }
 
-// peerColumns — список колонок для всех запросов к wireguard_peers.
+// peerColumns is the column list for all wireguard_peers queries.
 const peerColumns = `id, name, public_key, preshared_key_encrypted, wg_ip, allowed_ips, endpoint, type, tenant_id, enabled, created_at, updated_at`
 
-// scanPeer сканирует одну строку в структуру Peer.
+// scanPeer scans a single row into a Peer struct.
 func scanPeer(row pgx.Row) (*Peer, error) {
 	var p Peer
 	err := row.Scan(&p.ID, &p.Name, &p.PublicKey, &p.PresharedKeyEncrypted,
@@ -34,7 +34,7 @@ func scanPeer(row pgx.Row) (*Peer, error) {
 	return &p, nil
 }
 
-// List возвращает все пиры, отсортированные по дате создания.
+// List returns all peers sorted by creation date.
 func (s *Store) List(ctx context.Context) ([]Peer, error) {
 	rows, err := s.pool.Query(ctx,
 		`SELECT `+peerColumns+` FROM wireguard_peers ORDER BY created_at DESC`)
@@ -58,7 +58,7 @@ func (s *Store) List(ctx context.Context) ([]Peer, error) {
 	return peers, nil
 }
 
-// ListByType возвращает пиры указанного типа.
+// ListByType returns peers of the specified type.
 func (s *Store) ListByType(ctx context.Context, peerType string) ([]Peer, error) {
 	rows, err := s.pool.Query(ctx,
 		`SELECT `+peerColumns+` FROM wireguard_peers WHERE type = $1 ORDER BY created_at DESC`, peerType)
@@ -82,7 +82,7 @@ func (s *Store) ListByType(ctx context.Context, peerType string) ([]Peer, error)
 	return peers, nil
 }
 
-// GetByID возвращает пир по ID. Nil если не найден.
+// GetByID returns a peer by ID. Nil if not found.
 func (s *Store) GetByID(ctx context.Context, id string) (*Peer, error) {
 	p, err := scanPeer(s.pool.QueryRow(ctx,
 		`SELECT `+peerColumns+` FROM wireguard_peers WHERE id = $1`, id))
@@ -95,7 +95,7 @@ func (s *Store) GetByID(ctx context.Context, id string) (*Peer, error) {
 	return p, nil
 }
 
-// Create вставляет нового пира и возвращает его.
+// Create inserts a new peer and returns it.
 func (s *Store) Create(ctx context.Context, p *Peer) (*Peer, error) {
 	result, err := scanPeer(s.pool.QueryRow(ctx,
 		`INSERT INTO wireguard_peers (name, public_key, preshared_key_encrypted, wg_ip, allowed_ips, endpoint, type, tenant_id, enabled)
@@ -109,10 +109,10 @@ func (s *Store) Create(ctx context.Context, p *Peer) (*Peer, error) {
 	return result, nil
 }
 
-// ErrNoUpdate возвращается когда нет полей для обновления.
+// ErrNoUpdate is returned when there are no fields to update.
 var ErrNoUpdate = fmt.Errorf("no fields to update")
 
-// Update применяет частичное обновление пира. Обновляются только non-nil поля.
+// Update applies a partial peer update. Only non-nil fields are updated.
 func (s *Store) Update(ctx context.Context, id string, req UpdatePeerRequest) (*Peer, error) {
 	setClauses := []string{}
 	args := []any{}
@@ -154,7 +154,7 @@ func (s *Store) Update(ctx context.Context, id string, req UpdatePeerRequest) (*
 	return p, nil
 }
 
-// Delete удаляет пир по ID.
+// Delete removes a peer by ID.
 func (s *Store) Delete(ctx context.Context, id string) error {
 	tag, err := s.pool.Exec(ctx, `DELETE FROM wireguard_peers WHERE id = $1`, id)
 	if err != nil {
@@ -166,7 +166,7 @@ func (s *Store) Delete(ctx context.Context, id string) error {
 	return nil
 }
 
-// SetEnabled устанавливает статус enabled для пира.
+// SetEnabled sets the enabled status of a peer.
 func (s *Store) SetEnabled(ctx context.Context, id string, enabled bool) error {
 	tag, err := s.pool.Exec(ctx,
 		`UPDATE wireguard_peers SET enabled = $2 WHERE id = $1`, id, enabled)
@@ -179,15 +179,15 @@ func (s *Store) SetEnabled(ctx context.Context, id string, enabled bool) error {
 	return nil
 }
 
-// GetNextAvailableIP находит следующий свободный IP в указанной подсети.
-// Формат subnet: "10.10.0.0/24". Пропускает .0 (сеть) и .1 (шлюз/хаб).
+// GetNextAvailableIP finds the next free IP in the given subnet.
+// Subnet format: "10.10.0.0/24". Skips .0 (network) and .1 (gateway/hub).
 func (s *Store) GetNextAvailableIP(ctx context.Context, subnet string) (string, error) {
 	_, ipNet, err := net.ParseCIDR(subnet)
 	if err != nil {
 		return "", fmt.Errorf("parse subnet: %w", err)
 	}
 
-	// Получаем все занятые IP
+	// Get all occupied IPs
 	rows, err := s.pool.Query(ctx, `SELECT wg_ip FROM wireguard_peers`)
 	if err != nil {
 		return "", fmt.Errorf("query existing IPs: %w", err)
@@ -206,7 +206,7 @@ func (s *Store) GetNextAvailableIP(ctx context.Context, subnet string) (string, 
 		return "", fmt.Errorf("iterate IPs: %w", err)
 	}
 
-	// Перебираем IP в подсети начиная с .2 (0=сеть, 1=шлюз)
+	// Iterate IPs in subnet starting from .2 (0=network, 1=gateway)
 	ip := make(net.IP, len(ipNet.IP))
 	copy(ip, ipNet.IP)
 
@@ -224,7 +224,7 @@ func (s *Store) GetNextAvailableIP(ctx context.Context, subnet string) (string, 
 	return "", fmt.Errorf("no available IPs in subnet %s", subnet)
 }
 
-// GetByTenantID возвращает пир, привязанный к тенанту. Nil если не найден.
+// GetByTenantID returns the peer linked to a tenant. Nil if not found.
 func (s *Store) GetByTenantID(ctx context.Context, tenantID string) (*Peer, error) {
 	p, err := scanPeer(s.pool.QueryRow(ctx,
 		`SELECT `+peerColumns+` FROM wireguard_peers WHERE tenant_id = $1 LIMIT 1`, tenantID))
@@ -237,7 +237,7 @@ func (s *Store) GetByTenantID(ctx context.Context, tenantID string) (*Peer, erro
 	return p, nil
 }
 
-// ListEnabled возвращает все включённые пиры.
+// ListEnabled returns all enabled peers.
 func (s *Store) ListEnabled(ctx context.Context) ([]Peer, error) {
 	rows, err := s.pool.Query(ctx,
 		`SELECT `+peerColumns+` FROM wireguard_peers WHERE enabled = true ORDER BY created_at DESC`)

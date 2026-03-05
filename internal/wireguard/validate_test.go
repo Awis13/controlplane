@@ -43,7 +43,7 @@ func TestValidateAllowedIPs_RejectOutsideRange(t *testing.T) {
 }
 
 func TestValidateAllowedIPs_RejectWiderThanSupernet(t *testing.T) {
-	// 10.10.0.0/8 шире чем /16 — не допускаем
+	// 10.10.0.0/8 is wider than /16 — not allowed
 	err := ValidateAllowedIPs("10.0.0.0/8")
 	if err == nil {
 		t.Error("ValidateAllowedIPs(10.0.0.0/8) = nil, want error")
@@ -65,7 +65,7 @@ func TestValidateAllowedIPs_RejectInvalidCIDR(t *testing.T) {
 }
 
 func TestValidateAllowedIPs_MultipleWithOneInvalid(t *testing.T) {
-	// Первый валиден, второй нет
+	// First is valid, second is not
 	err := ValidateAllowedIPs("10.10.0.5/32, 192.168.1.0/24")
 	if err == nil {
 		t.Error("expected error when one of multiple CIDRs is invalid")
@@ -81,10 +81,10 @@ func TestValidateAllowedIPs_MultipleValid(t *testing.T) {
 }
 
 func TestValidateAllowedIPs_EmptyString(t *testing.T) {
-	// Пустая строка — все части будут пустыми, пропускаются.
-	// Но это edge case — мы не вызываем валидацию с пустой строкой в обработчиках.
+	// Empty string — all parts will be empty, skipped.
+	// Edge case — we don't call validation with empty string in handlers.
 	err := ValidateAllowedIPs("")
-	// Пустая строка содержит один пустой элемент после split, все пропускаются, всё ок
+	// Empty string has one empty element after split, all skipped, OK
 	if err != nil {
 		t.Errorf("ValidateAllowedIPs('') = %v, want nil", err)
 	}

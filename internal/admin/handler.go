@@ -97,7 +97,7 @@ func NewHandler(nodes NodeStore, projects ProjectStore, tenants TenantStore, aud
 	}, nil
 }
 
-// SetWireGuard подключает WireGuard сервис и хранилище к admin handler.
+// SetWireGuard attaches WireGuard service and store to the admin handler.
 func (h *Handler) SetWireGuard(svc WireGuardService, store WireGuardStore) {
 	h.wgService = svc
 	h.wgStore = store

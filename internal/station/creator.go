@@ -25,7 +25,7 @@ func NewCreator(store CreatorStore) *Creator {
 // AutoCreateStation creates a station record for a newly provisioned tenant.
 // Idempotent: if a station for this tenant already exists, returns nil.
 func (c *Creator) AutoCreateStation(ctx context.Context, tenantID, name, subdomain, ownerID, caddyDomain string) error {
-	// Проверяем, существует ли уже станция для этого тенанта
+	// Check if a station already exists for this tenant
 	existing, err := c.store.GetByTenantID(ctx, tenantID)
 	if err != nil {
 		return fmt.Errorf("check existing station: %w", err)

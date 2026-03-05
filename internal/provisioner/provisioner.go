@@ -20,7 +20,7 @@ import (
 	"controlplane/internal/tenant"
 )
 
-// SSHExec определяет SSH операции, необходимые провизионеру.
+// SSHExec defines SSH operations needed by the provisioner.
 type SSHExec interface {
 	ExecInContainer(ctx context.Context, sshHost string, vmid int, command string) error
 	ExecOnHost(ctx context.Context, sshHost string, command string) error
@@ -141,7 +141,7 @@ type Provisioner struct {
 	caddyClient    CaddyClient              // optional: Caddy route management
 	stationCreator StationCreator           // optional: auto-create station on provisioning
 	caddyDomain    string                   // domain for station stream URLs
-	sshClient      SSHExec                  // optional: SSH exec для записи токена и mount points
+	sshClient      SSHExec                  // optional: SSH exec for writing tokens and mount points
 }
 
 // New creates a new Provisioner.
@@ -277,7 +277,7 @@ func (p *Provisioner) doProvision(tenantID, nodeID, projectID, subdomain string,
 	}
 	templateID := proj.TemplateID
 
-	// Get node (нужен для SSH host позже)
+	// Get node (needed for SSH host later)
 	nodeInfo, err := p.nodeStore.GetByID(ctx, nodeID)
 	if err != nil {
 		log.Error("provision: get node", "error", err)
@@ -357,8 +357,8 @@ func (p *Provisioner) doProvision(tenantID, nodeID, projectID, subdomain string,
 	}
 
 	// Configure bind mount points for shared media storage.
-	// API tokens не могут создавать bind mounts (403 "mount point type bind is only allowed for root@pam"),
-	// поэтому при наличии SSH клиента используем pct set через SSH.
+	// API tokens cannot create bind mounts (403 "mount point type bind is only allowed for root@pam"),
+	// so when SSH client is available, use pct set via SSH.
 	if p.sshClient != nil {
 		sshHost, err := sshexec.ExtractHost(nodeInfo.ProxmoxURL)
 		if err != nil {
@@ -367,7 +367,7 @@ func (p *Provisioner) doProvision(tenantID, nodeID, projectID, subdomain string,
 			return
 		}
 
-		// Создаём директории на хосте
+		// Create directories on host
 		mkdirCmd := fmt.Sprintf("mkdir -p /mnt/tenants/%d/visuals /mnt/tenants/%d/music && chmod 777 /mnt/tenants/%d/visuals /mnt/tenants/%d/music", newID, newID, newID, newID)
 		log.Info("provision: creating host directories for mount points", "cmd", mkdirCmd)
 		if err := p.sshClient.ExecOnHost(ctx, sshHost, mkdirCmd); err != nil {
@@ -376,7 +376,7 @@ func (p *Provisioner) doProvision(tenantID, nodeID, projectID, subdomain string,
 			return
 		}
 
-		// Настраиваем mount points через pct set
+		// Configure mount points via pct set
 		pctCmd := fmt.Sprintf("pct set %d -mp0 /mnt/tenants/%d/visuals,mp=/root/freeRadio/content/visuals -mp1 /mnt/tenants/%d/music,mp=/root/freeRadio/content/music", newID, newID, newID)
 		log.Info("provision: configuring mount points via SSH", "cmd", pctCmd)
 		if err := p.sshClient.ExecOnHost(ctx, sshHost, pctCmd); err != nil {
@@ -385,7 +385,7 @@ func (p *Provisioner) doProvision(tenantID, nodeID, projectID, subdomain string,
 			return
 		}
 	} else {
-		// Fallback на API (работает с root@pam password auth, но не с API tokens)
+		// Fallback to API (works with root@pam password auth, but not with API tokens)
 		mounts := map[string]string{
 			"mp0": fmt.Sprintf("/mnt/tenants/%d/visuals,mp=/root/freeRadio/content/visuals", newID),
 			"mp1": fmt.Sprintf("/mnt/tenants/%d/music,mp=/root/freeRadio/content/music", newID),
@@ -412,7 +412,7 @@ func (p *Provisioner) doProvision(tenantID, nodeID, projectID, subdomain string,
 		return
 	}
 
-	// Генерация и запись DASHBOARD_TOKEN (best-effort, не блокирует provisioning)
+	// Generate and write DASHBOARD_TOKEN (best-effort, does not block provisioning)
 	if p.sshClient != nil {
 		if token, err := generateToken(); err != nil {
 			log.Warn("provision: generate dashboard token", "error", err)
@@ -657,7 +657,7 @@ func (p *Provisioner) cleanupAndError(ctx context.Context, client ProxmoxClient,
 }
 
 
-// generateToken генерирует криптографически случайный токен (64 hex символа).
+// generateToken generates a cryptographically random token (64 hex chars).
 func generateToken() (string, error) {
 	b := make([]byte, 32)
 	if _, err := crypto_rand.Read(b); err != nil {
