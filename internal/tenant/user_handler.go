@@ -15,6 +15,7 @@ import (
 	"github.com/go-chi/chi/v5"
 	"github.com/jackc/pgx/v5/pgconn"
 
+	"controlplane/internal/audit"
 	"controlplane/internal/auth"
 	"controlplane/internal/node"
 	"controlplane/internal/project"
@@ -46,6 +47,7 @@ type UserHandler struct {
 	nodeStore    UserNodeStore
 	projectStore UserProjectStore
 	provisioner  Provisioner
+	auditStore   *audit.Store
 	ssoDomain    string
 }
 
@@ -56,7 +58,7 @@ type UserCreateRequest struct {
 	Subdomain string `json:"subdomain"`
 }
 
-func NewUserHandler(store UserTenantStore, nodeStore UserNodeStore, projectStore UserProjectStore, provisioner Provisioner, ssoDomain string) *UserHandler {
+func NewUserHandler(store UserTenantStore, nodeStore UserNodeStore, projectStore UserProjectStore, provisioner Provisioner, auditStore *audit.Store, ssoDomain string) *UserHandler {
 	if ssoDomain == "" {
 		ssoDomain = "freeradio.app"
 	}
@@ -65,6 +67,7 @@ func NewUserHandler(store UserTenantStore, nodeStore UserNodeStore, projectStore
 		nodeStore:    nodeStore,
 		projectStore: projectStore,
 		provisioner:  provisioner,
+		auditStore:   auditStore,
 		ssoDomain:    ssoDomain,
 	}
 }
@@ -350,6 +353,10 @@ func (h *UserHandler) Delete(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
+	if h.auditStore != nil {
+		h.auditStore.Log(r.Context(), "delete", "tenant", id, map[string]string{"user_id": u.ID.String()})
+	}
+
 	// Re-read tenant to return updated state
 	t, err = h.store.GetByID(r.Context(), id)
 	if err != nil {
@@ -414,6 +421,10 @@ func (h *UserHandler) Suspend(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
+	if h.auditStore != nil {
+		h.auditStore.Log(r.Context(), "suspend", "tenant", id, map[string]string{"user_id": u.ID.String()})
+	}
+
 	t, err = h.store.GetByID(r.Context(), id)
 	if err != nil {
 		slog.Error("get tenant after user suspend", "error", err)
@@ -475,6 +486,10 @@ func (h *UserHandler) Resume(w http.ResponseWriter, r *http.Request) {
 			response.Error(w, http.StatusInternalServerError, "failed to start container")
 			return
 		}
+	}
+
+	if h.auditStore != nil {
+		h.auditStore.Log(r.Context(), "resume", "tenant", id, map[string]string{"user_id": u.ID.String()})
 	}
 
 	t, err = h.store.GetByID(r.Context(), id)
