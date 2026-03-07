@@ -205,13 +205,17 @@ func New(pool *pgxpool.Pool, cfg *config.Config) (http.Handler, *provisioner.Pro
 	})
 
 	// User tenant management (JWT-protected, auto-select project+node)
-	userTenantHandler := tenant.NewUserHandler(tenantStore, nodeStore, projectStore, prov)
+	userTenantHandler := tenant.NewUserHandler(tenantStore, nodeStore, projectStore, prov, auditStore, cfg.SSODomain)
 	r.Route("/api/v1/user/tenants", func(r chi.Router) {
 		r.Use(httprate.LimitByIP(20, time.Minute))
 		r.Use(auth.JWTAuth(userStore, tokenStore, cfg.JWTSecret))
 		r.Get("/", userTenantHandler.List)
 		r.Post("/", userTenantHandler.Create)
 		r.Get("/{tenantID}", userTenantHandler.Get)
+		r.Delete("/{tenantID}", userTenantHandler.Delete)
+		r.Post("/{tenantID}/suspend", userTenantHandler.Suspend)
+		r.Post("/{tenantID}/resume", userTenantHandler.Resume)
+		r.Post("/{tenantID}/sso-token", userTenantHandler.SSOToken)
 	})
 
 	// API v1 (protected by Bearer token auth)

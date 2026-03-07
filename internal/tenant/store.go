@@ -301,12 +301,12 @@ func (s *Store) SetError(ctx context.Context, id string, errMsg string) error {
 }
 
 // SetDeleting atomically transitions a tenant to 'deleting' status.
-// Only transitions from 'active' or 'error' — acts as a compare-and-swap
+// Only transitions from 'active', 'error', or 'suspended' — acts as a compare-and-swap
 // to prevent concurrent delete requests from double-deprovisioning.
 func (s *Store) SetDeleting(ctx context.Context, id string) error {
 	tag, err := s.pool.Exec(ctx,
 		`UPDATE tenants SET status = 'deleting'
-		 WHERE id = $1 AND status IN ('active', 'error')`,
+		 WHERE id = $1 AND status IN ('active', 'error', 'suspended')`,
 		id)
 	if err != nil {
 		return fmt.Errorf("set tenant deleting: %w", err)
