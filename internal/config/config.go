@@ -28,6 +28,7 @@ type Config struct {
 	CaddyDomain     string // optional: domain for tenant routes (default: freeradio.app)
 	PollerInterval  time.Duration // optional: station status poll interval (default: 10s)
 	SSHKeyPath      string        // optional: path to SSH key for pct exec (default: /root/.ssh/id_ed25519)
+	SSODomain       string        // optional: domain for SSO token URLs (default: freeradio.app)
 }
 
 // Load reads configuration from environment variables.
@@ -72,6 +73,7 @@ func Load() (*Config, error) {
 		CaddyDomain:     getEnv("CADDY_DOMAIN", "freeradio.app"),
 		PollerInterval:  parseDuration("POLLER_INTERVAL", 10*time.Second),
 		SSHKeyPath:      getEnv("SSH_KEY_PATH", "/root/.ssh/id_ed25519"),
+		SSODomain:       getEnv("SSO_DOMAIN", "freeradio.app"),
 	}, nil
 }
 

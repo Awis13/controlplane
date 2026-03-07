@@ -2,9 +2,15 @@ package tenant
 
 import (
 	"context"
+	"crypto/hmac"
+	"crypto/sha256"
+	"encoding/base64"
 	"errors"
+	"fmt"
 	"log/slog"
 	"net/http"
+	"net/url"
+	"time"
 
 	"github.com/go-chi/chi/v5"
 	"github.com/jackc/pgx/v5/pgconn"
@@ -40,6 +46,7 @@ type UserHandler struct {
 	nodeStore    UserNodeStore
 	projectStore UserProjectStore
 	provisioner  Provisioner
+	ssoDomain    string
 }
 
 // UserCreateRequest is the simplified tenant creation request for users.
@@ -49,12 +56,16 @@ type UserCreateRequest struct {
 	Subdomain string `json:"subdomain"`
 }
 
-func NewUserHandler(store UserTenantStore, nodeStore UserNodeStore, projectStore UserProjectStore, provisioner Provisioner) *UserHandler {
+func NewUserHandler(store UserTenantStore, nodeStore UserNodeStore, projectStore UserProjectStore, provisioner Provisioner, ssoDomain string) *UserHandler {
+	if ssoDomain == "" {
+		ssoDomain = "freeradio.app"
+	}
 	return &UserHandler{
 		store:        store,
 		nodeStore:    nodeStore,
 		projectStore: projectStore,
 		provisioner:  provisioner,
+		ssoDomain:    ssoDomain,
 	}
 }
 
@@ -204,4 +215,273 @@ func (h *UserHandler) Create(w http.ResponseWriter, r *http.Request) {
 
 	slog.Info("user created tenant", "user_id", u.ID, "tenant_id", t.ID, "subdomain", req.Subdomain)
 	response.JSON(w, http.StatusAccepted, t)
+}
+
+// SSOToken generates a short-lived SSO token for accessing the tenant dashboard.
+func (h *UserHandler) SSOToken(w http.ResponseWriter, r *http.Request) {
+	u := auth.UserFromContext(r.Context())
+	if u == nil {
+		response.Error(w, http.StatusUnauthorized, "not authenticated")
+		return
+	}
+
+	id := chi.URLParam(r, "tenantID")
+	if !response.ValidUUID(id) {
+		response.Error(w, http.StatusBadRequest, "invalid tenant ID format")
+		return
+	}
+
+	t, err := h.store.GetByID(r.Context(), id)
+	if err != nil {
+		slog.Error("get tenant for sso token", "error", err, "tenant_id", id)
+		response.Error(w, http.StatusInternalServerError, "failed to get tenant")
+		return
+	}
+	if t == nil || t.OwnerID == nil || *t.OwnerID != u.ID.String() {
+		response.Error(w, http.StatusNotFound, "tenant not found")
+		return
+	}
+
+	if t.Status != "active" {
+		response.Error(w, http.StatusConflict, "tenant must be active to generate SSO token")
+		return
+	}
+
+	if t.DashboardToken == nil || *t.DashboardToken == "" {
+		slog.Error("tenant has no dashboard token", "tenant_id", id)
+		response.Error(w, http.StatusInternalServerError, "dashboard token not configured")
+		return
+	}
+
+	// Generate HMAC-SHA256 signed token
+	timestamp := time.Now().Unix()
+	payload := fmt.Sprintf("%s:%s:%d", u.ID.String(), t.ID, timestamp)
+	payloadB64 := base64.RawURLEncoding.EncodeToString([]byte(payload))
+
+	mac := hmac.New(sha256.New, []byte(*t.DashboardToken))
+	mac.Write([]byte(payload))
+	sig := mac.Sum(nil)
+	sigB64 := base64.RawURLEncoding.EncodeToString(sig)
+
+	token := payloadB64 + ":" + sigB64
+
+	ssoURL := fmt.Sprintf("https://%s.%s/auth/sso?token=%s", t.Subdomain, h.ssoDomain, url.QueryEscape(token))
+
+	response.JSON(w, http.StatusOK, map[string]interface{}{
+		"url":        ssoURL,
+		"expires_in": 60,
+	})
+}
+
+// Delete removes a tenant owned by the authenticated user.
+func (h *UserHandler) Delete(w http.ResponseWriter, r *http.Request) {
+	u := auth.UserFromContext(r.Context())
+	if u == nil {
+		response.Error(w, http.StatusUnauthorized, "not authenticated")
+		return
+	}
+
+	id := chi.URLParam(r, "tenantID")
+	if !response.ValidUUID(id) {
+		response.Error(w, http.StatusBadRequest, "invalid tenant ID format")
+		return
+	}
+
+	t, err := h.store.GetByID(r.Context(), id)
+	if err != nil {
+		slog.Error("get tenant for user deletion", "error", err, "tenant_id", id)
+		response.Error(w, http.StatusInternalServerError, "failed to get tenant")
+		return
+	}
+	if t == nil || t.OwnerID == nil || *t.OwnerID != u.ID.String() {
+		response.Error(w, http.StatusNotFound, "tenant not found")
+		return
+	}
+
+	// Only active, error, or suspended tenants can be deleted
+	if t.Status != "active" && t.Status != "error" && t.Status != "suspended" {
+		response.Error(w, http.StatusConflict, "tenant cannot be deleted in current status: "+t.Status)
+		return
+	}
+
+	// Get project for RAM amount
+	proj, err := h.projectStore.GetByID(r.Context(), t.ProjectID)
+	if err != nil {
+		slog.Error("get project for user tenant deletion", "error", err)
+		response.Error(w, http.StatusInternalServerError, "failed to get project")
+		return
+	}
+	ramMB := 0
+	if proj != nil {
+		ramMB = proj.RAMMB
+	}
+
+	// If tenant has an LXC ID, deprovision the container
+	if t.LXCID != nil {
+		if err := h.provisioner.Deprovision(r.Context(), t.ID, t.NodeID, t.Subdomain, *t.LXCID, ramMB); err != nil {
+			if errors.Is(err, ErrStateConflict) {
+				response.Error(w, http.StatusConflict, "tenant is already being deleted")
+				return
+			}
+			slog.Error("deprovision user tenant", "error", err, "tenant_id", t.ID)
+			response.Error(w, http.StatusInternalServerError, "failed to deprovision tenant")
+			return
+		}
+	} else {
+		// No LXC container — atomically transition to deleting, then deleted + release RAM
+		if err := h.store.SetDeleting(r.Context(), t.ID); err != nil {
+			if errors.Is(err, ErrStateConflict) {
+				response.Error(w, http.StatusConflict, "tenant is already being deleted")
+				return
+			}
+			slog.Error("set tenant deleting", "error", err)
+			response.Error(w, http.StatusInternalServerError, "failed to delete tenant")
+			return
+		}
+		if ramMB > 0 {
+			if err := h.nodeStore.ReleaseRAM(r.Context(), t.NodeID, ramMB); err != nil {
+				slog.Error("release ram on user tenant deletion", "error", err)
+			}
+		}
+		if err := h.store.SetDeleted(r.Context(), t.ID); err != nil {
+			slog.Error("set tenant deleted", "error", err)
+			response.Error(w, http.StatusInternalServerError, "failed to delete tenant")
+			return
+		}
+	}
+
+	// Re-read tenant to return updated state
+	t, err = h.store.GetByID(r.Context(), id)
+	if err != nil {
+		slog.Error("get tenant after user deletion", "error", err)
+		response.Error(w, http.StatusInternalServerError, "failed to get tenant")
+		return
+	}
+	response.JSON(w, http.StatusOK, t)
+}
+
+// Suspend stops a tenant owned by the authenticated user.
+func (h *UserHandler) Suspend(w http.ResponseWriter, r *http.Request) {
+	u := auth.UserFromContext(r.Context())
+	if u == nil {
+		response.Error(w, http.StatusUnauthorized, "not authenticated")
+		return
+	}
+
+	id := chi.URLParam(r, "tenantID")
+	if !response.ValidUUID(id) {
+		response.Error(w, http.StatusBadRequest, "invalid tenant ID format")
+		return
+	}
+
+	t, err := h.store.GetByID(r.Context(), id)
+	if err != nil {
+		slog.Error("get tenant for user suspend", "error", err, "tenant_id", id)
+		response.Error(w, http.StatusInternalServerError, "failed to get tenant")
+		return
+	}
+	if t == nil || t.OwnerID == nil || *t.OwnerID != u.ID.String() {
+		response.Error(w, http.StatusNotFound, "tenant not found")
+		return
+	}
+
+	if t.Status != "active" {
+		response.Error(w, http.StatusConflict, "tenant must be active to suspend")
+		return
+	}
+
+	// DB first: mark as suspended
+	if err := h.store.SetSuspended(r.Context(), id); err != nil {
+		if errors.Is(err, ErrStateConflict) {
+			response.Error(w, http.StatusConflict, "tenant is not in a suspendable state")
+			return
+		}
+		slog.Error("set user tenant suspended", "error", err)
+		response.Error(w, http.StatusInternalServerError, "failed to suspend tenant")
+		return
+	}
+
+	// Then stop container; rollback DB on failure
+	if t.LXCID != nil {
+		if err := h.provisioner.Suspend(r.Context(), t.ID, t.NodeID, *t.LXCID); err != nil {
+			slog.Error("suspend user tenant container", "error", err)
+			// Rollback: restore active state
+			if rbErr := h.store.SetResumed(r.Context(), id); rbErr != nil {
+				slog.Error("rollback suspend: failed to restore active state", "error", rbErr)
+			}
+			response.Error(w, http.StatusInternalServerError, "failed to stop container")
+			return
+		}
+	}
+
+	t, err = h.store.GetByID(r.Context(), id)
+	if err != nil {
+		slog.Error("get tenant after user suspend", "error", err)
+		response.Error(w, http.StatusInternalServerError, "failed to get tenant")
+		return
+	}
+	response.JSON(w, http.StatusOK, t)
+}
+
+// Resume starts a suspended tenant owned by the authenticated user.
+func (h *UserHandler) Resume(w http.ResponseWriter, r *http.Request) {
+	u := auth.UserFromContext(r.Context())
+	if u == nil {
+		response.Error(w, http.StatusUnauthorized, "not authenticated")
+		return
+	}
+
+	id := chi.URLParam(r, "tenantID")
+	if !response.ValidUUID(id) {
+		response.Error(w, http.StatusBadRequest, "invalid tenant ID format")
+		return
+	}
+
+	t, err := h.store.GetByID(r.Context(), id)
+	if err != nil {
+		slog.Error("get tenant for user resume", "error", err, "tenant_id", id)
+		response.Error(w, http.StatusInternalServerError, "failed to get tenant")
+		return
+	}
+	if t == nil || t.OwnerID == nil || *t.OwnerID != u.ID.String() {
+		response.Error(w, http.StatusNotFound, "tenant not found")
+		return
+	}
+
+	if t.Status != "suspended" {
+		response.Error(w, http.StatusConflict, "tenant must be suspended to resume")
+		return
+	}
+
+	// DB first: mark as active
+	if err := h.store.SetResumed(r.Context(), id); err != nil {
+		if errors.Is(err, ErrStateConflict) {
+			response.Error(w, http.StatusConflict, "tenant is not in a resumable state")
+			return
+		}
+		slog.Error("set user tenant resumed", "error", err)
+		response.Error(w, http.StatusInternalServerError, "failed to resume tenant")
+		return
+	}
+
+	// Then start container; rollback DB on failure
+	if t.LXCID != nil {
+		if err := h.provisioner.Resume(r.Context(), t.ID, t.NodeID, *t.LXCID); err != nil {
+			slog.Error("resume user tenant container", "error", err)
+			// Rollback: restore suspended state
+			if rbErr := h.store.SetSuspended(r.Context(), id); rbErr != nil {
+				slog.Error("rollback resume: failed to restore suspended state", "error", rbErr)
+			}
+			response.Error(w, http.StatusInternalServerError, "failed to start container")
+			return
+		}
+	}
+
+	t, err = h.store.GetByID(r.Context(), id)
+	if err != nil {
+		slog.Error("get tenant after user resume", "error", err)
+		response.Error(w, http.StatusInternalServerError, "failed to get tenant")
+		return
+	}
+	response.JSON(w, http.StatusOK, t)
 }
