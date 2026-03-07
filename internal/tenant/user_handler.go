@@ -261,9 +261,15 @@ func (h *UserHandler) SSOToken(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Default to "free" if tier is empty
+	tier := t.Tier
+	if tier == "" {
+		tier = "free"
+	}
+
 	// Generate HMAC-SHA256 signed token
 	timestamp := time.Now().Unix()
-	payload := fmt.Sprintf("%s:%s:%d", u.ID.String(), t.ID, timestamp)
+	payload := fmt.Sprintf("%s:%s:%s:%d", u.ID.String(), t.ID, tier, timestamp)
 	payloadB64 := base64.RawURLEncoding.EncodeToString([]byte(payload))
 
 	mac := hmac.New(sha256.New, []byte(*t.DashboardToken))
@@ -278,6 +284,7 @@ func (h *UserHandler) SSOToken(w http.ResponseWriter, r *http.Request) {
 	response.JSON(w, http.StatusOK, map[string]interface{}{
 		"url":        ssoURL,
 		"expires_in": 60,
+		"tier":       tier,
 	})
 }
 
