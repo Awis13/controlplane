@@ -47,6 +47,16 @@ func (s *Store) GetByEmail(ctx context.Context, email string) (*User, error) {
 	return &u, nil
 }
 
+func (s *Store) UpdatePassword(ctx context.Context, id uuid.UUID, passwordHash string) error {
+	_, err := s.pool.Exec(ctx,
+		`UPDATE users SET password_hash = $1, updated_at = now() WHERE id = $2`,
+		passwordHash, id)
+	if err != nil {
+		return fmt.Errorf("update password: %w", err)
+	}
+	return nil
+}
+
 func (s *Store) Create(ctx context.Context, u *User) error {
 	err := s.pool.QueryRow(ctx,
 		`INSERT INTO users (email, password_hash, display_name)
