@@ -463,7 +463,7 @@ func (s *Store) SetDashboardToken(ctx context.Context, id string, token string) 
 // UpdateBilling updates the billing fields (stripe_customer_id, stripe_subscription_id, tier) for a tenant.
 func (s *Store) UpdateBilling(ctx context.Context, tenantID, stripeCustomerID, stripeSubscriptionID, tier string) error {
 	tag, err := s.pool.Exec(ctx,
-		`UPDATE tenants SET stripe_customer_id = $2, stripe_subscription_id = $3, tier = $4
+		`UPDATE tenants SET stripe_customer_id = $2, stripe_subscription_id = $3, tier = $4, updated_at = now()
 		 WHERE id = $1`,
 		tenantID, stripeCustomerID, stripeSubscriptionID, tier)
 	if err != nil {
