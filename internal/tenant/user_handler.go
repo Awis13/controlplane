@@ -49,6 +49,7 @@ type UserHandler struct {
 	provisioner  Provisioner
 	auditStore   *audit.Store
 	ssoDomain    string
+	ssoScheme    string
 }
 
 // UserCreateRequest is the simplified tenant creation request for users.
@@ -58,9 +59,12 @@ type UserCreateRequest struct {
 	Subdomain string `json:"subdomain"`
 }
 
-func NewUserHandler(store UserTenantStore, nodeStore UserNodeStore, projectStore UserProjectStore, provisioner Provisioner, auditStore *audit.Store, ssoDomain string) *UserHandler {
+func NewUserHandler(store UserTenantStore, nodeStore UserNodeStore, projectStore UserProjectStore, provisioner Provisioner, auditStore *audit.Store, ssoDomain, ssoScheme string) *UserHandler {
 	if ssoDomain == "" {
 		ssoDomain = "freeradio.app"
+	}
+	if ssoScheme == "" {
+		ssoScheme = "https"
 	}
 	return &UserHandler{
 		store:        store,
@@ -69,6 +73,7 @@ func NewUserHandler(store UserTenantStore, nodeStore UserNodeStore, projectStore
 		provisioner:  provisioner,
 		auditStore:   auditStore,
 		ssoDomain:    ssoDomain,
+		ssoScheme:    ssoScheme,
 	}
 }
 
@@ -268,7 +273,7 @@ func (h *UserHandler) SSOToken(w http.ResponseWriter, r *http.Request) {
 
 	token := payloadB64 + ":" + sigB64
 
-	ssoURL := fmt.Sprintf("https://%s.%s/auth/sso?token=%s", t.Subdomain, h.ssoDomain, url.QueryEscape(token))
+	ssoURL := fmt.Sprintf("%s://%s.%s/auth/sso?token=%s", h.ssoScheme, t.Subdomain, h.ssoDomain, url.QueryEscape(token))
 
 	response.JSON(w, http.StatusOK, map[string]interface{}{
 		"url":        ssoURL,

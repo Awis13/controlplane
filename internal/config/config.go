@@ -29,6 +29,7 @@ type Config struct {
 	PollerInterval  time.Duration // optional: station status poll interval (default: 10s)
 	SSHKeyPath      string        // optional: path to SSH key for pct exec (default: /root/.ssh/id_ed25519)
 	SSODomain       string        // optional: domain for SSO token URLs (default: freeradio.app)
+	SSOScheme       string        // optional: http or https for SSO URLs (default: https)
 	StripeSecretKey    string            // optional: Stripe API secret key
 	StripeWebhookSecret string           // optional: Stripe webhook signing secret
 	StripePrices       map[string]string // optional: tier name -> Stripe price ID
@@ -77,6 +78,7 @@ func Load() (*Config, error) {
 		PollerInterval:  parseDuration("POLLER_INTERVAL", 10*time.Second),
 		SSHKeyPath:      getEnv("SSH_KEY_PATH", "/root/.ssh/id_ed25519"),
 		SSODomain:       getEnv("SSO_DOMAIN", "freeradio.app"),
+		SSOScheme:       getEnv("SSO_SCHEME", "https"),
 		StripeSecretKey:    os.Getenv("STRIPE_SECRET_KEY"),
 		StripeWebhookSecret: os.Getenv("STRIPE_WEBHOOK_SECRET"),
 		StripePrices:       parseStripePrices(),
