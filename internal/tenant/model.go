@@ -18,6 +18,7 @@ type Tenant struct {
 	OwnerID              *string    `json:"owner_id,omitempty"`
 	StripeSubscriptionID *string    `json:"stripe_subscription_id,omitempty"`
 	StripeCustomerID     *string    `json:"stripe_customer_id,omitempty"`
+	Tier                 string     `json:"tier"`
 	DashboardToken       *string    `json:"-"`
 	HealthStatus         string     `json:"health_status"`
 	HealthCheckedAt      *time.Time `json:"health_checked_at,omitempty"`

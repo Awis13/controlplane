@@ -20,14 +20,14 @@ func NewStore(pool *pgxpool.Pool) *Store {
 }
 
 // tenantColumns is the list of columns selected in all tenant queries.
-const tenantColumns = `id, name, project_id, node_id, lxc_id, lxc_ip, subdomain, status, error_message, owner_id, stripe_subscription_id, stripe_customer_id, dashboard_token, health_status, health_checked_at, created_at, updated_at`
+const tenantColumns = `id, name, project_id, node_id, lxc_id, lxc_ip, subdomain, status, error_message, owner_id, stripe_subscription_id, stripe_customer_id, tier, dashboard_token, health_status, health_checked_at, created_at, updated_at`
 
 // scanTenant scans a single row into a Tenant struct.
 func scanTenant(row pgx.Row) (*Tenant, error) {
 	var t Tenant
 	err := row.Scan(&t.ID, &t.Name, &t.ProjectID, &t.NodeID, &t.LXCID, &t.LXCIP,
 		&t.Subdomain, &t.Status, &t.ErrorMessage, &t.OwnerID, &t.StripeSubscriptionID,
-		&t.StripeCustomerID, &t.DashboardToken, &t.HealthStatus, &t.HealthCheckedAt, &t.CreatedAt, &t.UpdatedAt)
+		&t.StripeCustomerID, &t.Tier, &t.DashboardToken, &t.HealthStatus, &t.HealthCheckedAt, &t.CreatedAt, &t.UpdatedAt)
 	if err != nil {
 		return nil, err
 	}
@@ -103,7 +103,7 @@ func (s *Store) ListPaginated(ctx context.Context, limit, offset int, status, no
 		var t Tenant
 		err := rows.Scan(&t.ID, &t.Name, &t.ProjectID, &t.NodeID, &t.LXCID, &t.LXCIP,
 			&t.Subdomain, &t.Status, &t.ErrorMessage, &t.OwnerID, &t.StripeSubscriptionID,
-			&t.StripeCustomerID, &t.DashboardToken, &t.HealthStatus, &t.HealthCheckedAt, &t.CreatedAt, &t.UpdatedAt, &total)
+			&t.StripeCustomerID, &t.Tier, &t.DashboardToken, &t.HealthStatus, &t.HealthCheckedAt, &t.CreatedAt, &t.UpdatedAt, &total)
 		if err != nil {
 			return nil, 0, fmt.Errorf("scan tenant: %w", err)
 		}
@@ -458,4 +458,73 @@ func (s *Store) SetDashboardToken(ctx context.Context, id string, token string) 
 		return pgx.ErrNoRows
 	}
 	return nil
+}
+
+// UpdateBilling updates the billing fields (stripe_customer_id, stripe_subscription_id, tier) for a tenant.
+func (s *Store) UpdateBilling(ctx context.Context, tenantID, stripeCustomerID, stripeSubscriptionID, tier string) error {
+	tag, err := s.pool.Exec(ctx,
+		`UPDATE tenants SET stripe_customer_id = $2, stripe_subscription_id = $3, tier = $4, updated_at = now()
+		 WHERE id = $1`,
+		tenantID, stripeCustomerID, stripeSubscriptionID, tier)
+	if err != nil {
+		return fmt.Errorf("update billing: %w", err)
+	}
+	if tag.RowsAffected() == 0 {
+		return pgx.ErrNoRows
+	}
+	return nil
+}
+
+// BillingTenant is a lightweight struct for billing operations.
+type BillingTenant struct {
+	ID                   string  `json:"id"`
+	Name                 string  `json:"name"`
+	Tier                 string  `json:"tier"`
+	StripeCustomerID     *string `json:"stripe_customer_id,omitempty"`
+	StripeSubscriptionID *string `json:"stripe_subscription_id,omitempty"`
+	OwnerID              *string `json:"owner_id,omitempty"`
+}
+
+// GetByStripeCustomerID returns a tenant by its Stripe customer ID.
+func (s *Store) GetByStripeCustomerID(ctx context.Context, customerID string) (*BillingTenant, error) {
+	var t BillingTenant
+	err := s.pool.QueryRow(ctx,
+		`SELECT id, name, tier, stripe_customer_id, stripe_subscription_id, owner_id
+		 FROM tenants WHERE stripe_customer_id = $1 AND status NOT IN ('deleted')
+		 LIMIT 1`, customerID).
+		Scan(&t.ID, &t.Name, &t.Tier, &t.StripeCustomerID, &t.StripeSubscriptionID, &t.OwnerID)
+	if err != nil {
+		if err == pgx.ErrNoRows {
+			return nil, nil
+		}
+		return nil, fmt.Errorf("query tenant by stripe customer: %w", err)
+	}
+	return &t, nil
+}
+
+// GetBillingByOwnerID returns billing info for all non-deleted tenants belonging to a user.
+func (s *Store) GetBillingByOwnerID(ctx context.Context, ownerID string) ([]BillingTenant, error) {
+	rows, err := s.pool.Query(ctx,
+		`SELECT id, name, tier, stripe_customer_id, stripe_subscription_id, owner_id
+		 FROM tenants
+		 WHERE owner_id = $1 AND status NOT IN ('deleted')
+		 ORDER BY created_at DESC`, ownerID)
+	if err != nil {
+		return nil, fmt.Errorf("query billing tenants by owner: %w", err)
+	}
+	defer rows.Close()
+
+	var tenants []BillingTenant
+	for rows.Next() {
+		var t BillingTenant
+		if err := rows.Scan(&t.ID, &t.Name, &t.Tier, &t.StripeCustomerID, &t.StripeSubscriptionID, &t.OwnerID); err != nil {
+			return nil, fmt.Errorf("scan billing tenant: %w", err)
+		}
+		tenants = append(tenants, t)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("iterate billing tenants: %w", err)
+	}
+
+	return tenants, nil
 }

@@ -20,6 +20,7 @@ import (
 	"controlplane/internal/admin"
 	"controlplane/internal/audit"
 	"controlplane/internal/auth"
+	"controlplane/internal/billing"
 	"controlplane/internal/caddy"
 	"controlplane/internal/config"
 	"controlplane/internal/health"
@@ -220,6 +221,28 @@ func New(pool *pgxpool.Pool, cfg *config.Config) (http.Handler, *provisioner.Pro
 		r.Post("/{tenantID}/sso-token", userTenantHandler.SSOToken)
 	})
 
+	// Stripe billing (optional — requires STRIPE_SECRET_KEY)
+	var billingService *billing.Service
+	if cfg.StripeSecretKey != "" {
+		billingService = billing.NewService(cfg.StripeSecretKey, cfg.StripeWebhookSecret, cfg.StripePrices)
+		slog.Info("billing: Stripe integration enabled")
+	} else {
+		slog.Info("billing: Stripe integration disabled (STRIPE_SECRET_KEY not set)")
+	}
+	billingAdapter := &billingTenantStoreAdapter{store: tenantStore}
+	billingHandler := billing.NewHandler(billingService, billingAdapter)
+
+	// Stripe webhook (public, no auth — signature verified by Stripe SDK)
+	r.Post("/api/v1/stripe/webhook", billingHandler.Webhook)
+
+	// Billing management (JWT protected)
+	r.Route("/api/v1/billing", func(r chi.Router) {
+		r.Use(auth.JWTAuth(userStore, tokenStore, cfg.JWTSecret))
+		r.Post("/checkout", billingHandler.CreateCheckout)
+		r.Post("/portal", billingHandler.CreatePortal)
+		r.Get("/status", billingHandler.Status)
+	})
+
 	// API v1 (protected by Bearer token auth)
 	r.Route("/api/v1", func(r chi.Router) {
 		r.Use(httprate.LimitByIP(100, time.Minute))
@@ -300,6 +323,53 @@ type pollerTenantStoreAdapter struct {
 
 func (a *pollerTenantStoreAdapter) ListPollable(ctx context.Context) ([]tenant.PollableTenant, error) {
 	return a.store.ListPollable(ctx)
+}
+
+// billingTenantStoreAdapter wraps *tenant.Store to satisfy billing.TenantStore
+// without creating a circular import.
+type billingTenantStoreAdapter struct {
+	store *tenant.Store
+}
+
+func (a *billingTenantStoreAdapter) UpdateBilling(ctx context.Context, tenantID, stripeCustomerID, stripeSubscriptionID, tier string) error {
+	return a.store.UpdateBilling(ctx, tenantID, stripeCustomerID, stripeSubscriptionID, tier)
+}
+
+func (a *billingTenantStoreAdapter) GetByStripeCustomerID(ctx context.Context, customerID string) (*billing.TenantBilling, error) {
+	t, err := a.store.GetByStripeCustomerID(ctx, customerID)
+	if err != nil {
+		return nil, err
+	}
+	if t == nil {
+		return nil, nil
+	}
+	return &billing.TenantBilling{
+		ID:                   t.ID,
+		Name:                 t.Name,
+		Tier:                 t.Tier,
+		StripeCustomerID:     t.StripeCustomerID,
+		StripeSubscriptionID: t.StripeSubscriptionID,
+		OwnerID:              t.OwnerID,
+	}, nil
+}
+
+func (a *billingTenantStoreAdapter) GetByOwnerID(ctx context.Context, ownerID string) ([]billing.TenantBilling, error) {
+	tenants, err := a.store.GetBillingByOwnerID(ctx, ownerID)
+	if err != nil {
+		return nil, err
+	}
+	result := make([]billing.TenantBilling, len(tenants))
+	for i, t := range tenants {
+		result[i] = billing.TenantBilling{
+			ID:                   t.ID,
+			Name:                 t.Name,
+			Tier:                 t.Tier,
+			StripeCustomerID:     t.StripeCustomerID,
+			StripeSubscriptionID: t.StripeSubscriptionID,
+			OwnerID:              t.OwnerID,
+		}
+	}
+	return result, nil
 }
 
 // bearerAuth returns middleware that validates Authorization: Bearer <token> header.
