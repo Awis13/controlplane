@@ -1,6 +1,7 @@
 package auth
 
 import (
+	"context"
 	"crypto/subtle"
 	"errors"
 	"log/slog"
@@ -20,11 +21,12 @@ import (
 )
 
 const (
-	bcryptCost       = 12
-	tokenExpiration  = 24 * time.Hour
-	minPasswordLen   = 12
-	maxLoginAttempts = 5
-	loginLimitWindow = 15 * time.Minute
+	bcryptCost            = 12
+	accessTokenExpiration = 15 * time.Minute
+	refreshTokenExpiry    = 30 * 24 * time.Hour // 30 days
+	minPasswordLen        = 12
+	maxLoginAttempts      = 5
+	loginLimitWindow      = 15 * time.Minute
 )
 
 // loginLimiter tracks failed login attempts per email.
@@ -98,9 +100,10 @@ func NewHandler(userStore *user.Store, tokenStore *TokenStore, jwtSecret, regist
 }
 
 type registerRequest struct {
-	Email       string `json:"email"`
-	Password    string `json:"password"`
-	DisplayName string `json:"display_name"`
+	Email             string `json:"email"`
+	Password          string `json:"password"`
+	DisplayName       string `json:"display_name"`
+	RegistrationToken string `json:"registration_token"`
 }
 
 type loginRequest struct {
@@ -109,8 +112,10 @@ type loginRequest struct {
 }
 
 type authResponse struct {
-	Token string    `json:"token"`
-	User  *userView `json:"user"`
+	Token        string    `json:"token"`
+	RefreshToken string    `json:"refresh_token"`
+	ExpiresIn    int       `json:"expires_in"`
+	User         *userView `json:"user"`
 }
 
 type userView struct {
@@ -129,19 +134,22 @@ func toUserView(u *user.User) *userView {
 
 // Register handles POST /api/v1/auth/register.
 func (h *Handler) Register(w http.ResponseWriter, r *http.Request) {
-	// Check invite token if configured
-	if h.registrationToken != "" {
-		provided := r.Header.Get("X-Registration-Token")
-		if subtle.ConstantTimeCompare([]byte(provided), []byte(h.registrationToken)) != 1 {
-			response.Error(w, http.StatusForbidden, "registration is not open")
-			return
-		}
-	}
-
 	var req registerRequest
 	if err := response.Decode(r, &req); err != nil {
 		response.Error(w, http.StatusBadRequest, "invalid request body")
 		return
+	}
+
+	// Check invite token if configured (from body or header)
+	if h.registrationToken != "" {
+		provided := req.RegistrationToken
+		if provided == "" {
+			provided = r.Header.Get("X-Registration-Token")
+		}
+		if subtle.ConstantTimeCompare([]byte(provided), []byte(h.registrationToken)) != 1 {
+			response.Error(w, http.StatusForbidden, "registration is not open")
+			return
+		}
 	}
 
 	// Validate email
@@ -181,17 +189,14 @@ func (h *Handler) Register(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	token, err := h.generateToken(u)
+	resp, err := h.issueTokenPair(r.Context(), u)
 	if err != nil {
-		slog.Error("generate token", "error", err)
-		response.Error(w, http.StatusInternalServerError, "failed to generate token")
+		slog.Error("issue tokens", "error", err)
+		response.Error(w, http.StatusInternalServerError, "failed to generate tokens")
 		return
 	}
 
-	response.JSON(w, http.StatusCreated, authResponse{
-		Token: token,
-		User:  toUserView(u),
-	})
+	response.JSON(w, http.StatusCreated, resp)
 }
 
 // Login handles POST /api/v1/auth/login.
@@ -234,17 +239,53 @@ func (h *Handler) Login(w http.ResponseWriter, r *http.Request) {
 	// Successful login — reset counter
 	h.limiter.reset(req.Email)
 
-	token, err := h.generateToken(u)
+	resp, err := h.issueTokenPair(r.Context(), u)
 	if err != nil {
-		slog.Error("generate token", "error", err)
-		response.Error(w, http.StatusInternalServerError, "failed to generate token")
+		slog.Error("issue tokens", "error", err)
+		response.Error(w, http.StatusInternalServerError, "failed to generate tokens")
 		return
 	}
 
-	response.JSON(w, http.StatusOK, authResponse{
-		Token: token,
-		User:  toUserView(u),
-	})
+	response.JSON(w, http.StatusOK, resp)
+}
+
+// Refresh handles POST /api/v1/auth/refresh.
+func (h *Handler) Refresh(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		RefreshToken string `json:"refresh_token"`
+	}
+	if err := response.Decode(r, &req); err != nil || req.RefreshToken == "" {
+		response.Error(w, http.StatusBadRequest, "refresh_token is required")
+		return
+	}
+
+	tokenHash := HashToken(req.RefreshToken)
+
+	userID, err := h.tokenStore.ValidateRefreshToken(r.Context(), tokenHash)
+	if err != nil {
+		response.Error(w, http.StatusUnauthorized, "invalid or expired refresh token")
+		return
+	}
+
+	// Revoke old refresh token (rotation)
+	if err := h.tokenStore.RevokeRefreshToken(r.Context(), tokenHash); err != nil {
+		slog.Error("revoke old refresh token", "error", err)
+	}
+
+	u, err := h.userStore.GetByID(r.Context(), userID)
+	if err != nil || u == nil {
+		response.Error(w, http.StatusUnauthorized, "user not found")
+		return
+	}
+
+	resp, err := h.issueTokenPair(r.Context(), u)
+	if err != nil {
+		slog.Error("issue tokens on refresh", "error", err)
+		response.Error(w, http.StatusInternalServerError, "failed to generate tokens")
+		return
+	}
+
+	response.JSON(w, http.StatusOK, resp)
 }
 
 // Logout handles POST /api/v1/auth/logout.
@@ -255,41 +296,100 @@ func (h *Handler) Logout(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Extract jti from current token
+	// Extract jti from current access token and revoke it
 	authHeader := r.Header.Get("Authorization")
 	tokenStr := strings.TrimPrefix(authHeader, "Bearer ")
 
 	token, err := jwt.Parse(tokenStr, func(t *jwt.Token) (any, error) {
 		return h.jwtSecret, nil
 	})
-	if err != nil {
-		response.Error(w, http.StatusBadRequest, "invalid token")
-		return
+	if err == nil {
+		if claims, ok := token.Claims.(jwt.MapClaims); ok {
+			if jti, _ := claims["jti"].(string); jti != "" {
+				exp, _ := claims["exp"].(float64)
+				expiresAt := time.Unix(int64(exp), 0)
+				if err := h.tokenStore.Revoke(r.Context(), jti, u.ID, expiresAt); err != nil {
+					slog.Error("revoke access token", "error", err)
+				}
+			}
+		}
 	}
 
-	claims, ok := token.Claims.(jwt.MapClaims)
-	if !ok {
-		response.Error(w, http.StatusBadRequest, "invalid token claims")
-		return
+	// Also revoke the refresh token if provided
+	var req struct {
+		RefreshToken string `json:"refresh_token"`
 	}
-
-	jti, _ := claims["jti"].(string)
-	if jti == "" {
-		// Old token without jti — just OK
-		response.JSON(w, http.StatusOK, map[string]string{"status": "logged out"})
-		return
-	}
-
-	exp, _ := claims["exp"].(float64)
-	expiresAt := time.Unix(int64(exp), 0)
-
-	if err := h.tokenStore.Revoke(r.Context(), jti, u.ID, expiresAt); err != nil {
-		slog.Error("revoke token", "error", err)
-		response.Error(w, http.StatusInternalServerError, "failed to revoke token")
-		return
+	if err := response.Decode(r, &req); err == nil && req.RefreshToken != "" {
+		tokenHash := HashToken(req.RefreshToken)
+		if err := h.tokenStore.RevokeRefreshToken(r.Context(), tokenHash); err != nil {
+			slog.Error("revoke refresh token on logout", "error", err)
+		}
 	}
 
 	response.JSON(w, http.StatusOK, map[string]string{"status": "logged out"})
+}
+
+// ChangePassword handles POST /api/v1/auth/password.
+func (h *Handler) ChangePassword(w http.ResponseWriter, r *http.Request) {
+	u := UserFromContext(r.Context())
+	if u == nil {
+		response.Error(w, http.StatusUnauthorized, "not authenticated")
+		return
+	}
+
+	var req struct {
+		OldPassword string `json:"old_password"`
+		NewPassword string `json:"new_password"`
+	}
+	if err := response.Decode(r, &req); err != nil {
+		response.Error(w, http.StatusBadRequest, "invalid request body")
+		return
+	}
+
+	if req.OldPassword == "" || req.NewPassword == "" {
+		response.Error(w, http.StatusBadRequest, "old_password and new_password are required")
+		return
+	}
+
+	if len(req.NewPassword) < minPasswordLen {
+		response.Error(w, http.StatusBadRequest, "new password must be at least 12 characters")
+		return
+	}
+
+	// Verify old password
+	if err := bcrypt.CompareHashAndPassword([]byte(u.PasswordHash), []byte(req.OldPassword)); err != nil {
+		response.Error(w, http.StatusUnauthorized, "incorrect current password")
+		return
+	}
+
+	// Hash new password
+	hash, err := bcrypt.GenerateFromPassword([]byte(req.NewPassword), bcryptCost)
+	if err != nil {
+		slog.Error("hash new password", "error", err)
+		response.Error(w, http.StatusInternalServerError, "failed to update password")
+		return
+	}
+
+	if err := h.userStore.UpdatePassword(r.Context(), u.ID, string(hash)); err != nil {
+		slog.Error("update password", "error", err)
+		response.Error(w, http.StatusInternalServerError, "failed to update password")
+		return
+	}
+
+	// Revoke all existing refresh tokens — force re-login on all devices
+	if err := h.tokenStore.RevokeAllUserRefreshTokens(r.Context(), u.ID); err != nil {
+		slog.Error("revoke tokens on password change", "error", err)
+	}
+
+	// Issue new token pair for current session
+	resp, err := h.issueTokenPair(r.Context(), u)
+	if err != nil {
+		slog.Error("issue tokens after password change", "error", err)
+		response.Error(w, http.StatusInternalServerError, "password updated but failed to generate new tokens")
+		return
+	}
+
+	response.JSON(w, http.StatusOK, resp)
 }
 
 // Me handles GET /api/v1/auth/me.
@@ -302,13 +402,39 @@ func (h *Handler) Me(w http.ResponseWriter, r *http.Request) {
 	response.JSON(w, http.StatusOK, toUserView(u))
 }
 
-func (h *Handler) generateToken(u *user.User) (string, error) {
+// issueTokenPair generates an access token + refresh token pair.
+func (h *Handler) issueTokenPair(ctx context.Context, u *user.User) (*authResponse, error) {
+	accessToken, err := h.generateAccessToken(u)
+	if err != nil {
+		return nil, err
+	}
+
+	refreshToken, err := GenerateRefreshToken()
+	if err != nil {
+		return nil, err
+	}
+
+	tokenHash := HashToken(refreshToken)
+	expiresAt := time.Now().Add(refreshTokenExpiry)
+	if err := h.tokenStore.CreateRefreshToken(ctx, u.ID, tokenHash, expiresAt); err != nil {
+		return nil, err
+	}
+
+	return &authResponse{
+		Token:        accessToken,
+		RefreshToken: refreshToken,
+		ExpiresIn:    int(accessTokenExpiration.Seconds()),
+		User:         toUserView(u),
+	}, nil
+}
+
+func (h *Handler) generateAccessToken(u *user.User) (string, error) {
 	now := time.Now()
 	claims := jwt.MapClaims{
 		"sub":   u.ID.String(),
 		"email": u.Email,
 		"jti":   uuid.New().String(),
-		"exp":   now.Add(tokenExpiration).Unix(),
+		"exp":   now.Add(accessTokenExpiration).Unix(),
 		"iat":   now.Unix(),
 	}
 	token := jwt.NewWithClaims(jwt.SigningMethodHS256, claims)

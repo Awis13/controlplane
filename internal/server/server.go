@@ -195,12 +195,14 @@ func New(pool *pgxpool.Pool, cfg *config.Config) (http.Handler, *provisioner.Pro
 		r.Use(httprate.LimitByIP(10, time.Minute))
 		r.Post("/register", authHandler.Register)
 		r.Post("/login", authHandler.Login)
+		r.Post("/refresh", authHandler.Refresh)
 
 		// Protected by JWT
 		r.Group(func(r chi.Router) {
 			r.Use(auth.JWTAuth(userStore, tokenStore, cfg.JWTSecret))
 			r.Get("/me", authHandler.Me)
 			r.Post("/logout", authHandler.Logout)
+			r.Post("/password", authHandler.ChangePassword)
 		})
 	})
 
