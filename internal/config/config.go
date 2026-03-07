@@ -29,6 +29,9 @@ type Config struct {
 	PollerInterval  time.Duration // optional: station status poll interval (default: 10s)
 	SSHKeyPath      string        // optional: path to SSH key for pct exec (default: /root/.ssh/id_ed25519)
 	SSODomain       string        // optional: domain for SSO token URLs (default: freeradio.app)
+	StripeSecretKey    string            // optional: Stripe API secret key
+	StripeWebhookSecret string           // optional: Stripe webhook signing secret
+	StripePrices       map[string]string // optional: tier name -> Stripe price ID
 }
 
 // Load reads configuration from environment variables.
@@ -74,6 +77,9 @@ func Load() (*Config, error) {
 		PollerInterval:  parseDuration("POLLER_INTERVAL", 10*time.Second),
 		SSHKeyPath:      getEnv("SSH_KEY_PATH", "/root/.ssh/id_ed25519"),
 		SSODomain:       getEnv("SSO_DOMAIN", "freeradio.app"),
+		StripeSecretKey:    os.Getenv("STRIPE_SECRET_KEY"),
+		StripeWebhookSecret: os.Getenv("STRIPE_WEBHOOK_SECRET"),
+		StripePrices:       parseStripePrices(),
 	}, nil
 }
 
@@ -131,4 +137,20 @@ func parseDuration(key string, fallback time.Duration) time.Duration {
 	}
 
 	return fallback
+}
+
+// parseStripePrices reads STRIPE_PRICE_* env vars into a tier->priceID map.
+func parseStripePrices() map[string]string {
+	prices := make(map[string]string)
+	tiers := map[string]string{
+		"starter": "STRIPE_PRICE_STARTER",
+		"pro":     "STRIPE_PRICE_PRO",
+		"studio":  "STRIPE_PRICE_STUDIO",
+	}
+	for tier, envKey := range tiers {
+		if v := os.Getenv(envKey); v != "" {
+			prices[tier] = v
+		}
+	}
+	return prices
 }
