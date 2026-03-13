@@ -52,7 +52,7 @@ func TestReconcile_AllRoutesUpserted(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	client := NewClient(srv.URL, "srv1", "freeradio.app")
+	client := NewClient(srv.URL, "srv1", "example.com")
 	lister := &mockTenantLister{
 		tenants: []TenantRoute{
 			{Subdomain: "studio1", LXCIP: "10.10.10.5"},
@@ -125,7 +125,7 @@ func TestReconcile_SomeRoutesFail(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	client := NewClient(srv.URL, "srv1", "freeradio.app")
+	client := NewClient(srv.URL, "srv1", "example.com")
 	lister := &mockTenantLister{
 		tenants: []TenantRoute{
 			{Subdomain: "studio1", LXCIP: "10.10.10.5"},
@@ -153,7 +153,7 @@ func TestReconcile_NoTenants(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	client := NewClient(srv.URL, "srv1", "freeradio.app")
+	client := NewClient(srv.URL, "srv1", "example.com")
 	lister := &mockTenantLister{tenants: nil}
 
 	result, err := Reconcile(context.Background(), client, lister)
@@ -172,7 +172,7 @@ func TestReconcile_ListerError(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	client := NewClient(srv.URL, "srv1", "freeradio.app")
+	client := NewClient(srv.URL, "srv1", "example.com")
 	lister := &mockTenantLister{err: fmt.Errorf("database connection lost")}
 
 	_, err := Reconcile(context.Background(), client, lister)

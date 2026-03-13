@@ -25,10 +25,10 @@ type Config struct {
 	WGNetworkCIDR   string // optional: WireGuard network CIDR (default: 10.10.0.0/24)
 	CaddyAdminURL   string // optional: Caddy Admin API URL (e.g. http://172.17.0.1:2019)
 	CaddyServerName string // optional: Caddy server name (default: srv1)
-	CaddyDomain     string // optional: domain for tenant routes (default: freeradio.app)
+	CaddyDomain     string // optional: domain for tenant routes (default: example.com)
 	PollerInterval  time.Duration // optional: station status poll interval (default: 10s)
 	SSHKeyPath      string        // optional: path to SSH key for pct exec (default: /root/.ssh/id_ed25519)
-	SSODomain       string        // optional: domain for SSO token URLs (default: freeradio.app)
+	SSODomain       string        // optional: domain for SSO token URLs (default: example.com)
 	SSOScheme       string        // optional: http or https for SSO URLs (default: https)
 	StripeSecretKey    string            // optional: Stripe API secret key
 	StripeWebhookSecret string           // optional: Stripe webhook signing secret
@@ -74,10 +74,10 @@ func Load() (*Config, error) {
 		WGNetworkCIDR:   getEnv("WG_NETWORK_CIDR", "10.10.0.0/24"),
 		CaddyAdminURL:   os.Getenv("CADDY_ADMIN_URL"),
 		CaddyServerName: getEnv("CADDY_SERVER_NAME", "srv1"),
-		CaddyDomain:     getEnv("CADDY_DOMAIN", "freeradio.app"),
+		CaddyDomain:     getEnv("CADDY_DOMAIN", "example.com"),
 		PollerInterval:  parseDuration("POLLER_INTERVAL", 10*time.Second),
 		SSHKeyPath:      getEnv("SSH_KEY_PATH", "/root/.ssh/id_ed25519"),
-		SSODomain:       getEnv("SSO_DOMAIN", "freeradio.app"),
+		SSODomain:       getEnv("SSO_DOMAIN", "example.com"),
 		SSOScheme:       getEnv("SSO_SCHEME", "https"),
 		StripeSecretKey:    os.Getenv("STRIPE_SECRET_KEY"),
 		StripeWebhookSecret: os.Getenv("STRIPE_WEBHOOK_SECRET"),

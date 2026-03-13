@@ -139,7 +139,7 @@ func newTestUserHandler() (*UserHandler, *mockUserTenantStore, *mockUserNodeStor
 	ns := newMockUserNodeStore()
 	ps := newMockUserProjectStore()
 	prov := newMockProvisioner()
-	h := NewUserHandler(ts, ns, ps, prov, nil, "freeradio.app", "")
+	h := NewUserHandler(ts, ns, ps, prov, nil, "example.com", "")
 	return h, ts, ns, ps, prov
 }
 
@@ -151,7 +151,7 @@ func TestUserList_Empty(t *testing.T) {
 	ps := newMockUserProjectStore()
 	prov := newMockProvisioner()
 
-	h := NewUserHandler(ts, ns, ps, prov, nil, "freeradio.app", "")
+	h := NewUserHandler(ts, ns, ps, prov, nil, "example.com", "")
 	r := userTenantRouter(h)
 
 	req := httptest.NewRequest("GET", "/tenants", nil)
@@ -186,7 +186,7 @@ func TestUserList_ReturnOwnTenants(t *testing.T) {
 		{ID: "t2", Name: "My Other Radio", OwnerID: &ownerID, Status: "provisioning"},
 	}
 
-	h := NewUserHandler(ts, ns, ps, prov, nil, "freeradio.app", "")
+	h := NewUserHandler(ts, ns, ps, prov, nil, "example.com", "")
 	r := userTenantRouter(h)
 
 	req := httptest.NewRequest("GET", "/tenants", nil)
@@ -215,7 +215,7 @@ func TestUserList_Unauthenticated(t *testing.T) {
 	ps := newMockUserProjectStore()
 	prov := newMockProvisioner()
 
-	h := NewUserHandler(ts, ns, ps, prov, nil, "freeradio.app", "")
+	h := NewUserHandler(ts, ns, ps, prov, nil, "example.com", "")
 	r := userTenantRouterNoAuth(h)
 
 	req := httptest.NewRequest("GET", "/tenants", nil)
@@ -236,7 +236,7 @@ func TestUserCreate_Success(t *testing.T) {
 	ns.leastLoaded = activeNode()
 	ps.defaultProject = testProjectObj()
 
-	h := NewUserHandler(ts, ns, ps, prov, nil, "freeradio.app", "")
+	h := NewUserHandler(ts, ns, ps, prov, nil, "example.com", "")
 	r := userTenantRouter(h)
 
 	body, _ := json.Marshal(UserCreateRequest{Name: "My Radio", Subdomain: "my-radio"})
@@ -272,7 +272,7 @@ func TestUserCreate_MissingName(t *testing.T) {
 	ps := newMockUserProjectStore()
 	prov := newMockProvisioner()
 
-	h := NewUserHandler(ts, ns, ps, prov, nil, "freeradio.app", "")
+	h := NewUserHandler(ts, ns, ps, prov, nil, "example.com", "")
 	r := userTenantRouter(h)
 
 	body, _ := json.Marshal(UserCreateRequest{Subdomain: "my-radio"})
@@ -292,7 +292,7 @@ func TestUserCreate_MissingSubdomain(t *testing.T) {
 	ps := newMockUserProjectStore()
 	prov := newMockProvisioner()
 
-	h := NewUserHandler(ts, ns, ps, prov, nil, "freeradio.app", "")
+	h := NewUserHandler(ts, ns, ps, prov, nil, "example.com", "")
 	r := userTenantRouter(h)
 
 	body, _ := json.Marshal(UserCreateRequest{Name: "My Radio"})
@@ -312,7 +312,7 @@ func TestUserCreate_InvalidSubdomain(t *testing.T) {
 	ps := newMockUserProjectStore()
 	prov := newMockProvisioner()
 
-	h := NewUserHandler(ts, ns, ps, prov, nil, "freeradio.app", "")
+	h := NewUserHandler(ts, ns, ps, prov, nil, "example.com", "")
 	r := userTenantRouter(h)
 
 	invalids := []string{"-bad", "bad-", "A", "a", "has space"}
@@ -335,7 +335,7 @@ func TestUserCreate_ReservedSubdomain(t *testing.T) {
 	ps := newMockUserProjectStore()
 	prov := newMockProvisioner()
 
-	h := NewUserHandler(ts, ns, ps, prov, nil, "freeradio.app", "")
+	h := NewUserHandler(ts, ns, ps, prov, nil, "example.com", "")
 	r := userTenantRouter(h)
 
 	body, _ := json.Marshal(UserCreateRequest{Name: "Admin Radio", Subdomain: "admin"})
@@ -357,7 +357,7 @@ func TestUserCreate_NoProject(t *testing.T) {
 
 	ps.defaultProject = nil // no projects configured
 
-	h := NewUserHandler(ts, ns, ps, prov, nil, "freeradio.app", "")
+	h := NewUserHandler(ts, ns, ps, prov, nil, "example.com", "")
 	r := userTenantRouter(h)
 
 	body, _ := json.Marshal(UserCreateRequest{Name: "My Radio", Subdomain: "my-radio"})
@@ -380,7 +380,7 @@ func TestUserCreate_NoAvailableNode(t *testing.T) {
 	ps.defaultProject = testProjectObj()
 	ns.leastLoaded = nil // no nodes with capacity
 
-	h := NewUserHandler(ts, ns, ps, prov, nil, "freeradio.app", "")
+	h := NewUserHandler(ts, ns, ps, prov, nil, "example.com", "")
 	r := userTenantRouter(h)
 
 	body, _ := json.Marshal(UserCreateRequest{Name: "My Radio", Subdomain: "my-radio"})
@@ -404,7 +404,7 @@ func TestUserCreate_InsufficientCapacity(t *testing.T) {
 	ns.leastLoaded = activeNode()
 	ns.reserveErr = node.ErrInsufficientCapacity
 
-	h := NewUserHandler(ts, ns, ps, prov, nil, "freeradio.app", "")
+	h := NewUserHandler(ts, ns, ps, prov, nil, "example.com", "")
 	r := userTenantRouter(h)
 
 	body, _ := json.Marshal(UserCreateRequest{Name: "My Radio", Subdomain: "my-radio"})
@@ -424,7 +424,7 @@ func TestUserCreate_Unauthenticated(t *testing.T) {
 	ps := newMockUserProjectStore()
 	prov := newMockProvisioner()
 
-	h := NewUserHandler(ts, ns, ps, prov, nil, "freeradio.app", "")
+	h := NewUserHandler(ts, ns, ps, prov, nil, "example.com", "")
 	r := userTenantRouterNoAuth(h)
 
 	body, _ := json.Marshal(UserCreateRequest{Name: "My Radio", Subdomain: "my-radio"})
@@ -477,7 +477,7 @@ func TestUserSSOToken_Success(t *testing.T) {
 	if !ok || ssoURL == "" {
 		t.Fatal("expected non-empty url in response")
 	}
-	if !contains(ssoURL, "my-radio.freeradio.app") {
+	if !contains(ssoURL, "my-radio.example.com") {
 		t.Errorf("url should contain subdomain.domain, got: %s", ssoURL)
 	}
 	if !contains(ssoURL, "/auth/sso?token=") {

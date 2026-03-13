@@ -25,7 +25,7 @@ services:
       - NET_ADMIN
     environment:
       DATABASE_URL: postgres://controlplane:${POSTGRES_PASSWORD:?}@127.0.0.1:5432/controlplane?sslmode=disable
-      LISTEN_ADDR: ${BIND_ADDR:-100.93.29.111}:${HOST_PORT:-8085}
+      LISTEN_ADDR: ${BIND_ADDR:-127.0.0.1}:${HOST_PORT:-8080}
       LOG_LEVEL: ${LOG_LEVEL:-info}
       API_TOKEN: ${API_TOKEN}
       ENCRYPTION_KEY: ${ENCRYPTION_KEY}
@@ -40,16 +40,16 @@ services:
       WG_NETWORK_CIDR: ${WG_NETWORK_CIDR:-10.10.0.0/24}
       CADDY_ADMIN_URL: ${CADDY_ADMIN_URL:-}
       CADDY_SERVER_NAME: ${CADDY_SERVER_NAME:-srv1}
-      CADDY_DOMAIN: ${CADDY_DOMAIN:-freeradio.app}
-      SSO_DOMAIN: ${SSO_DOMAIN:-freeradio.app}
+      CADDY_DOMAIN: ${CADDY_DOMAIN:-example.com}
+      SSO_DOMAIN: ${SSO_DOMAIN:-example.com}
       SSO_SCHEME: ${SSO_SCHEME:-https}
-    volumes:
-      - /root/.ssh/id_ed25519:/root/.ssh/id_ed25519:ro
+    # volumes:
+    #   - /path/to/ssh/key:/root/.ssh/id_ed25519:ro  # optional: SSH key for LXC provisioning
     depends_on:
       postgres:
         condition: service_healthy
     healthcheck:
-      test: ["CMD-SHELL", "wget --no-verbose --tries=1 --spider http://${BIND_ADDR:-100.93.29.111}:${HOST_PORT:-8085}/healthz"]
+      test: ["CMD-SHELL", "wget --no-verbose --tries=1 --spider http://${BIND_ADDR:-127.0.0.1}:${HOST_PORT:-8080}/healthz"]
       interval: 5s
       timeout: 5s
       retries: 3

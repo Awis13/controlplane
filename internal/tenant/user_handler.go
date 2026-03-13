@@ -61,7 +61,7 @@ type UserCreateRequest struct {
 
 func NewUserHandler(store UserTenantStore, nodeStore UserNodeStore, projectStore UserProjectStore, provisioner Provisioner, auditStore *audit.Store, ssoDomain, ssoScheme string) *UserHandler {
 	if ssoDomain == "" {
-		ssoDomain = "freeradio.app"
+		ssoDomain = "example.com"
 	}
 	if ssoScheme == "" {
 		ssoScheme = "https"

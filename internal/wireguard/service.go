@@ -20,7 +20,7 @@ type Service struct {
 	store         *Store
 	encryptionKey string
 	hubPublicKey  string
-	hubEndpoint   string // e.g. 46.225.113.2:51820
+	hubEndpoint   string // e.g. 203.0.113.1:51820
 	networkCIDR   string // e.g. 10.10.0.0/24
 }
 

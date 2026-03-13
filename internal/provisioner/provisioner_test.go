@@ -428,7 +428,7 @@ func TestProvision_AutoCreatesStation(t *testing.T) {
 	p := setupProvisioner(nodeStore, tenantStore, projectStore, mockClient, n.ID)
 
 	sc := &mockStationCreator{}
-	p.WithStationCreator(sc, "freeradio.app")
+	p.WithStationCreator(sc, "example.com")
 
 	waitForProvision(p, "tenant-1", n.ID, proj.ID, "my-station", proj.RAMMB)
 
@@ -459,8 +459,8 @@ func TestProvision_AutoCreatesStation(t *testing.T) {
 	if call.OwnerID != "owner-123" {
 		t.Errorf("owner_id = %q, want 'owner-123'", call.OwnerID)
 	}
-	if call.CaddyDomain != "freeradio.app" {
-		t.Errorf("caddy_domain = %q, want 'freeradio.app'", call.CaddyDomain)
+	if call.CaddyDomain != "example.com" {
+		t.Errorf("caddy_domain = %q, want 'example.com'", call.CaddyDomain)
 	}
 }
 
@@ -483,7 +483,7 @@ func TestProvision_StationCreatorError_DoesNotFailProvisioning(t *testing.T) {
 	p := setupProvisioner(nodeStore, tenantStore, projectStore, mockClient, n.ID)
 
 	sc := &mockStationCreator{err: fmt.Errorf("db error")}
-	p.WithStationCreator(sc, "freeradio.app")
+	p.WithStationCreator(sc, "example.com")
 
 	waitForProvision(p, "tenant-1", n.ID, proj.ID, "fail-station", proj.RAMMB)
 

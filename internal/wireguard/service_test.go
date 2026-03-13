@@ -117,7 +117,7 @@ func TestEncryptDecryptPSK(t *testing.T) {
 
 func TestBuildPeerConfig(t *testing.T) {
 	hubPubKey := "aGVsbG8gd29ybGQgdGhpcyBpcyBhIHRlc3Qga2V5IQ=="
-	hubEndpoint := "46.225.113.2:51820"
+	hubEndpoint := "203.0.113.1:51820"
 
 	svc := NewService(nil, testEncryptionKey, hubPubKey, hubEndpoint, "10.10.0.0/24")
 
@@ -264,10 +264,10 @@ func TestHubPublicKey(t *testing.T) {
 }
 
 func TestHubEndpoint(t *testing.T) {
-	svc := NewService(nil, testEncryptionKey, "hub-key", "46.225.113.2:51820", "10.10.0.0/24")
+	svc := NewService(nil, testEncryptionKey, "hub-key", "203.0.113.1:51820", "10.10.0.0/24")
 
-	if svc.HubEndpoint() != "46.225.113.2:51820" {
-		t.Errorf("HubEndpoint = %q, want 46.225.113.2:51820", svc.HubEndpoint())
+	if svc.HubEndpoint() != "203.0.113.1:51820" {
+		t.Errorf("HubEndpoint = %q, want 203.0.113.1:51820", svc.HubEndpoint())
 	}
 }
 

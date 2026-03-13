@@ -31,13 +31,13 @@ type Client struct {
 }
 
 // NewClient creates a new Caddy Admin API client.
-// serverName defaults to "srv1", domain defaults to "freeradio.app".
+// serverName defaults to "srv1", domain defaults to "example.com".
 func NewClient(baseURL, serverName, domain string) *Client {
 	if serverName == "" {
 		serverName = "srv1"
 	}
 	if domain == "" {
-		domain = "freeradio.app"
+		domain = "example.com"
 	}
 	return &Client{
 		baseURL:    strings.TrimRight(baseURL, "/"),

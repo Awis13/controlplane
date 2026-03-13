@@ -32,8 +32,8 @@ func TestNewClient_Defaults(t *testing.T) {
 	if c.serverName != "srv1" {
 		t.Errorf("expected default serverName 'srv1', got %q", c.serverName)
 	}
-	if c.domain != "freeradio.app" {
-		t.Errorf("expected default domain 'freeradio.app', got %q", c.domain)
+	if c.domain != "example.com" {
+		t.Errorf("expected default domain 'example.com', got %q", c.domain)
 	}
 }
 
@@ -48,7 +48,7 @@ func TestAddRoute_HappyPath(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	c := NewClient(srv.URL, "srv1", "freeradio.app")
+	c := NewClient(srv.URL, "srv1", "example.com")
 	err := c.AddRoute(context.Background(), "mystudio", "10.10.10.5")
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
@@ -66,7 +66,7 @@ func TestAddRoute_HappyPath(t *testing.T) {
 	if route.ID != "tenant_mystudio" {
 		t.Errorf("expected @id 'tenant_mystudio', got %q", route.ID)
 	}
-	if len(route.Match) != 1 || len(route.Match[0].Host) != 1 || route.Match[0].Host[0] != "mystudio.freeradio.app" {
+	if len(route.Match) != 1 || len(route.Match[0].Host) != 1 || route.Match[0].Host[0] != "mystudio.example.com" {
 		t.Errorf("unexpected match: %+v", route.Match)
 	}
 	if len(route.Handle) != 1 || len(route.Handle[0].Upstreams) != 1 || route.Handle[0].Upstreams[0].Dial != "10.10.10.5:80" {
@@ -84,7 +84,7 @@ func TestAddRoute_ServerError(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	c := NewClient(srv.URL, "srv1", "freeradio.app")
+	c := NewClient(srv.URL, "srv1", "example.com")
 	err := c.AddRoute(context.Background(), "mystudio", "10.10.10.5")
 	if err == nil {
 		t.Fatal("expected error")
@@ -95,7 +95,7 @@ func TestAddRoute_ServerError(t *testing.T) {
 }
 
 func TestAddRoute_ConnectionError(t *testing.T) {
-	c := NewClient("http://127.0.0.1:1", "srv1", "freeradio.app")
+	c := NewClient("http://127.0.0.1:1", "srv1", "example.com")
 	err := c.AddRoute(context.Background(), "mystudio", "10.10.10.5")
 	if err == nil {
 		t.Fatal("expected error")
@@ -116,7 +116,7 @@ func TestRemoveRoute_HappyPath(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	c := NewClient(srv.URL, "srv1", "freeradio.app")
+	c := NewClient(srv.URL, "srv1", "example.com")
 	err := c.RemoveRoute(context.Background(), "mystudio")
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
@@ -137,7 +137,7 @@ func TestRemoveRoute_NotFound_Idempotent(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	c := NewClient(srv.URL, "srv1", "freeradio.app")
+	c := NewClient(srv.URL, "srv1", "example.com")
 	err := c.RemoveRoute(context.Background(), "nonexistent")
 	if err != nil {
 		t.Fatalf("expected nil error for 404 (idempotent), got: %v", err)
@@ -151,7 +151,7 @@ func TestRemoveRoute_ServerError(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	c := NewClient(srv.URL, "srv1", "freeradio.app")
+	c := NewClient(srv.URL, "srv1", "example.com")
 	err := c.RemoveRoute(context.Background(), "mystudio")
 	if err == nil {
 		t.Fatal("expected error")
@@ -165,7 +165,7 @@ func TestListRoutes_MultipleRoutes(t *testing.T) {
 	routes := []caddyRoute{
 		{
 			ID:    "tenant_studio1",
-			Match: []caddyMatch{{Host: []string{"studio1.freeradio.app"}}},
+			Match: []caddyMatch{{Host: []string{"studio1.example.com"}}},
 			Handle: []caddyHandler{{
 				Handler:   "reverse_proxy",
 				Upstreams: []caddyUpstream{{Dial: "10.10.10.5:80"}},
@@ -174,7 +174,7 @@ func TestListRoutes_MultipleRoutes(t *testing.T) {
 		},
 		{
 			ID:    "tenant_studio2",
-			Match: []caddyMatch{{Host: []string{"studio2.freeradio.app"}}},
+			Match: []caddyMatch{{Host: []string{"studio2.example.com"}}},
 			Handle: []caddyHandler{{
 				Handler:   "reverse_proxy",
 				Upstreams: []caddyUpstream{{Dial: "10.10.10.6:80"}},
@@ -199,7 +199,7 @@ func TestListRoutes_MultipleRoutes(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	c := NewClient(srv.URL, "srv1", "freeradio.app")
+	c := NewClient(srv.URL, "srv1", "example.com")
 	result, err := c.ListRoutes(context.Background())
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
@@ -224,7 +224,7 @@ func TestListRoutes_Empty(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	c := NewClient(srv.URL, "srv1", "freeradio.app")
+	c := NewClient(srv.URL, "srv1", "example.com")
 	result, err := c.ListRoutes(context.Background())
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
@@ -253,7 +253,7 @@ func TestListRoutes_MixedTenantNonTenant(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	c := NewClient(srv.URL, "srv1", "freeradio.app")
+	c := NewClient(srv.URL, "srv1", "example.com")
 	result, err := c.ListRoutes(context.Background())
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
@@ -273,7 +273,7 @@ func TestListRoutes_ServerError(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	c := NewClient(srv.URL, "srv1", "freeradio.app")
+	c := NewClient(srv.URL, "srv1", "example.com")
 	_, err := c.ListRoutes(context.Background())
 	if err == nil {
 		t.Fatal("expected error")
@@ -290,7 +290,7 @@ func TestUpsertRoute_HappyPath(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	c := NewClient(srv.URL, "srv1", "freeradio.app")
+	c := NewClient(srv.URL, "srv1", "example.com")
 	err := c.UpsertRoute(context.Background(), "mystudio", "10.10.10.5")
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
@@ -320,7 +320,7 @@ func TestUpsertRoute_RouteDidNotExist(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	c := NewClient(srv.URL, "srv1", "freeradio.app")
+	c := NewClient(srv.URL, "srv1", "example.com")
 	err := c.UpsertRoute(context.Background(), "newstudio", "10.10.10.8")
 	if err != nil {
 		t.Fatalf("expected no error when DELETE returns 404, got: %v", err)
@@ -345,7 +345,7 @@ func TestUpsertRoute_DeleteFails(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	c := NewClient(srv.URL, "srv1", "freeradio.app")
+	c := NewClient(srv.URL, "srv1", "example.com")
 	err := c.UpsertRoute(context.Background(), "mystudio", "10.10.10.5")
 	if err == nil {
 		t.Fatal("expected error when DELETE returns 500")
@@ -374,7 +374,7 @@ func TestUpsertRoute_PostFails(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	c := NewClient(srv.URL, "srv1", "freeradio.app")
+	c := NewClient(srv.URL, "srv1", "example.com")
 	err := c.UpsertRoute(context.Background(), "mystudio", "10.10.10.5")
 	if err == nil {
 		t.Fatal("expected error when POST returns 500")
