@@ -12,6 +12,8 @@ import (
 
 	"github.com/go-chi/chi/v5"
 	"github.com/jackc/pgx/v5"
+
+	"controlplane/internal/response"
 )
 
 // --- Mock station store ---
@@ -36,12 +38,26 @@ func (m *mockStationStore) addStation(st *Station) {
 	m.slugIndex[st.Slug] = st
 }
 
-func (m *mockStationStore) ListPublic(_ context.Context) ([]Station, error) {
+func (m *mockStationStore) ListPublic(_ context.Context, _ ListPublicParams) ([]Station, int, error) {
 	var result []Station
 	for _, st := range m.stations {
 		if st.IsPublic {
 			result = append(result, *st)
 		}
+	}
+	return result, len(result), nil
+}
+
+func (m *mockStationStore) ListGenres(_ context.Context) ([]string, error) {
+	genres := map[string]bool{}
+	for _, st := range m.stations {
+		if st.IsPublic && st.Genre != "" {
+			genres[st.Genre] = true
+		}
+	}
+	var result []string
+	for g := range genres {
+		result = append(result, g)
 	}
 	return result, nil
 }
@@ -165,12 +181,12 @@ func TestList_ReturnsEmptyArray(t *testing.T) {
 		t.Errorf("expected 200, got %d: %s", w.Code, w.Body.String())
 	}
 
-	var result []Station
+	var result response.ListResult[Station]
 	if err := json.NewDecoder(w.Body).Decode(&result); err != nil {
 		t.Fatalf("decode: %v", err)
 	}
-	if len(result) != 0 {
-		t.Errorf("expected empty list, got %d", len(result))
+	if len(result.Items) != 0 {
+		t.Errorf("expected empty list, got %d", len(result.Items))
 	}
 }
 
@@ -189,12 +205,12 @@ func TestList_ReturnsPublicOnly(t *testing.T) {
 		t.Fatalf("expected 200, got %d", w.Code)
 	}
 
-	var result []Station
+	var result response.ListResult[Station]
 	if err := json.NewDecoder(w.Body).Decode(&result); err != nil {
 		t.Fatalf("decode: %v", err)
 	}
-	if len(result) != 1 {
-		t.Errorf("expected 1 public station, got %d", len(result))
+	if len(result.Items) != 1 {
+		t.Errorf("expected 1 public station, got %d", len(result.Items))
 	}
 }
 
@@ -232,21 +248,21 @@ func TestList_EnrichedWithPollerData(t *testing.T) {
 		t.Fatalf("expected 200, got %d: %s", w.Code, w.Body.String())
 	}
 
-	var result []Station
+	var result response.ListResult[Station]
 	if err := json.NewDecoder(w.Body).Decode(&result); err != nil {
 		t.Fatalf("decode: %v", err)
 	}
-	if len(result) != 1 {
-		t.Fatalf("expected 1 station, got %d", len(result))
+	if len(result.Items) != 1 {
+		t.Fatalf("expected 1 station, got %d", len(result.Items))
 	}
-	if result[0].ListenersCount != 99 {
-		t.Errorf("listeners_count = %d, want 99", result[0].ListenersCount)
+	if result.Items[0].ListenersCount != 99 {
+		t.Errorf("listeners_count = %d, want 99", result.Items[0].ListenersCount)
 	}
-	if result[0].NowPlaying != "Track A" {
-		t.Errorf("now_playing = %q, want 'Track A'", result[0].NowPlaying)
+	if result.Items[0].NowPlaying != "Track A" {
+		t.Errorf("now_playing = %q, want 'Track A'", result.Items[0].NowPlaying)
 	}
-	if result[0].BPM != 140.0 {
-		t.Errorf("bpm = %f, want 140.0", result[0].BPM)
+	if result.Items[0].BPM != 140.0 {
+		t.Errorf("bpm = %f, want 140.0", result.Items[0].BPM)
 	}
 }
 
@@ -268,13 +284,13 @@ func TestList_NoPollerNoEnrichment(t *testing.T) {
 	w := httptest.NewRecorder()
 	r.ServeHTTP(w, req)
 
-	var result []Station
+	var result response.ListResult[Station]
 	json.NewDecoder(w.Body).Decode(&result)
-	if len(result) != 1 {
-		t.Fatalf("expected 1 station, got %d", len(result))
+	if len(result.Items) != 1 {
+		t.Fatalf("expected 1 station, got %d", len(result.Items))
 	}
-	if result[0].ListenersCount != 0 {
-		t.Errorf("expected 0 listeners without poller, got %d", result[0].ListenersCount)
+	if result.Items[0].ListenersCount != 0 {
+		t.Errorf("expected 0 listeners without poller, got %d", result.Items[0].ListenersCount)
 	}
 }
 

@@ -26,6 +26,15 @@ type Station struct {
 	BPM            float64 `json:"bpm,omitempty"`
 }
 
+// ListPublicParams holds query parameters for listing public stations.
+type ListPublicParams struct {
+	Query  string // search term (ILIKE on name, genre, description)
+	Genre  string // exact genre match
+	Sort   string // "name", "listeners", "online_first", "newest"
+	Limit  int
+	Offset int
+}
+
 type CreateStationRequest struct {
 	Name        string  `json:"name"`
 	Slug        string  `json:"slug"`

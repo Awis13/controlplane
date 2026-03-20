@@ -178,6 +178,7 @@ func New(pool *pgxpool.Pool, cfg *config.Config) (http.Handler, *provisioner.Pro
 
 		// Public (no auth)
 		r.Get("/", stationHandler.List)
+		r.Get("/genres", stationHandler.Genres)
 		r.Get("/{slug}", stationHandler.GetBySlug)
 
 		// Protected (auth required)

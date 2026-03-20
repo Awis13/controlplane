@@ -6,6 +6,7 @@ import (
 	"log/slog"
 	"net/http"
 	"regexp"
+	"sort"
 
 	"github.com/go-chi/chi/v5"
 	"github.com/jackc/pgx/v5"
@@ -17,7 +18,8 @@ import (
 
 // StationStore defines the data operations for stations.
 type StationStore interface {
-	ListPublic(ctx context.Context) ([]Station, error)
+	ListPublic(ctx context.Context, params ListPublicParams) ([]Station, int, error)
+	ListGenres(ctx context.Context) ([]string, error)
 	GetBySlug(ctx context.Context, slug string) (*Station, error)
 	GetByID(ctx context.Context, id string) (*Station, error)
 	Create(ctx context.Context, req CreateStationRequest) (*Station, error)
@@ -54,7 +56,18 @@ func validSlug(s string) bool {
 }
 
 func (h *Handler) List(w http.ResponseWriter, r *http.Request) {
-	stations, err := h.store.ListPublic(r.Context())
+	lp := response.ParseListParams(r)
+	q := r.URL.Query()
+
+	params := ListPublicParams{
+		Query:  q.Get("q"),
+		Genre:  q.Get("genre"),
+		Sort:   q.Get("sort"),
+		Limit:  lp.Limit,
+		Offset: lp.Offset,
+	}
+
+	stations, total, err := h.store.ListPublic(r.Context(), params)
 	if err != nil {
 		slog.Error("list stations", "error", err)
 		response.Error(w, http.StatusInternalServerError, "failed to list stations")
@@ -79,7 +92,32 @@ func (h *Handler) List(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	response.JSON(w, http.StatusOK, stations)
+	// In-memory sort by listeners (requires poller data)
+	if params.Sort == "listeners" {
+		sort.Slice(stations, func(i, j int) bool {
+			return stations[i].ListenersCount > stations[j].ListenersCount
+		})
+	}
+
+	response.JSON(w, http.StatusOK, response.ListResult[Station]{
+		Items:   stations,
+		Total:   total,
+		Limit:   params.Limit,
+		Offset:  params.Offset,
+		HasMore: params.Offset+params.Limit < total,
+	})
+}
+
+func (h *Handler) Genres(w http.ResponseWriter, r *http.Request) {
+	genres, err := h.store.ListGenres(r.Context())
+	if err != nil {
+		response.Error(w, http.StatusInternalServerError, "failed to list genres")
+		return
+	}
+	if genres == nil {
+		genres = []string{}
+	}
+	response.JSON(w, http.StatusOK, genres)
 }
 
 func (h *Handler) GetBySlug(w http.ResponseWriter, r *http.Request) {

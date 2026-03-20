@@ -35,12 +35,50 @@ func scanStation(row pgx.Row) (*Station, error) {
 	return &s, nil
 }
 
-// ListPublic returns public stations ordered by name.
-func (s *Store) ListPublic(ctx context.Context) ([]Station, error) {
-	rows, err := s.pool.Query(ctx,
-		`SELECT `+stationColumns+` FROM stations WHERE is_public = true ORDER BY name`)
+// ListPublic returns public stations with search, filtering, sorting and pagination.
+func (s *Store) ListPublic(ctx context.Context, p ListPublicParams) ([]Station, int, error) {
+	whereClauses := []string{"is_public = true"}
+	args := []any{}
+	argIdx := 1
+
+	if p.Query != "" {
+		whereClauses = append(whereClauses, fmt.Sprintf(
+			"(name ILIKE $%d OR genre ILIKE $%d OR description ILIKE $%d)", argIdx, argIdx, argIdx))
+		args = append(args, "%"+p.Query+"%")
+		argIdx++
+	}
+	if p.Genre != "" {
+		whereClauses = append(whereClauses, fmt.Sprintf("genre = $%d", argIdx))
+		args = append(args, p.Genre)
+		argIdx++
+	}
+
+	where := "WHERE " + strings.Join(whereClauses, " AND ")
+
+	orderBy := "ORDER BY name"
+	switch p.Sort {
+	case "newest":
+		orderBy = "ORDER BY created_at DESC"
+	case "online_first":
+		orderBy = "ORDER BY is_online DESC, name"
+	}
+	// "listeners" sort is done post-query in handler after poller enrichment
+
+	// Count total
+	var total int
+	countQuery := fmt.Sprintf("SELECT COUNT(*) FROM stations %s", where)
+	if err := s.pool.QueryRow(ctx, countQuery, args...).Scan(&total); err != nil {
+		return nil, 0, fmt.Errorf("count public stations: %w", err)
+	}
+
+	// Fetch page
+	args = append(args, p.Limit, p.Offset)
+	query := fmt.Sprintf("SELECT %s FROM stations %s %s LIMIT $%d OFFSET $%d",
+		stationColumns, where, orderBy, argIdx, argIdx+1)
+
+	rows, err := s.pool.Query(ctx, query, args...)
 	if err != nil {
-		return nil, fmt.Errorf("query public stations: %w", err)
+		return nil, 0, fmt.Errorf("query public stations: %w", err)
 	}
 	defer rows.Close()
 
@@ -48,15 +86,35 @@ func (s *Store) ListPublic(ctx context.Context) ([]Station, error) {
 	for rows.Next() {
 		st, err := scanStation(rows)
 		if err != nil {
-			return nil, fmt.Errorf("scan station: %w", err)
+			return nil, 0, fmt.Errorf("scan station: %w", err)
 		}
 		stations = append(stations, *st)
 	}
 	if err := rows.Err(); err != nil {
-		return nil, fmt.Errorf("iterate stations: %w", err)
+		return nil, 0, fmt.Errorf("iterate stations: %w", err)
 	}
 
-	return stations, nil
+	return stations, total, nil
+}
+
+// ListGenres returns distinct genre values from public stations.
+func (s *Store) ListGenres(ctx context.Context) ([]string, error) {
+	rows, err := s.pool.Query(ctx,
+		`SELECT DISTINCT genre FROM stations WHERE is_public = true AND genre != '' ORDER BY genre`)
+	if err != nil {
+		return nil, fmt.Errorf("query genres: %w", err)
+	}
+	defer rows.Close()
+
+	var genres []string
+	for rows.Next() {
+		var g string
+		if err := rows.Scan(&g); err != nil {
+			return nil, fmt.Errorf("scan genre: %w", err)
+		}
+		genres = append(genres, g)
+	}
+	return genres, rows.Err()
 }
 
 // GetBySlug returns a single station by its slug.
