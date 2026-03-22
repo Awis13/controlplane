@@ -177,8 +177,8 @@ func TestSetAuthCookies(t *testing.T) {
 	if !refreshCookie.HttpOnly {
 		t.Error("refresh_token cookie should be HttpOnly")
 	}
-	if refreshCookie.Path != "/api/v1/auth/refresh" {
-		t.Errorf("refresh_token Path = %q, want /api/v1/auth/refresh", refreshCookie.Path)
+	if refreshCookie.Path != "/api/v1/auth/" {
+		t.Errorf("refresh_token Path = %q, want /api/v1/auth/", refreshCookie.Path)
 	}
 	if refreshCookie.SameSite != http.SameSiteStrictMode {
 		t.Errorf("refresh_token SameSite = %v, want Strict", refreshCookie.SameSite)
