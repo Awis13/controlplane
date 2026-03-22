@@ -82,10 +82,11 @@ type Handler struct {
 	tokenStore        *TokenStore
 	jwtSecret         []byte
 	registrationToken string
+	cookieSecure      bool
 	limiter           loginLimiter
 }
 
-func NewHandler(userStore *user.Store, tokenStore *TokenStore, jwtSecret, registrationToken string) *Handler {
+func NewHandler(userStore *user.Store, tokenStore *TokenStore, jwtSecret, registrationToken string, cookieSecure bool) *Handler {
 	if registrationToken != "" {
 		slog.Info("registration gated by REGISTRATION_TOKEN")
 	} else {
@@ -96,6 +97,7 @@ func NewHandler(userStore *user.Store, tokenStore *TokenStore, jwtSecret, regist
 		tokenStore:        tokenStore,
 		jwtSecret:         []byte(jwtSecret),
 		registrationToken: registrationToken,
+		cookieSecure:      cookieSecure,
 	}
 }
 
@@ -196,6 +198,7 @@ func (h *Handler) Register(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	h.setAuthCookies(w, resp.Token, resp.RefreshToken)
 	response.JSON(w, http.StatusCreated, resp)
 }
 
@@ -246,6 +249,7 @@ func (h *Handler) Login(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	h.setAuthCookies(w, resp.Token, resp.RefreshToken)
 	response.JSON(w, http.StatusOK, resp)
 }
 
@@ -254,12 +258,22 @@ func (h *Handler) Refresh(w http.ResponseWriter, r *http.Request) {
 	var req struct {
 		RefreshToken string `json:"refresh_token"`
 	}
-	if err := response.Decode(r, &req); err != nil || req.RefreshToken == "" {
+	// Пробуем прочитать из тела запроса (игнорируем ошибку — тело может быть пустым)
+	_ = response.Decode(r, &req)
+
+	// Fallback: читаем refresh_token из cookie
+	refreshToken := req.RefreshToken
+	if refreshToken == "" {
+		if c, err := r.Cookie("refresh_token"); err == nil {
+			refreshToken = c.Value
+		}
+	}
+	if refreshToken == "" {
 		response.Error(w, http.StatusBadRequest, "refresh_token is required")
 		return
 	}
 
-	tokenHash := HashToken(req.RefreshToken)
+	tokenHash := HashToken(refreshToken)
 
 	userID, err := h.tokenStore.ValidateRefreshToken(r.Context(), tokenHash)
 	if err != nil {
@@ -285,6 +299,7 @@ func (h *Handler) Refresh(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	h.setAuthCookies(w, resp.Token, resp.RefreshToken)
 	response.JSON(w, http.StatusOK, resp)
 }
 
@@ -299,6 +314,12 @@ func (h *Handler) Logout(w http.ResponseWriter, r *http.Request) {
 	// Extract jti from current access token and revoke it
 	authHeader := r.Header.Get("Authorization")
 	tokenStr := strings.TrimPrefix(authHeader, "Bearer ")
+	if tokenStr == "" || tokenStr == authHeader {
+		// Fallback: читаем из cookie
+		if c, err := r.Cookie("access_token"); err == nil {
+			tokenStr = c.Value
+		}
+	}
 
 	token, err := jwt.Parse(tokenStr, func(t *jwt.Token) (any, error) {
 		return h.jwtSecret, nil
@@ -315,17 +336,25 @@ func (h *Handler) Logout(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	// Also revoke the refresh token if provided
+	// Also revoke the refresh token if provided (body or cookie)
 	var req struct {
 		RefreshToken string `json:"refresh_token"`
 	}
-	if err := response.Decode(r, &req); err == nil && req.RefreshToken != "" {
-		tokenHash := HashToken(req.RefreshToken)
+	_ = response.Decode(r, &req)
+	refreshTokenValue := req.RefreshToken
+	if refreshTokenValue == "" {
+		if c, err := r.Cookie("refresh_token"); err == nil {
+			refreshTokenValue = c.Value
+		}
+	}
+	if refreshTokenValue != "" {
+		tokenHash := HashToken(refreshTokenValue)
 		if err := h.tokenStore.RevokeRefreshToken(r.Context(), tokenHash); err != nil {
 			slog.Error("revoke refresh token on logout", "error", err)
 		}
 	}
 
+	h.clearAuthCookies(w)
 	response.JSON(w, http.StatusOK, map[string]string{"status": "logged out"})
 }
 
@@ -389,6 +418,7 @@ func (h *Handler) ChangePassword(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	h.setAuthCookies(w, resp.Token, resp.RefreshToken)
 	response.JSON(w, http.StatusOK, resp)
 }
 
@@ -426,6 +456,48 @@ func (h *Handler) issueTokenPair(ctx context.Context, u *user.User) (*authRespon
 		ExpiresIn:    int(accessTokenExpiration.Seconds()),
 		User:         toUserView(u),
 	}, nil
+}
+
+// setAuthCookies sets httpOnly cookies for access and refresh tokens.
+func (h *Handler) setAuthCookies(w http.ResponseWriter, accessToken, refreshToken string) {
+	http.SetCookie(w, &http.Cookie{
+		Name:     "access_token",
+		Value:    accessToken,
+		Path:     "/",
+		HttpOnly: true,
+		Secure:   h.cookieSecure,
+		SameSite: http.SameSiteLaxMode,
+		MaxAge:   int(accessTokenExpiration.Seconds()), // 15 минут
+	})
+	http.SetCookie(w, &http.Cookie{
+		Name:     "refresh_token",
+		Value:    refreshToken,
+		Path:     "/api/v1/auth/refresh",
+		HttpOnly: true,
+		Secure:   h.cookieSecure,
+		SameSite: http.SameSiteStrictMode,
+		MaxAge:   int(refreshTokenExpiry.Seconds()), // 30 дней
+	})
+}
+
+// clearAuthCookies removes auth cookies by setting MaxAge=-1.
+func (h *Handler) clearAuthCookies(w http.ResponseWriter) {
+	http.SetCookie(w, &http.Cookie{
+		Name:     "access_token",
+		Value:    "",
+		Path:     "/",
+		MaxAge:   -1,
+		HttpOnly: true,
+		Secure:   h.cookieSecure,
+	})
+	http.SetCookie(w, &http.Cookie{
+		Name:     "refresh_token",
+		Value:    "",
+		Path:     "/api/v1/auth/refresh",
+		MaxAge:   -1,
+		HttpOnly: true,
+		Secure:   h.cookieSecure,
+	})
 }
 
 func (h *Handler) generateAccessToken(u *user.User) (string, error) {

@@ -24,18 +24,19 @@ func JWTAuth(userStore *user.Store, tokenStore *TokenStore, jwtSecret string) fu
 
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			// Приоритет: Authorization header → access_token cookie
+			var tokenStr string
 			authHeader := r.Header.Get("Authorization")
-			if authHeader == "" {
-				response.Error(w, http.StatusUnauthorized, "missing authorization header")
-				return
+			if strings.HasPrefix(authHeader, "Bearer ") {
+				tokenStr = strings.TrimPrefix(authHeader, "Bearer ")
+			} else if c, err := r.Cookie("access_token"); err == nil && c.Value != "" {
+				tokenStr = c.Value
 			}
 
-			if !strings.HasPrefix(authHeader, "Bearer ") {
-				response.Error(w, http.StatusUnauthorized, "invalid authorization header format")
+			if tokenStr == "" {
+				response.Error(w, http.StatusUnauthorized, "missing authorization")
 				return
 			}
-
-			tokenStr := strings.TrimPrefix(authHeader, "Bearer ")
 
 			token, err := jwt.Parse(tokenStr, func(t *jwt.Token) (any, error) {
 				if _, ok := t.Method.(*jwt.SigningMethodHMAC); !ok {

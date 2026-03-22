@@ -45,10 +45,11 @@ func New(pool *pgxpool.Pool, cfg *config.Config) (http.Handler, *provisioner.Pro
 	r.Use(middleware.Logger)
 	r.Use(middleware.Recoverer)
 	r.Use(cors.New(cors.Options{
-		AllowedOrigins: cfg.CORSOrigins,
-		AllowedMethods: []string{"GET", "POST", "PUT", "DELETE", "OPTIONS"},
-		AllowedHeaders: []string{"Authorization", "Content-Type"},
-		MaxAge:         300,
+		AllowedOrigins:   cfg.CORSOrigins,
+		AllowedMethods:   []string{"GET", "POST", "PUT", "DELETE", "OPTIONS"},
+		AllowedHeaders:   []string{"Authorization", "Content-Type"},
+		AllowCredentials: true,
+		MaxAge:           300,
 	}).Handler)
 	r.Use(securityHeaders)
 
@@ -193,7 +194,7 @@ func New(pool *pgxpool.Pool, cfg *config.Config) (http.Handler, *provisioner.Pro
 
 	// User auth (JWT-based, separate from admin WebAuthn and API Bearer token)
 	tokenStore := auth.NewTokenStore(pool)
-	authHandler := auth.NewHandler(userStore, tokenStore, cfg.JWTSecret, cfg.RegistrationToken)
+	authHandler := auth.NewHandler(userStore, tokenStore, cfg.JWTSecret, cfg.RegistrationToken, cfg.CookieSecure)
 	r.Route("/api/v1/auth", func(r chi.Router) {
 		r.Use(httprate.LimitByIP(10, time.Minute))
 		r.Post("/register", authHandler.Register)
