@@ -19,6 +19,7 @@ type Config struct {
 	SetupToken        string   // optional: required for first WebAuthn registration
 	JWTSecret         string   // required: HMAC-SHA256 secret for user JWT tokens
 	RegistrationToken string   // optional: if set, registration requires X-Registration-Token header
+	CookieSecure      bool     // optional: Secure flag on auth cookies (default: true, false for local dev)
 	CORSOrigins    []string // optional: allowed CORS origins (default: localhost dev ports)
 	WGHubPublicKey  string // optional: WireGuard hub public key
 	WGHubEndpoint   string // optional: WireGuard hub endpoint (host:port)
@@ -69,6 +70,7 @@ func Load() (*Config, error) {
 		JWTSecret:      jwtSecret,
 		CORSOrigins:    corsOrigins,
 		RegistrationToken: os.Getenv("REGISTRATION_TOKEN"),
+		CookieSecure:      parseBool("COOKIE_SECURE", true),
 		WGHubPublicKey:  os.Getenv("WG_HUB_PUBLIC_KEY"),
 		WGHubEndpoint:   os.Getenv("WG_HUB_ENDPOINT"),
 		WGNetworkCIDR:   getEnv("WG_NETWORK_CIDR", "10.10.0.0/24"),
@@ -138,6 +140,23 @@ func parseDuration(key string, fallback time.Duration) time.Duration {
 		return time.Duration(sec) * time.Second
 	}
 
+	return fallback
+}
+
+// parseBool reads a boolean env var with a default value.
+// Accepts "true", "1", "yes" as true; anything else (or unset) uses the default.
+func parseBool(key string, fallback bool) bool {
+	v := os.Getenv(key)
+	if v == "" {
+		return fallback
+	}
+	v = strings.ToLower(strings.TrimSpace(v))
+	switch v {
+	case "true", "1", "yes":
+		return true
+	case "false", "0", "no":
+		return false
+	}
 	return fallback
 }
 
