@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -1519,6 +1520,219 @@ func TestProvision_MountPointsViaSSH_PctSetError(t *testing.T) {
 	defer mockClient.mu.Unlock()
 	if !mockClient.deleteCalled {
 		t.Error("expected delete to be called for cleanup")
+	}
+}
+
+// --- Auto-deploy freeRadio tests ---
+
+// mockSSHExecWithDeployCalls tracks ExecInContainer calls and can fail on N-th call.
+type mockSSHExecWithDeployCalls struct {
+	mu              sync.Mutex
+	execInCtrCalls  []sshExecCall
+	execOnHostCalls []sshExecCall
+	execOnHostErr   error
+	// failOnExecInCtr: номер вызова ExecInContainer (1-based), на котором вернуть ошибку. 0 = не фейлить.
+	failOnExecInCtr int
+	failErr         error
+}
+
+func (m *mockSSHExecWithDeployCalls) ExecOnHost(_ context.Context, sshHost string, command string) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.execOnHostCalls = append(m.execOnHostCalls, sshExecCall{SSHHost: sshHost, Command: command})
+	return m.execOnHostErr
+}
+
+func (m *mockSSHExecWithDeployCalls) ExecInContainer(_ context.Context, sshHost string, vmid int, command string) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.execInCtrCalls = append(m.execInCtrCalls, sshExecCall{SSHHost: sshHost, VMID: vmid, Command: command})
+	if m.failOnExecInCtr > 0 && len(m.execInCtrCalls) == m.failOnExecInCtr {
+		return m.failErr
+	}
+	return nil
+}
+
+// testProjectNoHealth возвращает проект без health check, чтобы тесты не ждали 60 секунд.
+func testProjectNoHealth() *project.Project {
+	p := testProject()
+	p.HealthPath = ""
+	p.Ports = nil
+	return p
+}
+
+func TestProvision_AutoDeploy_HappyPath(t *testing.T) {
+	nodeStore := newMockNodeStore()
+	tenantStore := newMockTenantStore()
+	projectStore := newMockProjectStore()
+
+	proj := testProjectNoHealth()
+	n := testNode()
+	projectStore.projects[proj.ID] = proj
+	nodeStore.nodes[n.ID] = n
+
+	mockClient := &mockProxmoxClient{nextID: 105}
+	p := setupProvisioner(nodeStore, tenantStore, projectStore, mockClient, n.ID)
+
+	ssh := &mockSSHExecWithDeployCalls{}
+	p.WithSSHClient(ssh)
+	p.WithFreeRadioRepo("https://github.com/Awis13/freeRadio.git")
+
+	waitForProvision(p, "tenant-1", n.ID, proj.ID, "myapp", proj.RAMMB)
+
+	tenantStore.mu.Lock()
+	status := tenantStore.statuses["tenant-1"]
+	tenantStore.mu.Unlock()
+
+	if status != "active" {
+		t.Fatalf("expected tenant status 'active', got %q", status)
+	}
+
+	ssh.mu.Lock()
+	defer ssh.mu.Unlock()
+
+	// Ожидаем 5 вызовов deploy (docker install, clone, .env, compose up, health) +
+	// 1 вызов для legacy dashboard token write НЕ должен быть (freeRadioRepoURL задан)
+	// Но ещё есть вызов sed для dashboard token в legacy path — он пропускается, т.к. freeRadioRepoURL != ""
+	// Итого ExecInContainer: 5 вызовов от deployFreeRadio
+	if len(ssh.execInCtrCalls) != 5 {
+		t.Fatalf("expected 5 ExecInContainer calls for deploy, got %d", len(ssh.execInCtrCalls))
+	}
+
+	// Проверяем порядок команд
+	calls := ssh.execInCtrCalls
+
+	// Шаг 1: install docker
+	if calls[0].Command != "which docker || (curl -fsSL https://get.docker.com | sh)" {
+		t.Errorf("step 1: unexpected command: %s", calls[0].Command)
+	}
+
+	// Шаг 2: clone repo
+	if calls[1].Command != "mkdir -p /root/freeRadio && git clone https://github.com/Awis13/freeRadio.git /root/freeRadio 2>&1 || (cd /root/freeRadio && git pull origin master)" {
+		t.Errorf("step 2: unexpected command: %s", calls[1].Command)
+	}
+
+	// Шаг 3: write .env — содержит TENANT_ID и DASHBOARD_TOKEN
+	if !strings.Contains(calls[2].Command, "TENANT_ID=tenant-1") {
+		t.Errorf("step 3: .env should contain TENANT_ID, got: %s", calls[2].Command)
+	}
+	if !strings.Contains(calls[2].Command, "DASHBOARD_TOKEN=") {
+		t.Errorf("step 3: .env should contain DASHBOARD_TOKEN, got: %s", calls[2].Command)
+	}
+
+	// Шаг 4: docker compose up
+	if calls[3].Command != "cd /root/freeRadio && docker compose up -d" {
+		t.Errorf("step 4: unexpected command: %s", calls[3].Command)
+	}
+
+	// Шаг 5: health check
+	if !strings.Contains(calls[4].Command, "curl -s http://127.0.0.1:9090/api/status") {
+		t.Errorf("step 5: unexpected command: %s", calls[4].Command)
+	}
+
+	// Все команды должны быть к правильному LXC
+	for i, c := range calls {
+		if c.VMID != 105 {
+			t.Errorf("call %d: expected VMID 105, got %d", i, c.VMID)
+		}
+	}
+}
+
+func TestProvision_AutoDeploy_Failure_DoesNotFailProvisioning(t *testing.T) {
+	nodeStore := newMockNodeStore()
+	tenantStore := newMockTenantStore()
+	projectStore := newMockProjectStore()
+
+	proj := testProjectNoHealth()
+	n := testNode()
+	projectStore.projects[proj.ID] = proj
+	nodeStore.nodes[n.ID] = n
+
+	mockClient := &mockProxmoxClient{nextID: 105}
+	p := setupProvisioner(nodeStore, tenantStore, projectStore, mockClient, n.ID)
+
+	// SSH, который сфейлит на первом ExecInContainer (install docker)
+	ssh := &mockSSHExecWithDeployCalls{
+		failOnExecInCtr: 1,
+		failErr:         fmt.Errorf("docker install failed"),
+	}
+	p.WithSSHClient(ssh)
+	p.WithFreeRadioRepo("https://github.com/Awis13/freeRadio.git")
+
+	waitForProvision(p, "tenant-1", n.ID, proj.ID, "myapp", proj.RAMMB)
+
+	tenantStore.mu.Lock()
+	defer tenantStore.mu.Unlock()
+
+	// Тенант всё равно должен быть active — деплой best-effort
+	if tenantStore.statuses["tenant-1"] != "active" {
+		t.Errorf("expected tenant status 'active' despite deploy failure, got %q", tenantStore.statuses["tenant-1"])
+	}
+}
+
+func TestProvision_AutoDeploy_SkippedWithoutSSH(t *testing.T) {
+	nodeStore := newMockNodeStore()
+	tenantStore := newMockTenantStore()
+	projectStore := newMockProjectStore()
+
+	proj := testProjectNoHealth()
+	n := testNode()
+	projectStore.projects[proj.ID] = proj
+	nodeStore.nodes[n.ID] = n
+
+	mockClient := &mockProxmoxClient{nextID: 105}
+	p := setupProvisioner(nodeStore, tenantStore, projectStore, mockClient, n.ID)
+
+	// Только WithFreeRadioRepo, без WithSSHClient — деплой должен пропуститься
+	p.WithFreeRadioRepo("https://github.com/Awis13/freeRadio.git")
+
+	waitForProvision(p, "tenant-1", n.ID, proj.ID, "myapp", proj.RAMMB)
+
+	tenantStore.mu.Lock()
+	defer tenantStore.mu.Unlock()
+
+	if tenantStore.statuses["tenant-1"] != "active" {
+		t.Errorf("expected tenant status 'active', got %q", tenantStore.statuses["tenant-1"])
+	}
+}
+
+func TestProvision_AutoDeploy_ComposeUpFailure(t *testing.T) {
+	nodeStore := newMockNodeStore()
+	tenantStore := newMockTenantStore()
+	projectStore := newMockProjectStore()
+
+	proj := testProjectNoHealth()
+	n := testNode()
+	projectStore.projects[proj.ID] = proj
+	nodeStore.nodes[n.ID] = n
+
+	mockClient := &mockProxmoxClient{nextID: 105}
+	p := setupProvisioner(nodeStore, tenantStore, projectStore, mockClient, n.ID)
+
+	// Фейлим на 4-м вызове (docker compose up)
+	ssh := &mockSSHExecWithDeployCalls{
+		failOnExecInCtr: 4,
+		failErr:         fmt.Errorf("docker compose up: exit status 1"),
+	}
+	p.WithSSHClient(ssh)
+	p.WithFreeRadioRepo("https://github.com/Awis13/freeRadio.git")
+
+	waitForProvision(p, "tenant-1", n.ID, proj.ID, "myapp", proj.RAMMB)
+
+	tenantStore.mu.Lock()
+	defer tenantStore.mu.Unlock()
+
+	// Тенант active — деплой best-effort
+	if tenantStore.statuses["tenant-1"] != "active" {
+		t.Errorf("expected tenant status 'active' despite compose failure, got %q", tenantStore.statuses["tenant-1"])
+	}
+
+	ssh.mu.Lock()
+	defer ssh.mu.Unlock()
+
+	// Должно быть ровно 4 вызова — после фейла compose up остальные не выполняются
+	if len(ssh.execInCtrCalls) != 4 {
+		t.Errorf("expected 4 ExecInContainer calls (stopped at compose up), got %d", len(ssh.execInCtrCalls))
 	}
 }
 
