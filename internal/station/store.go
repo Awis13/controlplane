@@ -248,6 +248,16 @@ func (s *Store) SetOnline(ctx context.Context, tenantID string, online bool) err
 	return nil
 }
 
+// CountByTenantID returns the number of stations belonging to a tenant.
+func (s *Store) CountByTenantID(ctx context.Context, tenantID string) (int, error) {
+	var count int
+	err := s.pool.QueryRow(ctx, `SELECT COUNT(*) FROM stations WHERE tenant_id = $1`, tenantID).Scan(&count)
+	if err != nil {
+		return 0, fmt.Errorf("count stations by tenant: %w", err)
+	}
+	return count, nil
+}
+
 // Delete removes a station by ID.
 func (s *Store) Delete(ctx context.Context, id string) error {
 	tag, err := s.pool.Exec(ctx, `DELETE FROM stations WHERE id = $1`, id)

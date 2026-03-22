@@ -3,6 +3,7 @@ package station
 import (
 	"context"
 	"errors"
+	"fmt"
 	"log/slog"
 	"net/http"
 	"regexp"
@@ -13,6 +14,7 @@ import (
 	"github.com/jackc/pgx/v5/pgconn"
 
 	"controlplane/internal/audit"
+	"controlplane/internal/billing"
 	"controlplane/internal/response"
 )
 
@@ -25,6 +27,12 @@ type StationStore interface {
 	Create(ctx context.Context, req CreateStationRequest) (*Station, error)
 	Update(ctx context.Context, id string, req UpdateStationRequest) (*Station, error)
 	Delete(ctx context.Context, id string) error
+	CountByTenantID(ctx context.Context, tenantID string) (int, error)
+}
+
+// TenantProvider provides tenant lookup for tier enforcement.
+type TenantProvider interface {
+	GetTier(ctx context.Context, tenantID string) (string, error)
 }
 
 // StatusProvider provides live station status (implemented by Poller).
@@ -36,13 +44,19 @@ var slugRegexp = regexp.MustCompile(`^[a-z0-9][a-z0-9-]*[a-z0-9]$`)
 
 // Handler handles station HTTP requests.
 type Handler struct {
-	store      StationStore
-	auditStore *audit.Store
-	poller     StatusProvider // optional: enriches List/Get with live data
+	store          StationStore
+	auditStore     *audit.Store
+	poller         StatusProvider // optional: enriches List/Get with live data
+	tenantProvider TenantProvider // optional: tier enforcement on create
 }
 
 func NewHandler(store StationStore, auditStore *audit.Store) *Handler {
 	return &Handler{store: store, auditStore: auditStore}
+}
+
+// WithTenantProvider sets the tenant provider for tier enforcement.
+func (h *Handler) WithTenantProvider(tp TenantProvider) {
+	h.tenantProvider = tp
 }
 
 // WithPoller sets the status provider for live enrichment.
@@ -178,6 +192,35 @@ func (h *Handler) Create(w http.ResponseWriter, r *http.Request) {
 	if req.OwnerID != nil && !response.ValidUUID(*req.OwnerID) {
 		response.Error(w, http.StatusBadRequest, "invalid owner_id format")
 		return
+	}
+
+	// Enforce tier station limits.
+	// NOTE: между COUNT и INSERT есть теоретическая гонка (TOCTOU), но для
+	// single-user tenants вероятность крайне мала. Уникальный constraint на slug
+	// (23505) ловится ниже как дополнительная защита.
+	if h.tenantProvider != nil && req.TenantID == nil {
+		response.Error(w, http.StatusBadRequest, "tenant_id is required")
+		return
+	}
+	if req.TenantID != nil && h.tenantProvider != nil {
+		tier, err := h.tenantProvider.GetTier(r.Context(), *req.TenantID)
+		if err != nil {
+			slog.Error("get tenant tier for enforcement", "error", err, "tenant_id", *req.TenantID)
+			response.Error(w, http.StatusInternalServerError, "failed to check tier limits")
+			return
+		}
+		limits := billing.GetLimits(tier)
+		count, err := h.store.CountByTenantID(r.Context(), *req.TenantID)
+		if err != nil {
+			slog.Error("count stations for enforcement", "error", err, "tenant_id", *req.TenantID)
+			response.Error(w, http.StatusInternalServerError, "failed to check station count")
+			return
+		}
+		if count >= limits.MaxStations {
+			response.Error(w, http.StatusForbidden,
+				fmt.Sprintf("station limit reached for tier %s (max %d)", tier, limits.MaxStations))
+			return
+		}
 	}
 
 	st, err := h.store.Create(r.Context(), req)

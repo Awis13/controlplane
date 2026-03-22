@@ -173,6 +173,7 @@ func New(pool *pgxpool.Pool, cfg *config.Config) (http.Handler, *provisioner.Pro
 	// Stations — public read endpoints (no auth)
 	stationHandler := station.NewHandler(stationStore, auditStore)
 	stationHandler.WithPoller(poller)
+	stationHandler.WithTenantProvider(&stationTenantProviderAdapter{store: tenantStore})
 	r.Route("/api/v1/stations", func(r chi.Router) {
 		r.Use(httprate.LimitByIP(100, time.Minute))
 
@@ -371,6 +372,26 @@ func (a *billingTenantStoreAdapter) GetByOwnerID(ctx context.Context, ownerID st
 		}
 	}
 	return result, nil
+}
+
+// stationTenantProviderAdapter wraps *tenant.Store to satisfy station.TenantProvider
+// for tier enforcement in station creation.
+type stationTenantProviderAdapter struct {
+	store *tenant.Store
+}
+
+func (a *stationTenantProviderAdapter) GetTier(ctx context.Context, tenantID string) (string, error) {
+	t, err := a.store.GetByID(ctx, tenantID)
+	if err != nil {
+		return "", err
+	}
+	if t == nil {
+		return "", fmt.Errorf("tenant %s not found", tenantID)
+	}
+	if t.Tier == "" {
+		return "free", nil
+	}
+	return t.Tier, nil
 }
 
 // bearerAuth returns middleware that validates Authorization: Bearer <token> header.

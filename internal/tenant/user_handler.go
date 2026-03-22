@@ -17,6 +17,7 @@ import (
 
 	"controlplane/internal/audit"
 	"controlplane/internal/auth"
+	"controlplane/internal/billing"
 	"controlplane/internal/node"
 	"controlplane/internal/project"
 	"controlplane/internal/response"
@@ -33,6 +34,7 @@ type UserTenantStore interface {
 	TenantStore
 	CreateWithOwner(ctx context.Context, req CreateTenantRequest, ownerID string) (*Tenant, error)
 	ListByOwnerID(ctx context.Context, ownerID string) ([]Tenant, error)
+	CountByOwnerID(ctx context.Context, ownerID string) (int, error)
 }
 
 // UserProjectStore extends ProjectStore with default selection.
@@ -156,6 +158,36 @@ func (h *UserHandler) Create(w http.ResponseWriter, r *http.Request) {
 	}
 	if reservedSubdomains[req.Subdomain] {
 		response.Error(w, http.StatusBadRequest, "subdomain is reserved")
+		return
+	}
+
+	// Enforce tenant creation limits based on tier.
+	// NOTE: между COUNT и INSERT есть теоретическая гонка (TOCTOU), но для
+	// single-user операций вероятность крайне мала. Unique constraint на subdomain
+	// (23505) ловится ниже как дополнительная защита.
+	currentCount, err := h.store.CountByOwnerID(r.Context(), u.ID.String())
+	if err != nil {
+		slog.Error("count tenants for enforcement", "error", err, "user_id", u.ID)
+		response.Error(w, http.StatusInternalServerError, "failed to check tenant limits")
+		return
+	}
+	// Determine the max tenant count from the highest tier among existing tenants (default: free).
+	maxTenants := billing.GetLimits(billing.TierFree).MaxTenants
+	existingTenants, err := h.store.ListByOwnerID(r.Context(), u.ID.String())
+	if err != nil {
+		slog.Error("list tenants for tier check", "error", err, "user_id", u.ID)
+		response.Error(w, http.StatusInternalServerError, "failed to check tenant limits")
+		return
+	}
+	for _, t := range existingTenants {
+		limits := billing.GetLimits(t.Tier)
+		if limits.MaxTenants > maxTenants {
+			maxTenants = limits.MaxTenants
+		}
+	}
+	if currentCount >= maxTenants {
+		response.Error(w, http.StatusForbidden,
+			fmt.Sprintf("tenant limit reached (max %d)", maxTenants))
 		return
 	}
 
