@@ -194,7 +194,14 @@ func (h *Handler) Create(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Enforce tier station limits
+	// Enforce tier station limits.
+	// NOTE: между COUNT и INSERT есть теоретическая гонка (TOCTOU), но для
+	// single-user tenants вероятность крайне мала. Уникальный constraint на slug
+	// (23505) ловится ниже как дополнительная защита.
+	if h.tenantProvider != nil && req.TenantID == nil {
+		response.Error(w, http.StatusBadRequest, "tenant_id is required")
+		return
+	}
 	if req.TenantID != nil && h.tenantProvider != nil {
 		tier, err := h.tenantProvider.GetTier(r.Context(), *req.TenantID)
 		if err != nil {

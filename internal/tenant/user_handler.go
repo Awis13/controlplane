@@ -161,16 +161,18 @@ func (h *UserHandler) Create(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Enforce tenant creation limits based on tier
+	// Enforce tenant creation limits based on tier.
+	// NOTE: между COUNT и INSERT есть теоретическая гонка (TOCTOU), но для
+	// single-user операций вероятность крайне мала. Unique constraint на subdomain
+	// (23505) ловится ниже как дополнительная защита.
 	currentCount, err := h.store.CountByOwnerID(r.Context(), u.ID.String())
 	if err != nil {
 		slog.Error("count tenants for enforcement", "error", err, "user_id", u.ID)
 		response.Error(w, http.StatusInternalServerError, "failed to check tenant limits")
 		return
 	}
-	// For now, all users start on free tier; determine the max from
-	// the highest tier among their existing tenants (default: free).
-	maxTenants := billing.GetLimits(billing.TierFree).MaxStations
+	// Determine the max tenant count from the highest tier among existing tenants (default: free).
+	maxTenants := billing.GetLimits(billing.TierFree).MaxTenants
 	existingTenants, err := h.store.ListByOwnerID(r.Context(), u.ID.String())
 	if err != nil {
 		slog.Error("list tenants for tier check", "error", err, "user_id", u.ID)
@@ -179,8 +181,8 @@ func (h *UserHandler) Create(w http.ResponseWriter, r *http.Request) {
 	}
 	for _, t := range existingTenants {
 		limits := billing.GetLimits(t.Tier)
-		if limits.MaxStations > maxTenants {
-			maxTenants = limits.MaxStations
+		if limits.MaxTenants > maxTenants {
+			maxTenants = limits.MaxTenants
 		}
 	}
 	if currentCount >= maxTenants {

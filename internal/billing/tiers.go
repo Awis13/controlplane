@@ -3,6 +3,7 @@ package billing
 // TierLimits defines resource limits for each billing tier.
 type TierLimits struct {
 	MaxStations    int    `json:"max_stations"`
+	MaxTenants     int    `json:"max_tenants"`     // max tenants per user
 	MaxPlatforms   int    `json:"max_platforms"`   // restream destinations per station
 	MaxQuality     string `json:"max_quality"`     // "720p", "1080p", "4k"
 	Watermark      bool   `json:"watermark"`
@@ -32,6 +33,7 @@ var ValidTiers = map[string]bool{
 var tierLimits = map[string]TierLimits{
 	TierFree: {
 		MaxStations:    1,
+		MaxTenants:     1,
 		MaxPlatforms:   1,
 		MaxQuality:     "720p",
 		Watermark:      true,
@@ -42,6 +44,7 @@ var tierLimits = map[string]TierLimits{
 	},
 	TierStarter: {
 		MaxStations:    1,
+		MaxTenants:     1,
 		MaxPlatforms:   1,
 		MaxQuality:     "720p",
 		Watermark:      false,
@@ -52,6 +55,7 @@ var tierLimits = map[string]TierLimits{
 	},
 	TierPro: {
 		MaxStations:    1,
+		MaxTenants:     2,
 		MaxPlatforms:   3,
 		MaxQuality:     "1080p",
 		Watermark:      false,
@@ -62,6 +66,7 @@ var tierLimits = map[string]TierLimits{
 	},
 	TierStudio: {
 		MaxStations:    3,
+		MaxTenants:     3,
 		MaxPlatforms:   3,
 		MaxQuality:     "4k",
 		Watermark:      false,

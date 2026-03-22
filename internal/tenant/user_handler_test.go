@@ -935,7 +935,7 @@ func TestUserCreate_SecondTenantStudioTierAllowed(t *testing.T) {
 	ps.defaultProject = testProjectObj()
 
 	ownerID := testUserID.String()
-	// User has 1 tenant on studio tier (max 3 stations, so max 3 tenants)
+	// User has 1 tenant on studio tier (MaxTenants: 3)
 	ts.ownerCounts[ownerID] = 1
 	ts.ownerTenants[ownerID] = []Tenant{
 		{ID: "t1", Name: "Studio Radio", OwnerID: &ownerID, Tier: "studio", Status: "active"},

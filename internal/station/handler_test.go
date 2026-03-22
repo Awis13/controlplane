@@ -748,12 +748,34 @@ func TestCreate_AfterTierUpgrade(t *testing.T) {
 	}
 }
 
-func TestCreate_NoTenantID_SkipsEnforcement(t *testing.T) {
+func TestCreate_NoTenantID_ReturnsBadRequest(t *testing.T) {
 	store := newMockStationStore()
 	tp := &mockTenantProvider{tiers: map[string]string{}}
 
 	h := NewHandler(store, nil)
 	h.WithTenantProvider(tp)
+	r := stationRouter(h)
+
+	body, _ := json.Marshal(CreateStationRequest{
+		Name:     "Free Radio",
+		Slug:     "free-radio",
+		Genre:    "house",
+		IsPublic: true,
+	})
+	req := httptest.NewRequest("POST", "/stations", bytes.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	r.ServeHTTP(w, req)
+
+	if w.Code != http.StatusBadRequest {
+		t.Errorf("expected 400, got %d: %s", w.Code, w.Body.String())
+	}
+}
+
+func TestCreate_NoTenantID_NoProviderAllowed(t *testing.T) {
+	// Когда tenantProvider не настроен, создание без tenant_id допустимо
+	store := newMockStationStore()
+	h := NewHandler(store, nil) // без tenantProvider
 	r := stationRouter(h)
 
 	body, _ := json.Marshal(CreateStationRequest{
