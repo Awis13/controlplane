@@ -1608,7 +1608,7 @@ func TestProvision_AutoDeploy_HappyPath(t *testing.T) {
 	}
 
 	// Шаг 2: clone repo
-	if calls[1].Command != "mkdir -p /root/freeRadio && cd /root/freeRadio && git clone https://github.com/Awis13/freeRadio.git . 2>/dev/null || git pull origin master" {
+	if calls[1].Command != "mkdir -p /root/freeRadio && git clone https://github.com/Awis13/freeRadio.git /root/freeRadio 2>&1 || (cd /root/freeRadio && git pull origin master)" {
 		t.Errorf("step 2: unexpected command: %s", calls[1].Command)
 	}
 

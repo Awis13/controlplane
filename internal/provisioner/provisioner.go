@@ -459,7 +459,7 @@ func (p *Provisioner) doProvision(tenantID, nodeID, projectID, subdomain string,
 		if sshHost, err := sshexec.ExtractHost(nodeInfo.ProxmoxURL); err != nil {
 			log.Error("provision: extract ssh host for deploy", "error", err)
 		} else {
-			if err := p.deployFreeRadio(ctx, sshHost, newID, tenantID, subdomain, dashToken, lxcIP); err != nil {
+			if err := p.deployFreeRadio(ctx, sshHost, newID, tenantID, dashToken); err != nil {
 				log.Error("provision: auto-deploy freeRadio failed", "error", err)
 				// Best-effort: тенант уже active, деплой можно повторить вручную
 			}
@@ -686,7 +686,7 @@ func (p *Provisioner) cleanupAndError(ctx context.Context, client ProxmoxClient,
 
 // deployFreeRadio клонирует репо, пишет .env и запускает Docker-сервисы внутри LXC.
 // Best-effort: ошибки логируются, но не прерывают провижининг.
-func (p *Provisioner) deployFreeRadio(ctx context.Context, sshHost string, lxcID int, tenantID, subdomain, dashboardToken, lxcIP string) error {
+func (p *Provisioner) deployFreeRadio(ctx context.Context, sshHost string, lxcID int, tenantID, dashboardToken string) error {
 	log := slog.With("tenant_id", tenantID, "lxc_id", lxcID)
 
 	repoURL := p.freeRadioRepoURL
@@ -703,7 +703,7 @@ func (p *Provisioner) deployFreeRadio(ctx context.Context, sshHost string, lxcID
 
 	// Шаг 2: Клонирование репо
 	log.Info("provision: deploy — cloning freeRadio repo", "repo_url", repoURL)
-	cloneCmd := fmt.Sprintf("mkdir -p /root/freeRadio && cd /root/freeRadio && git clone %s . 2>/dev/null || git pull origin master", repoURL)
+	cloneCmd := fmt.Sprintf("mkdir -p /root/freeRadio && git clone %s /root/freeRadio 2>&1 || (cd /root/freeRadio && git pull origin master)", repoURL)
 	if err := p.sshClient.ExecInContainer(ctx, sshHost, lxcID, cloneCmd); err != nil {
 		return fmt.Errorf("clone repo: %w", err)
 	}
