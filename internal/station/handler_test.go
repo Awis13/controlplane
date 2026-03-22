@@ -19,17 +19,19 @@ import (
 // --- Mock station store ---
 
 type mockStationStore struct {
-	stations  map[string]*Station
-	slugIndex map[string]*Station
-	createErr error
-	updateErr error
-	deleteErr error
+	stations      map[string]*Station
+	slugIndex     map[string]*Station
+	tenantCounts  map[string]int
+	createErr     error
+	updateErr     error
+	deleteErr     error
 }
 
 func newMockStationStore() *mockStationStore {
 	return &mockStationStore{
-		stations:  make(map[string]*Station),
-		slugIndex: make(map[string]*Station),
+		stations:     make(map[string]*Station),
+		slugIndex:    make(map[string]*Station),
+		tenantCounts: make(map[string]int),
 	}
 }
 
@@ -128,6 +130,24 @@ func (m *mockStationStore) Delete(_ context.Context, id string) error {
 	}
 	delete(m.stations, id)
 	return nil
+}
+
+func (m *mockStationStore) CountByTenantID(_ context.Context, tenantID string) (int, error) {
+	return m.tenantCounts[tenantID], nil
+}
+
+// --- Mock tenant provider ---
+
+type mockTenantProvider struct {
+	tiers map[string]string
+}
+
+func (m *mockTenantProvider) GetTier(_ context.Context, tenantID string) (string, error) {
+	tier, ok := m.tiers[tenantID]
+	if !ok {
+		return "free", nil
+	}
+	return tier, nil
 }
 
 // --- Mock status provider ---
@@ -639,6 +659,116 @@ func TestDelete_StoreError(t *testing.T) {
 
 	if w.Code != http.StatusInternalServerError {
 		t.Errorf("expected 500, got %d", w.Code)
+	}
+}
+
+// --- Tier Enforcement Tests ---
+
+func TestCreate_UnderTierLimit(t *testing.T) {
+	tenantID := "11111111-1111-1111-1111-111111111111"
+	store := newMockStationStore()
+	store.tenantCounts[tenantID] = 0 // no stations yet
+
+	tp := &mockTenantProvider{tiers: map[string]string{tenantID: "free"}}
+
+	h := NewHandler(store, nil)
+	h.WithTenantProvider(tp)
+	r := stationRouter(h)
+
+	body, _ := json.Marshal(CreateStationRequest{
+		Name:     "New Radio",
+		Slug:     "new-radio",
+		Genre:    "house",
+		TenantID: &tenantID,
+		IsPublic: true,
+	})
+	req := httptest.NewRequest("POST", "/stations", bytes.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	r.ServeHTTP(w, req)
+
+	if w.Code != http.StatusCreated {
+		t.Errorf("expected 201, got %d: %s", w.Code, w.Body.String())
+	}
+}
+
+func TestCreate_AtTierLimit(t *testing.T) {
+	tenantID := "11111111-1111-1111-1111-111111111111"
+	store := newMockStationStore()
+	store.tenantCounts[tenantID] = 1 // already at free tier limit (max 1)
+
+	tp := &mockTenantProvider{tiers: map[string]string{tenantID: "free"}}
+
+	h := NewHandler(store, nil)
+	h.WithTenantProvider(tp)
+	r := stationRouter(h)
+
+	body, _ := json.Marshal(CreateStationRequest{
+		Name:     "Second Radio",
+		Slug:     "second-radio",
+		Genre:    "house",
+		TenantID: &tenantID,
+		IsPublic: true,
+	})
+	req := httptest.NewRequest("POST", "/stations", bytes.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	r.ServeHTTP(w, req)
+
+	if w.Code != http.StatusForbidden {
+		t.Errorf("expected 403, got %d: %s", w.Code, w.Body.String())
+	}
+}
+
+func TestCreate_AfterTierUpgrade(t *testing.T) {
+	tenantID := "11111111-1111-1111-1111-111111111111"
+	store := newMockStationStore()
+	store.tenantCounts[tenantID] = 1 // 1 station, free limit is 1, but studio allows 3
+
+	tp := &mockTenantProvider{tiers: map[string]string{tenantID: "studio"}}
+
+	h := NewHandler(store, nil)
+	h.WithTenantProvider(tp)
+	r := stationRouter(h)
+
+	body, _ := json.Marshal(CreateStationRequest{
+		Name:     "Second Radio",
+		Slug:     "second-radio",
+		Genre:    "house",
+		TenantID: &tenantID,
+		IsPublic: true,
+	})
+	req := httptest.NewRequest("POST", "/stations", bytes.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	r.ServeHTTP(w, req)
+
+	if w.Code != http.StatusCreated {
+		t.Errorf("expected 201, got %d: %s", w.Code, w.Body.String())
+	}
+}
+
+func TestCreate_NoTenantID_SkipsEnforcement(t *testing.T) {
+	store := newMockStationStore()
+	tp := &mockTenantProvider{tiers: map[string]string{}}
+
+	h := NewHandler(store, nil)
+	h.WithTenantProvider(tp)
+	r := stationRouter(h)
+
+	body, _ := json.Marshal(CreateStationRequest{
+		Name:     "Free Radio",
+		Slug:     "free-radio",
+		Genre:    "house",
+		IsPublic: true,
+	})
+	req := httptest.NewRequest("POST", "/stations", bytes.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	r.ServeHTTP(w, req)
+
+	if w.Code != http.StatusCreated {
+		t.Errorf("expected 201, got %d: %s", w.Code, w.Body.String())
 	}
 }
 

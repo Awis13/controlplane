@@ -17,6 +17,7 @@ import (
 
 	"controlplane/internal/audit"
 	"controlplane/internal/auth"
+	"controlplane/internal/billing"
 	"controlplane/internal/node"
 	"controlplane/internal/project"
 	"controlplane/internal/response"
@@ -33,6 +34,7 @@ type UserTenantStore interface {
 	TenantStore
 	CreateWithOwner(ctx context.Context, req CreateTenantRequest, ownerID string) (*Tenant, error)
 	ListByOwnerID(ctx context.Context, ownerID string) ([]Tenant, error)
+	CountByOwnerID(ctx context.Context, ownerID string) (int, error)
 }
 
 // UserProjectStore extends ProjectStore with default selection.
@@ -156,6 +158,34 @@ func (h *UserHandler) Create(w http.ResponseWriter, r *http.Request) {
 	}
 	if reservedSubdomains[req.Subdomain] {
 		response.Error(w, http.StatusBadRequest, "subdomain is reserved")
+		return
+	}
+
+	// Enforce tenant creation limits based on tier
+	currentCount, err := h.store.CountByOwnerID(r.Context(), u.ID.String())
+	if err != nil {
+		slog.Error("count tenants for enforcement", "error", err, "user_id", u.ID)
+		response.Error(w, http.StatusInternalServerError, "failed to check tenant limits")
+		return
+	}
+	// For now, all users start on free tier; determine the max from
+	// the highest tier among their existing tenants (default: free).
+	maxTenants := billing.GetLimits(billing.TierFree).MaxStations
+	existingTenants, err := h.store.ListByOwnerID(r.Context(), u.ID.String())
+	if err != nil {
+		slog.Error("list tenants for tier check", "error", err, "user_id", u.ID)
+		response.Error(w, http.StatusInternalServerError, "failed to check tenant limits")
+		return
+	}
+	for _, t := range existingTenants {
+		limits := billing.GetLimits(t.Tier)
+		if limits.MaxStations > maxTenants {
+			maxTenants = limits.MaxStations
+		}
+	}
+	if currentCount >= maxTenants {
+		response.Error(w, http.StatusForbidden,
+			fmt.Sprintf("tenant limit reached (max %d)", maxTenants))
 		return
 	}
 

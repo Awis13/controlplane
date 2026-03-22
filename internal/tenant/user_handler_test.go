@@ -23,6 +23,7 @@ import (
 type mockUserTenantStore struct {
 	mockTenantStore
 	ownerTenants map[string][]Tenant
+	ownerCounts  map[string]int
 	createErr    error
 }
 
@@ -30,6 +31,7 @@ func newMockUserTenantStore() *mockUserTenantStore {
 	return &mockUserTenantStore{
 		mockTenantStore: mockTenantStore{tenants: make(map[string]*Tenant)},
 		ownerTenants:    make(map[string][]Tenant),
+		ownerCounts:     make(map[string]int),
 	}
 }
 
@@ -56,6 +58,13 @@ func (m *mockUserTenantStore) CreateWithOwner(_ context.Context, req CreateTenan
 
 func (m *mockUserTenantStore) ListByOwnerID(_ context.Context, ownerID string) ([]Tenant, error) {
 	return m.ownerTenants[ownerID], nil
+}
+
+func (m *mockUserTenantStore) CountByOwnerID(_ context.Context, ownerID string) (int, error) {
+	if count, ok := m.ownerCounts[ownerID]; ok {
+		return count, nil
+	}
+	return len(m.ownerTenants[ownerID]), nil
 }
 
 type mockUserNodeStore struct {
@@ -867,6 +876,84 @@ func TestUserResume_NotSuspended(t *testing.T) {
 	if w.Code != http.StatusConflict {
 		t.Errorf("expected 409, got %d: %s", w.Code, w.Body.String())
 	}
+}
+
+// --- Tenant Creation Limit Tests ---
+
+func TestUserCreate_FirstTenantSucceeds(t *testing.T) {
+	h, ts, ns, ps, prov := newTestUserHandler()
+	_ = prov
+
+	ns.leastLoaded = activeNode()
+	ps.defaultProject = testProjectObj()
+	// ownerCounts defaults to 0 (no tenants yet)
+
+	r := userTenantRouter(h)
+
+	body, _ := json.Marshal(UserCreateRequest{Name: "First Radio", Subdomain: "first-radio"})
+	req := httptest.NewRequest("POST", "/tenants", bytes.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	r.ServeHTTP(w, req)
+
+	if w.Code != http.StatusAccepted {
+		t.Errorf("expected 202, got %d: %s", w.Code, w.Body.String())
+	}
+	_ = ts
+}
+
+func TestUserCreate_SecondTenantFreeTierBlocked(t *testing.T) {
+	h, ts, ns, ps, _ := newTestUserHandler()
+
+	ns.leastLoaded = activeNode()
+	ps.defaultProject = testProjectObj()
+
+	ownerID := testUserID.String()
+	// User already has 1 tenant on free tier
+	ts.ownerCounts[ownerID] = 1
+	ts.ownerTenants[ownerID] = []Tenant{
+		{ID: "t1", Name: "My Radio", OwnerID: &ownerID, Tier: "free", Status: "active"},
+	}
+
+	r := userTenantRouter(h)
+
+	body, _ := json.Marshal(UserCreateRequest{Name: "Second Radio", Subdomain: "second-radio"})
+	req := httptest.NewRequest("POST", "/tenants", bytes.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	r.ServeHTTP(w, req)
+
+	if w.Code != http.StatusForbidden {
+		t.Errorf("expected 403, got %d: %s", w.Code, w.Body.String())
+	}
+}
+
+func TestUserCreate_SecondTenantStudioTierAllowed(t *testing.T) {
+	h, ts, ns, ps, prov := newTestUserHandler()
+
+	ns.leastLoaded = activeNode()
+	ps.defaultProject = testProjectObj()
+
+	ownerID := testUserID.String()
+	// User has 1 tenant on studio tier (max 3 stations, so max 3 tenants)
+	ts.ownerCounts[ownerID] = 1
+	ts.ownerTenants[ownerID] = []Tenant{
+		{ID: "t1", Name: "Studio Radio", OwnerID: &ownerID, Tier: "studio", Status: "active"},
+	}
+
+	r := userTenantRouter(h)
+
+	body, _ := json.Marshal(UserCreateRequest{Name: "Second Radio", Subdomain: "second-radio"})
+	req := httptest.NewRequest("POST", "/tenants", bytes.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	r.ServeHTTP(w, req)
+
+	if w.Code != http.StatusAccepted {
+		t.Errorf("expected 202, got %d: %s", w.Code, w.Body.String())
+	}
+
+	<-prov.provisionDone
 }
 
 // contains is a simple string containment check for test assertions.

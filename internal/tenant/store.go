@@ -153,6 +153,18 @@ func (s *Store) CreateWithOwner(ctx context.Context, req CreateTenantRequest, ow
 	return t, nil
 }
 
+// CountByOwnerID returns the number of non-deleted tenants belonging to a user.
+func (s *Store) CountByOwnerID(ctx context.Context, ownerID string) (int, error) {
+	var count int
+	err := s.pool.QueryRow(ctx,
+		`SELECT COUNT(*) FROM tenants WHERE owner_id = $1 AND status NOT IN ('deleted')`,
+		ownerID).Scan(&count)
+	if err != nil {
+		return 0, fmt.Errorf("count tenants by owner: %w", err)
+	}
+	return count, nil
+}
+
 // ListByOwnerID returns all non-deleted tenants belonging to a user.
 func (s *Store) ListByOwnerID(ctx context.Context, ownerID string) ([]Tenant, error) {
 	rows, err := s.pool.Query(ctx,
