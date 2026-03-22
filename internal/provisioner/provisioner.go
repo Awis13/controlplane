@@ -129,19 +129,20 @@ type CaddyClient interface {
 
 // Provisioner handles async provisioning and deprovisioning of tenant LXC containers.
 type Provisioner struct {
-	nodeStore      NodeStore
-	tenantStore    TenantStore
-	projectStore   ProjectStore
-	encryptionKey  string
-	clientFactory  ClientFactory
-	clients        map[string]ProxmoxClient // keyed by node ID, lazy-initialized
-	mu             sync.RWMutex             // guards clients map
-	sem            chan struct{}             // bounded concurrency for provision goroutines
-	wg             sync.WaitGroup           // tracks in-flight provisions for graceful shutdown
-	caddyClient    CaddyClient              // optional: Caddy route management
-	stationCreator StationCreator           // optional: auto-create station on provisioning
-	caddyDomain    string                   // domain for station stream URLs
-	sshClient      SSHExec                  // optional: SSH exec for writing tokens and mount points
+	nodeStore        NodeStore
+	tenantStore      TenantStore
+	projectStore     ProjectStore
+	encryptionKey    string
+	clientFactory    ClientFactory
+	clients          map[string]ProxmoxClient // keyed by node ID, lazy-initialized
+	mu               sync.RWMutex             // guards clients map
+	sem              chan struct{}             // bounded concurrency for provision goroutines
+	wg               sync.WaitGroup           // tracks in-flight provisions for graceful shutdown
+	caddyClient      CaddyClient              // optional: Caddy route management
+	stationCreator   StationCreator           // optional: auto-create station on provisioning
+	caddyDomain      string                   // domain for station stream URLs
+	sshClient        SSHExec                  // optional: SSH exec for writing tokens and mount points
+	freeRadioRepoURL string                   // URL репозитория freeRadio для авто-деплоя
 }
 
 // New creates a new Provisioner.
@@ -176,6 +177,11 @@ func (p *Provisioner) WithStationCreator(sc StationCreator, caddyDomain string) 
 // WithSSHClient sets the SSH client for executing commands on Proxmox hosts and in LXC containers.
 func (p *Provisioner) WithSSHClient(c SSHExec) {
 	p.sshClient = c
+}
+
+// WithFreeRadioRepo sets the freeRadio repo URL for auto-deploy in new containers.
+func (p *Provisioner) WithFreeRadioRepo(url string) {
+	p.freeRadioRepoURL = url
 }
 
 // InvalidateClient removes the cached Proxmox client for a node,
@@ -412,23 +418,32 @@ func (p *Provisioner) doProvision(tenantID, nodeID, projectID, subdomain string,
 		return
 	}
 
-	// Generate and write DASHBOARD_TOKEN (best-effort, does not block provisioning)
-	if p.sshClient != nil {
-		if token, err := generateToken(); err != nil {
-			log.Warn("provision: generate dashboard token", "error", err)
+	// Generate dashboard token (best-effort, does not block provisioning)
+	var dashToken string
+	if token, err := generateToken(); err != nil {
+		log.Warn("provision: generate dashboard token", "error", err)
+	} else {
+		dashToken = token
+	}
+
+	// Write DASHBOARD_TOKEN to container (legacy path — когда авто-деплой не включён)
+	if p.sshClient != nil && dashToken != "" && p.freeRadioRepoURL == "" {
+		if sshHost, err := sshexec.ExtractHost(nodeInfo.ProxmoxURL); err != nil {
+			log.Warn("provision: extract ssh host from proxmox url", "error", err)
 		} else {
-			if sshHost, err := sshexec.ExtractHost(nodeInfo.ProxmoxURL); err != nil {
-				log.Warn("provision: extract ssh host from proxmox url", "error", err)
+			cmd := fmt.Sprintf("sed -i '/^DASHBOARD_TOKEN=/d' /root/freeRadio/.env && echo 'DASHBOARD_TOKEN=%s' >> /root/freeRadio/.env", dashToken)
+			if err := p.sshClient.ExecInContainer(ctx, sshHost, newID, cmd); err != nil {
+				log.Warn("provision: write dashboard token to container", "error", err)
 			} else {
-				cmd := fmt.Sprintf("sed -i '/^DASHBOARD_TOKEN=/d' /root/freeRadio/.env && echo 'DASHBOARD_TOKEN=%s' >> /root/freeRadio/.env", token)
-				if err := p.sshClient.ExecInContainer(ctx, sshHost, newID, cmd); err != nil {
-					log.Warn("provision: write dashboard token to container", "error", err)
-				} else if err := p.tenantStore.SetDashboardToken(ctx, tenantID, token); err != nil {
-					log.Warn("provision: save dashboard token to db", "error", err)
-				} else {
-					log.Info("provision: dashboard token set")
-				}
+				log.Info("provision: dashboard token set via legacy path")
 			}
+		}
+	}
+
+	// Save dashboard token to DB
+	if dashToken != "" {
+		if err := p.tenantStore.SetDashboardToken(ctx, tenantID, dashToken); err != nil {
+			log.Warn("provision: save dashboard token to db", "error", err)
 		}
 	}
 
@@ -437,6 +452,18 @@ func (p *Provisioner) doProvision(tenantID, nodeID, projectID, subdomain string,
 		log.Error("provision: set active", "error", err)
 		p.cleanupAndError(ctx, client, tenantID, nodeID, ramMB, newID, "provisioning failed: could not update status")
 		return
+	}
+
+	// Auto-deploy freeRadio (best-effort, don't fail provisioning)
+	if p.sshClient != nil && p.freeRadioRepoURL != "" {
+		if sshHost, err := sshexec.ExtractHost(nodeInfo.ProxmoxURL); err != nil {
+			log.Error("provision: extract ssh host for deploy", "error", err)
+		} else {
+			if err := p.deployFreeRadio(ctx, sshHost, newID, tenantID, subdomain, dashToken, lxcIP); err != nil {
+				log.Error("provision: auto-deploy freeRadio failed", "error", err)
+				// Best-effort: тенант уже active, деплой можно повторить вручную
+			}
+		}
 	}
 
 	// Auto-create station record (best-effort, don't fail provisioning)
@@ -656,6 +683,56 @@ func (p *Provisioner) cleanupAndError(ctx context.Context, client ProxmoxClient,
 	p.setError(ctx, tenantID, nodeID, ramMB, errMsg)
 }
 
+
+// deployFreeRadio клонирует репо, пишет .env и запускает Docker-сервисы внутри LXC.
+// Best-effort: ошибки логируются, но не прерывают провижининг.
+func (p *Provisioner) deployFreeRadio(ctx context.Context, sshHost string, lxcID int, tenantID, subdomain, dashboardToken, lxcIP string) error {
+	log := slog.With("tenant_id", tenantID, "lxc_id", lxcID)
+
+	repoURL := p.freeRadioRepoURL
+	if repoURL == "" {
+		repoURL = "https://github.com/Awis13/freeRadio.git"
+	}
+
+	// Шаг 1: Установка Docker (если нет в шаблоне)
+	log.Info("provision: deploy — installing docker")
+	installDockerCmd := "which docker || (curl -fsSL https://get.docker.com | sh)"
+	if err := p.sshClient.ExecInContainer(ctx, sshHost, lxcID, installDockerCmd); err != nil {
+		return fmt.Errorf("install docker: %w", err)
+	}
+
+	// Шаг 2: Клонирование репо
+	log.Info("provision: deploy — cloning freeRadio repo", "repo_url", repoURL)
+	cloneCmd := fmt.Sprintf("mkdir -p /root/freeRadio && cd /root/freeRadio && git clone %s . 2>/dev/null || git pull origin master", repoURL)
+	if err := p.sshClient.ExecInContainer(ctx, sshHost, lxcID, cloneCmd); err != nil {
+		return fmt.Errorf("clone repo: %w", err)
+	}
+
+	// Шаг 3: Запись .env с настройками тенанта
+	log.Info("provision: deploy — writing .env")
+	envContent := fmt.Sprintf("TENANT_ID=%s\nDASHBOARD_TOKEN=%s\nS3_ENABLED=false\nNODE_ENV=production\n", tenantID, dashboardToken)
+	writeEnvCmd := fmt.Sprintf("cat > /root/freeRadio/.env << 'ENVEOF'\n%sENVEOF", envContent)
+	if err := p.sshClient.ExecInContainer(ctx, sshHost, lxcID, writeEnvCmd); err != nil {
+		return fmt.Errorf("write .env: %w", err)
+	}
+
+	// Шаг 4: Запуск Docker-сервисов
+	log.Info("provision: deploy — starting docker compose")
+	composeCmd := "cd /root/freeRadio && docker compose up -d"
+	if err := p.sshClient.ExecInContainer(ctx, sshHost, lxcID, composeCmd); err != nil {
+		return fmt.Errorf("docker compose up: %w", err)
+	}
+
+	// Шаг 5: Health check (ждём до 60 секунд)
+	log.Info("provision: deploy — waiting for health check")
+	healthCmd := "for i in $(seq 1 12); do curl -s http://127.0.0.1:9090/api/status && exit 0; sleep 5; done; exit 1"
+	if err := p.sshClient.ExecInContainer(ctx, sshHost, lxcID, healthCmd); err != nil {
+		return fmt.Errorf("health check: %w", err)
+	}
+
+	log.Info("provision: deploy — freeRadio deployed successfully")
+	return nil
+}
 
 // generateToken generates a cryptographically random token (64 hex chars).
 func generateToken() (string, error) {
