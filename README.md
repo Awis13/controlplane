@@ -1,8 +1,64 @@
 # Controlplane
 
+[![CI](https://github.com/Awis13/controlplane/actions/workflows/ci.yml/badge.svg)](https://github.com/Awis13/controlplane/actions/workflows/ci.yml)
+![Go](https://img.shields.io/badge/Go-1.24-00ADD8?logo=go&logoColor=white)
+![PostgreSQL](https://img.shields.io/badge/PostgreSQL-17-4169E1?logo=postgresql&logoColor=white)
+![Proxmox](https://img.shields.io/badge/Proxmox-VE-E57000?logo=proxmox&logoColor=white)
+![WireGuard](https://img.shields.io/badge/WireGuard-mesh-88171A?logo=wireguard&logoColor=white)
+![WebAuthn](https://img.shields.io/badge/WebAuthn-passkeys-3423A6)
+[![License: MIT](https://img.shields.io/badge/License-MIT-green.svg)](LICENSE)
+
 Multi-tenant control plane for managing LXC containers on Proxmox VE. Provides a REST API and admin dashboard for registering compute nodes, defining project templates, and provisioning isolated tenant instances with automatic networking, DNS routing, and billing.
 
 Built with Go, PostgreSQL, and zero external ORMs.
+
+## What this demonstrates
+
+| Skill | Where it lives |
+|-------|----------------|
+| Async provisioning state machine with bounded concurrency | `internal/provisioner` — 10-slot semaphore, `provisioning -> active/error -> deleting -> deleted` |
+| Hand-rolled Proxmox VE API client | `internal/proxmox` — LXC clone/start/stop/delete, node status, task polling (no SDK) |
+| WireGuard mesh + Caddy dynamic routing orchestration | `internal/wireguard`, `internal/caddy` — live `wg0` sync, Admin API reverse-proxy routes |
+| Passkey / WebAuthn authentication | `internal/admin` + `internal/auth` — WebAuthn admin, JWT + refresh tokens for users |
+| Stripe tier enforcement | `internal/billing` — checkout, portal, webhooks, per-tier resource limits |
+| PostgreSQL with golang-migrate, no ORM | `internal/database` — raw SQL via pgx, embedded SQL migrations |
+| 355 standalone tests + CI | `*_test.go` (25 files), GitHub Actions (build, vet, gofmt, test) |
+
+## STUDIO 23
+
+Controlplane is the backend and brain of **STUDIO 23**, a multi-tenant streaming SaaS: one LXC container per tenant, each running a full per-tenant streaming stack, provisioned and wired together over a WireGuard mesh.
+
+Sibling repositories:
+
+- **[freeradio](https://github.com/Awis13/freeradio)** — the per-tenant streaming stack (Node dashboard, Icecast, Liquidsoap, FFmpeg, nginx-rtmp) that controlplane deploys into each tenant LXC. _(May be private for a few more hours while it is published in the same sweep.)_
+- **[freeradio-web](https://github.com/Awis13/freeradio-web)** — the SvelteKit frontend users interact with, talking to controlplane over `/api/v1/*`.
+
+### System interconnection
+
+```mermaid
+flowchart TD
+    U[User browser] --> W[freeradio-web · SvelteKit :5173/:3000]
+    W -->|/api/v1/* cookie+JWT| CP[controlplane · Go API :8085]
+    CP --> PG[(Postgres 17)]
+    CP -->|provision LXC| PX[Proxmox VE]
+    PX -->|deploy stack| FR[freeradio tenant]
+    CP -->|WireGuard mesh 10.10.0.0/24| FR
+    CP -->|poll :80/api/status| FR
+    CP -. dynamic routing .-> CADDY[Caddy]
+    CP -. tier billing .-> STRIPE[Stripe]
+    subgraph TENANT[freeradio tenant stack]
+      DASH[dashboard :9090 Node+WS+HLS]
+      ICE[Icecast :8000]
+      LIQ[Liquidsoap :7000 BPM AutoDJ]
+      FF[FFmpeg streamer]
+      RTMP[nginx-rtmp :1935 OBS]
+      LIQ --> ICE --> FF
+      RTMP --> FF
+    end
+    FR --- TENANT
+    FF -->|HLS| W
+    FF -->|RTMP| EXT[YouTube / Twitch / Kick]
+```
 
 ## Architecture
 

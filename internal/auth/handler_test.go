@@ -14,8 +14,8 @@ import (
 	"controlplane/internal/user"
 )
 
-// callRegisterSafe вызывает Register и перехватывает панику от nil store.
-// Возвращает записанный HTTP-код и true если была паника (= токен принят, дошли до DB).
+// callRegisterSafe calls Register and recovers from a panic caused by a nil store.
+// Returns the recorded HTTP code and true if there was a panic (= the token was accepted, we reached the DB).
 func callRegisterSafe(h *Handler, req *http.Request) (code int, panicked bool) {
 	w := httptest.NewRecorder()
 	defer func() {
@@ -28,7 +28,7 @@ func callRegisterSafe(h *Handler, req *http.Request) (code int, panicked bool) {
 	return w.Code, false
 }
 
-// TestRegister_TokenFromBody проверяет, что registration_token из JSON body принимается.
+// TestRegister_TokenFromBody verifies that registration_token from the JSON body is accepted.
 func TestRegister_TokenFromBody(t *testing.T) {
 	h := &Handler{
 		registrationToken: "secret-invite-token",
@@ -39,13 +39,13 @@ func TestRegister_TokenFromBody(t *testing.T) {
 	req.Header.Set("Content-Type", "application/json")
 
 	code, panicked := callRegisterSafe(h, req)
-	// Паника на nil store означает, что проверка токена пройдена успешно.
+	// A panic on the nil store means the token check passed successfully.
 	if code == http.StatusForbidden && !panicked {
 		t.Fatal("expected token from body to be accepted, got 403 Forbidden")
 	}
 }
 
-// TestRegister_TokenFromHeader проверяет fallback на X-Registration-Token заголовок.
+// TestRegister_TokenFromHeader verifies the fallback to the X-Registration-Token header.
 func TestRegister_TokenFromHeader(t *testing.T) {
 	h := &Handler{
 		registrationToken: "secret-invite-token",
@@ -62,7 +62,7 @@ func TestRegister_TokenFromHeader(t *testing.T) {
 	}
 }
 
-// TestRegister_WrongToken проверяет отказ при неверном токене.
+// TestRegister_WrongToken verifies rejection when the token is wrong.
 func TestRegister_WrongToken(t *testing.T) {
 	h := &Handler{
 		registrationToken: "secret-invite-token",
@@ -86,7 +86,7 @@ func TestRegister_WrongToken(t *testing.T) {
 	}
 }
 
-// TestRegister_NoTokenWhenRequired проверяет отказ когда токен обязателен, но не передан.
+// TestRegister_NoTokenWhenRequired verifies rejection when the token is required but not provided.
 func TestRegister_NoTokenWhenRequired(t *testing.T) {
 	h := &Handler{
 		registrationToken: "secret-invite-token",
@@ -104,13 +104,13 @@ func TestRegister_NoTokenWhenRequired(t *testing.T) {
 	}
 }
 
-// TestRegister_BodyTokenTakesPriority проверяет, что токен из body приоритетнее заголовка.
+// TestRegister_BodyTokenTakesPriority verifies that the token from the body takes priority over the header.
 func TestRegister_BodyTokenTakesPriority(t *testing.T) {
 	h := &Handler{
 		registrationToken: "correct-token",
 	}
 
-	// Body содержит правильный токен, заголовок — неправильный.
+	// The body contains the correct token, the header the wrong one.
 	body := `{"email":"test@example.com","password":"longpassword12","registration_token":"correct-token"}`
 	req := httptest.NewRequest(http.MethodPost, "/api/v1/auth/register", strings.NewReader(body))
 	req.Header.Set("Content-Type", "application/json")
@@ -124,7 +124,7 @@ func TestRegister_BodyTokenTakesPriority(t *testing.T) {
 
 // --- Cookie-related tests ---
 
-// TestSetAuthCookies проверяет, что setAuthCookies устанавливает оба cookie.
+// TestSetAuthCookies verifies that setAuthCookies sets both cookies.
 func TestSetAuthCookies(t *testing.T) {
 	h := &Handler{cookieSecure: true}
 	w := httptest.NewRecorder()
@@ -185,7 +185,7 @@ func TestSetAuthCookies(t *testing.T) {
 	}
 }
 
-// TestSetAuthCookies_InsecureMode проверяет, что Secure=false при cookieSecure=false.
+// TestSetAuthCookies_InsecureMode verifies that Secure=false when cookieSecure=false.
 func TestSetAuthCookies_InsecureMode(t *testing.T) {
 	h := &Handler{cookieSecure: false}
 	w := httptest.NewRecorder()
@@ -199,7 +199,7 @@ func TestSetAuthCookies_InsecureMode(t *testing.T) {
 	}
 }
 
-// TestClearAuthCookies проверяет, что clearAuthCookies устанавливает MaxAge=-1.
+// TestClearAuthCookies verifies that clearAuthCookies sets MaxAge=-1.
 func TestClearAuthCookies(t *testing.T) {
 	h := &Handler{cookieSecure: true}
 	w := httptest.NewRecorder()
@@ -221,7 +221,7 @@ func TestClearAuthCookies(t *testing.T) {
 	}
 }
 
-// TestLogout_ClearsCookies проверяет, что Logout очищает cookie.
+// TestLogout_ClearsCookies verifies that Logout clears the cookies.
 func TestLogout_ClearsCookies(t *testing.T) {
 	jwtSecret := "test-secret-key-for-logout"
 	userID := uuid.MustParse("11111111-1111-1111-1111-111111111111")
@@ -235,7 +235,7 @@ func TestLogout_ClearsCookies(t *testing.T) {
 		cookieSecure: true,
 	}
 
-	// Создаём JWT для запроса
+	// Create a JWT for the request
 	token := jwt.NewWithClaims(jwt.SigningMethodHS256, jwt.MapClaims{
 		"sub":   userID.String(),
 		"email": "test@example.com",
@@ -249,34 +249,34 @@ func TestLogout_ClearsCookies(t *testing.T) {
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("Authorization", "Bearer "+tokenStr)
 
-	// Inject user into context (middleware обычно это делает)
+	// Inject user into context (the middleware usually does this)
 	ctx := SetUserForTest(req.Context(), u)
 	req = req.WithContext(ctx)
 
 	w := httptest.NewRecorder()
-	// tokenStore = nil → RevokeRefreshToken паникнет, но мы ловим до этого
-	// На самом деле, tokenStore nil → Revoke вызывает панику. Нужно обойти.
-	// Logout сначала парсит JWT, потом вызывает tokenStore.Revoke — паника.
-	// Используем defer/recover чтобы проверить cookie.
+	// tokenStore = nil → RevokeRefreshToken will panic, but we recover before that
+	// In fact, tokenStore nil → Revoke causes a panic. We need to work around it.
+	// Logout first parses the JWT, then calls tokenStore.Revoke — panic.
+	// Use defer/recover to check the cookie.
 	func() {
 		defer func() { recover() }()
 		h.Logout(w, req)
 	}()
 
-	// Проверяем что cookie очищены (они устанавливаются ДО вызова tokenStore)
-	// Нет — cookie устанавливаются после всех операций. Нужно другой подход.
-	// Logout вызывает tokenStore.Revoke → паника до clearAuthCookies.
-	// Значит этот тест не покажет cookie. Проверим clearAuthCookies отдельно (уже есть выше).
+	// Verify the cookies are cleared (they are set BEFORE the tokenStore call)
+	// No — the cookies are set after all operations. A different approach is needed.
+	// Logout calls tokenStore.Revoke → panic before clearAuthCookies.
+	// So this test will not reveal the cookies. We check clearAuthCookies separately (already done above).
 }
 
-// TestRefresh_ReadsCookieFallback проверяет, что Refresh читает refresh_token из cookie.
+// TestRefresh_ReadsCookieFallback verifies that Refresh reads refresh_token from the cookie.
 func TestRefresh_ReadsCookieFallback(t *testing.T) {
 	h := &Handler{
 		jwtSecret:    []byte("test-secret"),
 		cookieSecure: true,
 	}
 
-	// Пустое тело, refresh_token передан через cookie
+	// Empty body, refresh_token passed via the cookie
 	req := httptest.NewRequest(http.MethodPost, "/api/v1/auth/refresh", strings.NewReader("{}"))
 	req.Header.Set("Content-Type", "application/json")
 	req.AddCookie(&http.Cookie{
@@ -286,7 +286,7 @@ func TestRefresh_ReadsCookieFallback(t *testing.T) {
 
 	w := httptest.NewRecorder()
 
-	// tokenStore = nil → паника при ValidateRefreshToken, значит cookie был прочитан
+	// tokenStore = nil → panic on ValidateRefreshToken, so the cookie was read
 	func() {
 		defer func() {
 			if r := recover(); r == nil {
@@ -297,7 +297,7 @@ func TestRefresh_ReadsCookieFallback(t *testing.T) {
 	}()
 }
 
-// TestRefresh_EmptyBodyNoCookie проверяет, что без body и без cookie возвращается 400.
+// TestRefresh_EmptyBodyNoCookie verifies that without a body and without a cookie a 400 is returned.
 func TestRefresh_EmptyBodyNoCookie(t *testing.T) {
 	h := &Handler{
 		jwtSecret:    []byte("test-secret"),

@@ -20,16 +20,16 @@ import (
 // --- Mock tenant store ---
 
 type mockTenantStore struct {
-	tenants          map[string]*Tenant
-	createErr        error
-	deleteErr        error
-	setActiveErr     error
-	setErrorErr      error
-	setDeletingErr   error
-	setDeletedErr    error
-	setSuspendedErr  error
-	setResumedErr    error
-	updateErr        error
+	tenants         map[string]*Tenant
+	createErr       error
+	deleteErr       error
+	setActiveErr    error
+	setErrorErr     error
+	setDeletingErr  error
+	setDeletedErr   error
+	setSuspendedErr error
+	setResumedErr   error
+	updateErr       error
 }
 
 func newMockTenantStore() *mockTenantStore {

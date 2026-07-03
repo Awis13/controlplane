@@ -258,10 +258,10 @@ func (h *Handler) Refresh(w http.ResponseWriter, r *http.Request) {
 	var req struct {
 		RefreshToken string `json:"refresh_token"`
 	}
-	// Пробуем прочитать из тела запроса (игнорируем ошибку — тело может быть пустым)
+	// Try reading from the request body (ignore the error — the body may be empty)
 	_ = response.Decode(r, &req)
 
-	// Fallback: читаем refresh_token из cookie
+	// Fallback: read refresh_token from the cookie
 	refreshToken := req.RefreshToken
 	if refreshToken == "" {
 		if c, err := r.Cookie("refresh_token"); err == nil {
@@ -315,7 +315,7 @@ func (h *Handler) Logout(w http.ResponseWriter, r *http.Request) {
 	authHeader := r.Header.Get("Authorization")
 	tokenStr := strings.TrimPrefix(authHeader, "Bearer ")
 	if tokenStr == "" || tokenStr == authHeader {
-		// Fallback: читаем из cookie
+		// Fallback: read from the cookie
 		if c, err := r.Cookie("access_token"); err == nil {
 			tokenStr = c.Value
 		}
@@ -467,7 +467,7 @@ func (h *Handler) setAuthCookies(w http.ResponseWriter, accessToken, refreshToke
 		HttpOnly: true,
 		Secure:   h.cookieSecure,
 		SameSite: http.SameSiteLaxMode,
-		MaxAge:   int(accessTokenExpiration.Seconds()), // 15 минут
+		MaxAge:   int(accessTokenExpiration.Seconds()), // 15 minutes
 	})
 	http.SetCookie(w, &http.Cookie{
 		Name:     "refresh_token",
@@ -476,7 +476,7 @@ func (h *Handler) setAuthCookies(w http.ResponseWriter, accessToken, refreshToke
 		HttpOnly: true,
 		Secure:   h.cookieSecure,
 		SameSite: http.SameSiteStrictMode,
-		MaxAge:   int(refreshTokenExpiry.Seconds()), // 30 дней
+		MaxAge:   int(refreshTokenExpiry.Seconds()), // 30 days
 	})
 }
 

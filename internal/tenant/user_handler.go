@@ -162,9 +162,9 @@ func (h *UserHandler) Create(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Enforce tenant creation limits based on tier.
-	// NOTE: между COUNT и INSERT есть теоретическая гонка (TOCTOU), но для
-	// single-user операций вероятность крайне мала. Unique constraint на subdomain
-	// (23505) ловится ниже как дополнительная защита.
+	// NOTE: there is a theoretical race (TOCTOU) between COUNT and INSERT, but for
+	// single-user operations the probability is extremely low. The unique constraint on subdomain
+	// (23505) is caught below as an additional safeguard.
 	currentCount, err := h.store.CountByOwnerID(r.Context(), u.ID.String())
 	if err != nil {
 		slog.Error("count tenants for enforcement", "error", err, "user_id", u.ID)

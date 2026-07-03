@@ -280,7 +280,6 @@ func TestListRoutes_ServerError(t *testing.T) {
 	}
 }
 
-
 func TestUpsertRoute_HappyPath(t *testing.T) {
 	var methods []string
 

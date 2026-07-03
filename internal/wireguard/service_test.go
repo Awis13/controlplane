@@ -173,7 +173,7 @@ func TestBuildPeerConfigWithPSK(t *testing.T) {
 	peer := &Peer{
 		WgIP:                  "10.10.0.5",
 		PublicKey:             "some-public-key",
-		AllowedIPs:           "10.10.0.5/32",
+		AllowedIPs:            "10.10.0.5/32",
 		PresharedKeyEncrypted: &encrypted,
 	}
 

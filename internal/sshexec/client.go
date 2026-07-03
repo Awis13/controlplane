@@ -26,7 +26,7 @@ func NewClient(keyPath string) *Client {
 }
 
 // shellEscape escapes a string for safe use inside single-quoted bash arguments.
-// Replaces each ' with '\'' (end quote, escaped quote, start quote).
+// Each embedded single quote becomes: end-quote, backslash-escaped quote, start-quote.
 func shellEscape(s string) string {
 	return strings.ReplaceAll(s, "'", `'\''`)
 }

@@ -366,4 +366,3 @@ func (h *Handler) GetPeerQR(w http.ResponseWriter, r *http.Request) {
 		"qr_base64": base64.StdEncoding.EncodeToString(png),
 	})
 }
-

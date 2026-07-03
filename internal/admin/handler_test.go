@@ -28,12 +28,12 @@ var testKey = hex.EncodeToString([]byte("0123456789abcdef0123456789abcdef"))
 // --- Mock stores ---
 
 type mockNodeStore struct {
-	nodes      map[string]*node.Node
-	createErr  error
-	updateErr  error
-	deleteErr  error
-	reserveErr error
-	releaseErr error
+	nodes        map[string]*node.Node
+	createErr    error
+	updateErr    error
+	deleteErr    error
+	reserveErr   error
+	releaseErr   error
 	countTenants int
 	countErr     error
 }
@@ -197,10 +197,10 @@ func (m *mockProjectStore) CountTenants(_ context.Context, _ string) (int, error
 // ---
 
 type mockTenantStore struct {
-	tenants        map[string]*tenant.Tenant
-	createErr      error
-	setDeletingErr error
-	setDeletedErr  error
+	tenants         map[string]*tenant.Tenant
+	createErr       error
+	setDeletingErr  error
+	setDeletedErr   error
 	setSuspendedErr error
 	setResumedErr   error
 }

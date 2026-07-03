@@ -136,13 +136,13 @@ type Provisioner struct {
 	clientFactory    ClientFactory
 	clients          map[string]ProxmoxClient // keyed by node ID, lazy-initialized
 	mu               sync.RWMutex             // guards clients map
-	sem              chan struct{}             // bounded concurrency for provision goroutines
+	sem              chan struct{}            // bounded concurrency for provision goroutines
 	wg               sync.WaitGroup           // tracks in-flight provisions for graceful shutdown
 	caddyClient      CaddyClient              // optional: Caddy route management
 	stationCreator   StationCreator           // optional: auto-create station on provisioning
 	caddyDomain      string                   // domain for station stream URLs
 	sshClient        SSHExec                  // optional: SSH exec for writing tokens and mount points
-	freeRadioRepoURL string                   // URL репозитория freeRadio для авто-деплоя
+	freeRadioRepoURL string                   // freeRadio repository URL for auto-deploy
 }
 
 // New creates a new Provisioner.
@@ -426,7 +426,7 @@ func (p *Provisioner) doProvision(tenantID, nodeID, projectID, subdomain string,
 		dashToken = token
 	}
 
-	// Write DASHBOARD_TOKEN to container (legacy path — когда авто-деплой не включён)
+	// Write DASHBOARD_TOKEN to container (legacy path — when auto-deploy is not enabled)
 	if p.sshClient != nil && dashToken != "" && p.freeRadioRepoURL == "" {
 		if sshHost, err := sshexec.ExtractHost(nodeInfo.ProxmoxURL); err != nil {
 			log.Warn("provision: extract ssh host from proxmox url", "error", err)
@@ -461,7 +461,7 @@ func (p *Provisioner) doProvision(tenantID, nodeID, projectID, subdomain string,
 		} else {
 			if err := p.deployFreeRadio(ctx, sshHost, newID, tenantID, dashToken); err != nil {
 				log.Error("provision: auto-deploy freeRadio failed", "error", err)
-				// Best-effort: тенант уже active, деплой можно повторить вручную
+				// Best-effort: the tenant is already active, the deploy can be retried manually
 			}
 		}
 	}
@@ -683,9 +683,8 @@ func (p *Provisioner) cleanupAndError(ctx context.Context, client ProxmoxClient,
 	p.setError(ctx, tenantID, nodeID, ramMB, errMsg)
 }
 
-
-// deployFreeRadio клонирует репо, пишет .env и запускает Docker-сервисы внутри LXC.
-// Best-effort: ошибки логируются, но не прерывают провижининг.
+// deployFreeRadio clones the repo, writes .env, and starts the Docker services inside the LXC.
+// Best-effort: errors are logged but do not interrupt provisioning.
 func (p *Provisioner) deployFreeRadio(ctx context.Context, sshHost string, lxcID int, tenantID, dashboardToken string) error {
 	log := slog.With("tenant_id", tenantID, "lxc_id", lxcID)
 
@@ -694,21 +693,21 @@ func (p *Provisioner) deployFreeRadio(ctx context.Context, sshHost string, lxcID
 		repoURL = "https://github.com/Awis13/freeRadio.git"
 	}
 
-	// Шаг 1: Установка Docker (если нет в шаблоне)
+	// Step 1: Install Docker (if not in the template)
 	log.Info("provision: deploy — installing docker")
 	installDockerCmd := "which docker || (curl -fsSL https://get.docker.com | sh)"
 	if err := p.sshClient.ExecInContainer(ctx, sshHost, lxcID, installDockerCmd); err != nil {
 		return fmt.Errorf("install docker: %w", err)
 	}
 
-	// Шаг 2: Клонирование репо
+	// Step 2: Clone the repo
 	log.Info("provision: deploy — cloning freeRadio repo", "repo_url", repoURL)
 	cloneCmd := fmt.Sprintf("mkdir -p /root/freeRadio && git clone %s /root/freeRadio 2>&1 || (cd /root/freeRadio && git pull origin master)", repoURL)
 	if err := p.sshClient.ExecInContainer(ctx, sshHost, lxcID, cloneCmd); err != nil {
 		return fmt.Errorf("clone repo: %w", err)
 	}
 
-	// Шаг 3: Запись .env с настройками тенанта
+	// Step 3: Write .env with the tenant settings
 	log.Info("provision: deploy — writing .env")
 	envContent := fmt.Sprintf("TENANT_ID=%s\nDASHBOARD_TOKEN=%s\nS3_ENABLED=false\nNODE_ENV=production\n", tenantID, dashboardToken)
 	writeEnvCmd := fmt.Sprintf("cat > /root/freeRadio/.env << 'ENVEOF'\n%sENVEOF", envContent)
@@ -716,14 +715,14 @@ func (p *Provisioner) deployFreeRadio(ctx context.Context, sshHost string, lxcID
 		return fmt.Errorf("write .env: %w", err)
 	}
 
-	// Шаг 4: Запуск Docker-сервисов
+	// Step 4: Start the Docker services
 	log.Info("provision: deploy — starting docker compose")
 	composeCmd := "cd /root/freeRadio && docker compose up -d"
 	if err := p.sshClient.ExecInContainer(ctx, sshHost, lxcID, composeCmd); err != nil {
 		return fmt.Errorf("docker compose up: %w", err)
 	}
 
-	// Шаг 5: Health check (ждём до 60 секунд)
+	// Step 5: Health check (wait up to 60 seconds)
 	log.Info("provision: deploy — waiting for health check")
 	healthCmd := "for i in $(seq 1 12); do curl -s http://127.0.0.1:9090/api/status && exit 0; sleep 5; done; exit 1"
 	if err := p.sshClient.ExecInContainer(ctx, sshHost, lxcID, healthCmd); err != nil {

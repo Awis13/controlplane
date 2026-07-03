@@ -12,7 +12,7 @@ import (
 )
 
 const (
-	routeIDPrefix = "tenant_"
+	routeIDPrefix  = "tenant_"
 	maxBodySnippet = 200
 )
 
