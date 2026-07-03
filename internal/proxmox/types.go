@@ -95,8 +95,8 @@ type nodeStatusResponse struct {
 		Used  int64 `json:"used"`
 		Free  int64 `json:"free"`
 	} `json:"memory"`
-	Uptime    int64  `json:"uptime"`
-	Kversion  string `json:"kversion"`
+	Uptime     int64  `json:"uptime"`
+	Kversion   string `json:"kversion"`
 	PVEVersion string `json:"pveversion"`
 }
 

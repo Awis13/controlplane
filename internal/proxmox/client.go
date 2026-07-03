@@ -15,8 +15,8 @@ import (
 
 // Client is an HTTP client for the Proxmox VE REST API.
 type Client struct {
-	baseURL    string       // e.g. "https://100.72.87.45:8006"
-	apiToken   string       // full "PVEAPIToken=user@realm!tokenid=secret"
+	baseURL    string // e.g. "https://100.72.87.45:8006"
+	apiToken   string // full "PVEAPIToken=user@realm!tokenid=secret"
 	httpClient *http.Client
 	nodeName   string       // Proxmox node name (e.g. "proxmox-ve"), discovered or set
 	mu         sync.RWMutex // guards lazy node name discovery

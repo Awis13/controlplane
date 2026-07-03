@@ -3,9 +3,9 @@ package billing
 // TierLimits defines resource limits for each billing tier.
 type TierLimits struct {
 	MaxStations    int    `json:"max_stations"`
-	MaxTenants     int    `json:"max_tenants"`     // max tenants per user
-	MaxPlatforms   int    `json:"max_platforms"`   // restream destinations per station
-	MaxQuality     string `json:"max_quality"`     // "720p", "1080p", "4k"
+	MaxTenants     int    `json:"max_tenants"`   // max tenants per user
+	MaxPlatforms   int    `json:"max_platforms"` // restream destinations per station
+	MaxQuality     string `json:"max_quality"`   // "720p", "1080p", "4k"
 	Watermark      bool   `json:"watermark"`
 	DSP            bool   `json:"dsp"`
 	CustomOverlays bool   `json:"custom_overlays"`

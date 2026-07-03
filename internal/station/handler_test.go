@@ -19,12 +19,12 @@ import (
 // --- Mock station store ---
 
 type mockStationStore struct {
-	stations      map[string]*Station
-	slugIndex     map[string]*Station
-	tenantCounts  map[string]int
-	createErr     error
-	updateErr     error
-	deleteErr     error
+	stations     map[string]*Station
+	slugIndex    map[string]*Station
+	tenantCounts map[string]int
+	createErr    error
+	updateErr    error
+	deleteErr    error
 }
 
 func newMockStationStore() *mockStationStore {
@@ -803,12 +803,12 @@ func TestValidSlug(t *testing.T) {
 		{"ab", true},
 		{"a1", true},
 		{"my-cool-station-123", true},
-		{"a", false},          // too short
-		{"-bad", false},       // starts with hyphen
-		{"bad-", false},       // ends with hyphen
-		{"Bad", false},        // uppercase
-		{"has space", false},  // space
-		{"", false},           // empty
+		{"a", false},         // too short
+		{"-bad", false},      // starts with hyphen
+		{"bad-", false},      // ends with hyphen
+		{"Bad", false},       // uppercase
+		{"has space", false}, // space
+		{"", false},          // empty
 	}
 
 	for _, tt := range tests {

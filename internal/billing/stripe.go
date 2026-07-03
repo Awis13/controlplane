@@ -13,10 +13,10 @@ import (
 
 // Event types we handle from Stripe webhooks.
 const (
-	EventCheckoutCompleted     = "checkout.session.completed"
-	EventSubscriptionUpdated   = "customer.subscription.updated"
-	EventSubscriptionDeleted   = "customer.subscription.deleted"
-	EventInvoicePaymentFailed  = "invoice.payment_failed"
+	EventCheckoutCompleted    = "checkout.session.completed"
+	EventSubscriptionUpdated  = "customer.subscription.updated"
+	EventSubscriptionDeleted  = "customer.subscription.deleted"
+	EventInvoicePaymentFailed = "invoice.payment_failed"
 )
 
 // Service handles Stripe billing operations.
@@ -113,8 +113,8 @@ type CheckoutSessionData struct {
 // ParseCheckoutSession extracts relevant fields from a checkout.session.completed event.
 func ParseCheckoutSession(data json.RawMessage) (*CheckoutSessionData, error) {
 	var session struct {
-		Customer     string            `json:"customer"`
-		Subscription string            `json:"subscription"`
+		Customer        string `json:"customer"`
+		Subscription    string `json:"subscription"`
 		CustomerDetails struct {
 			Email string `json:"email"`
 		} `json:"customer_details"`
@@ -172,10 +172,10 @@ func ParseSubscription(data json.RawMessage) (*SubscriptionData, error) {
 
 // InvoiceData holds fields from invoice events.
 type InvoiceData struct {
-	CustomerID string
+	CustomerID    string
 	CustomerEmail string
-	AmountDue    int64
-	Currency     string
+	AmountDue     int64
+	Currency      string
 }
 
 // ParseInvoice extracts relevant fields from invoice events.

@@ -23,11 +23,11 @@ type ListParams struct {
 
 // ListResult holds a paginated list with total count.
 type ListResult[T any] struct {
-	Items      []T `json:"items"`
-	Total      int `json:"total"`
-	Limit      int `json:"limit"`
-	Offset     int `json:"offset"`
-	HasMore    bool `json:"has_more"`
+	Items   []T  `json:"items"`
+	Total   int  `json:"total"`
+	Limit   int  `json:"limit"`
+	Offset  int  `json:"offset"`
+	HasMore bool `json:"has_more"`
 }
 
 // ParseListParams parses pagination query parameters from the request.

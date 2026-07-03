@@ -35,13 +35,13 @@ type PollerStationUpdater interface {
 
 // Poller polls active tenant dashboard APIs to collect live station status.
 type Poller struct {
-	tenantLister    PollerTenantLister
-	stationStore    PollerStationUpdater
-	interval        time.Duration
-	httpClient      *http.Client
-	cache           sync.Map // key: tenantID (string), value: *StationStatus
-	wg              sync.WaitGroup
-	skipIPCheck     bool // test-only — skips SSRF validation
+	tenantLister PollerTenantLister
+	stationStore PollerStationUpdater
+	interval     time.Duration
+	httpClient   *http.Client
+	cache        sync.Map // key: tenantID (string), value: *StationStatus
+	wg           sync.WaitGroup
+	skipIPCheck  bool // test-only — skips SSRF validation
 }
 
 // NewPoller creates a new station status poller.

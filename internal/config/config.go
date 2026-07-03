@@ -9,31 +9,31 @@ import (
 )
 
 type Config struct {
-	DatabaseURL    string
-	ListenAddr     string
-	LogLevel       string
-	APIToken       string
-	EncryptionKey  string
-	WebAuthnRPID   string
-	WebAuthnOrigin string
-	SetupToken        string   // optional: required for first WebAuthn registration
-	JWTSecret         string   // required: HMAC-SHA256 secret for user JWT tokens
-	RegistrationToken string   // optional: if set, registration requires X-Registration-Token header
-	CookieSecure      bool     // optional: Secure flag on auth cookies (default: true, false for local dev)
-	CORSOrigins    []string // optional: allowed CORS origins (default: localhost dev ports)
-	WGHubPublicKey  string // optional: WireGuard hub public key
-	WGHubEndpoint   string // optional: WireGuard hub endpoint (host:port)
-	WGNetworkCIDR   string // optional: WireGuard network CIDR (default: 10.10.0.0/24)
-	CaddyAdminURL   string // optional: Caddy Admin API URL (e.g. http://172.17.0.1:2019)
-	CaddyServerName string // optional: Caddy server name (default: srv1)
-	CaddyDomain     string // optional: domain for tenant routes (default: example.com)
-	PollerInterval  time.Duration // optional: station status poll interval (default: 10s)
-	SSHKeyPath      string        // optional: path to SSH key for pct exec (default: /root/.ssh/id_ed25519)
-	SSODomain       string        // optional: domain for SSO token URLs (default: example.com)
-	SSOScheme       string        // optional: http or https for SSO URLs (default: https)
-	StripeSecretKey    string            // optional: Stripe API secret key
-	StripeWebhookSecret string           // optional: Stripe webhook signing secret
-	StripePrices       map[string]string // optional: tier name -> Stripe price ID
+	DatabaseURL         string
+	ListenAddr          string
+	LogLevel            string
+	APIToken            string
+	EncryptionKey       string
+	WebAuthnRPID        string
+	WebAuthnOrigin      string
+	SetupToken          string            // optional: required for first WebAuthn registration
+	JWTSecret           string            // required: HMAC-SHA256 secret for user JWT tokens
+	RegistrationToken   string            // optional: if set, registration requires X-Registration-Token header
+	CookieSecure        bool              // optional: Secure flag on auth cookies (default: true, false for local dev)
+	CORSOrigins         []string          // optional: allowed CORS origins (default: localhost dev ports)
+	WGHubPublicKey      string            // optional: WireGuard hub public key
+	WGHubEndpoint       string            // optional: WireGuard hub endpoint (host:port)
+	WGNetworkCIDR       string            // optional: WireGuard network CIDR (default: 10.10.0.0/24)
+	CaddyAdminURL       string            // optional: Caddy Admin API URL (e.g. http://172.17.0.1:2019)
+	CaddyServerName     string            // optional: Caddy server name (default: srv1)
+	CaddyDomain         string            // optional: domain for tenant routes (default: example.com)
+	PollerInterval      time.Duration     // optional: station status poll interval (default: 10s)
+	SSHKeyPath          string            // optional: path to SSH key for pct exec (default: /root/.ssh/id_ed25519)
+	SSODomain           string            // optional: domain for SSO token URLs (default: example.com)
+	SSOScheme           string            // optional: http or https for SSO URLs (default: https)
+	StripeSecretKey     string            // optional: Stripe API secret key
+	StripeWebhookSecret string            // optional: Stripe webhook signing secret
+	StripePrices        map[string]string // optional: tier name -> Stripe price ID
 }
 
 // Load reads configuration from environment variables.
@@ -59,31 +59,31 @@ func Load() (*Config, error) {
 	corsOrigins := parseCORSOrigins(os.Getenv("CORS_ORIGINS"))
 
 	return &Config{
-		DatabaseURL:    dbURL,
-		ListenAddr:     getEnv("LISTEN_ADDR", "127.0.0.1:8080"),
-		LogLevel:       getEnv("LOG_LEVEL", "info"),
-		APIToken:       apiToken,
-		EncryptionKey:  encKey,
-		WebAuthnRPID:   os.Getenv("WEBAUTHN_RPID"),
-		WebAuthnOrigin: os.Getenv("WEBAUTHN_ORIGIN"),
-		SetupToken:     os.Getenv("SETUP_TOKEN"),
-		JWTSecret:      jwtSecret,
-		CORSOrigins:    corsOrigins,
-		RegistrationToken: os.Getenv("REGISTRATION_TOKEN"),
-		CookieSecure:      parseBool("COOKIE_SECURE", true),
-		WGHubPublicKey:  os.Getenv("WG_HUB_PUBLIC_KEY"),
-		WGHubEndpoint:   os.Getenv("WG_HUB_ENDPOINT"),
-		WGNetworkCIDR:   getEnv("WG_NETWORK_CIDR", "10.10.0.0/24"),
-		CaddyAdminURL:   os.Getenv("CADDY_ADMIN_URL"),
-		CaddyServerName: getEnv("CADDY_SERVER_NAME", "srv1"),
-		CaddyDomain:     getEnv("CADDY_DOMAIN", "example.com"),
-		PollerInterval:  parseDuration("POLLER_INTERVAL", 10*time.Second),
-		SSHKeyPath:      getEnv("SSH_KEY_PATH", "/root/.ssh/id_ed25519"),
-		SSODomain:       getEnv("SSO_DOMAIN", "example.com"),
-		SSOScheme:       getEnv("SSO_SCHEME", "https"),
-		StripeSecretKey:    os.Getenv("STRIPE_SECRET_KEY"),
+		DatabaseURL:         dbURL,
+		ListenAddr:          getEnv("LISTEN_ADDR", "127.0.0.1:8080"),
+		LogLevel:            getEnv("LOG_LEVEL", "info"),
+		APIToken:            apiToken,
+		EncryptionKey:       encKey,
+		WebAuthnRPID:        os.Getenv("WEBAUTHN_RPID"),
+		WebAuthnOrigin:      os.Getenv("WEBAUTHN_ORIGIN"),
+		SetupToken:          os.Getenv("SETUP_TOKEN"),
+		JWTSecret:           jwtSecret,
+		CORSOrigins:         corsOrigins,
+		RegistrationToken:   os.Getenv("REGISTRATION_TOKEN"),
+		CookieSecure:        parseBool("COOKIE_SECURE", true),
+		WGHubPublicKey:      os.Getenv("WG_HUB_PUBLIC_KEY"),
+		WGHubEndpoint:       os.Getenv("WG_HUB_ENDPOINT"),
+		WGNetworkCIDR:       getEnv("WG_NETWORK_CIDR", "10.10.0.0/24"),
+		CaddyAdminURL:       os.Getenv("CADDY_ADMIN_URL"),
+		CaddyServerName:     getEnv("CADDY_SERVER_NAME", "srv1"),
+		CaddyDomain:         getEnv("CADDY_DOMAIN", "example.com"),
+		PollerInterval:      parseDuration("POLLER_INTERVAL", 10*time.Second),
+		SSHKeyPath:          getEnv("SSH_KEY_PATH", "/root/.ssh/id_ed25519"),
+		SSODomain:           getEnv("SSO_DOMAIN", "example.com"),
+		SSOScheme:           getEnv("SSO_SCHEME", "https"),
+		StripeSecretKey:     os.Getenv("STRIPE_SECRET_KEY"),
 		StripeWebhookSecret: os.Getenv("STRIPE_WEBHOOK_SECRET"),
-		StripePrices:       parseStripePrices(),
+		StripePrices:        parseStripePrices(),
 	}, nil
 }
 

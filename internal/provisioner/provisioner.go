@@ -136,7 +136,7 @@ type Provisioner struct {
 	clientFactory    ClientFactory
 	clients          map[string]ProxmoxClient // keyed by node ID, lazy-initialized
 	mu               sync.RWMutex             // guards clients map
-	sem              chan struct{}             // bounded concurrency for provision goroutines
+	sem              chan struct{}            // bounded concurrency for provision goroutines
 	wg               sync.WaitGroup           // tracks in-flight provisions for graceful shutdown
 	caddyClient      CaddyClient              // optional: Caddy route management
 	stationCreator   StationCreator           // optional: auto-create station on provisioning
@@ -682,7 +682,6 @@ func (p *Provisioner) cleanupAndError(ctx context.Context, client ProxmoxClient,
 	}
 	p.setError(ctx, tenantID, nodeID, ramMB, errMsg)
 }
-
 
 // deployFreeRadio клонирует репо, пишет .env и запускает Docker-сервисы внутри LXC.
 // Best-effort: ошибки логируются, но не прерывают провижининг.

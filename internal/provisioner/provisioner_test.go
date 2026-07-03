@@ -165,9 +165,9 @@ func (m *mockProjectStore) GetByID(_ context.Context, id string) (*project.Proje
 // --- Mock station creator ---
 
 type mockStationCreator struct {
-	mu      sync.Mutex
-	calls   []stationCreateCall
-	err     error
+	mu    sync.Mutex
+	calls []stationCreateCall
+	err   error
 }
 
 type stationCreateCall struct {
@@ -204,25 +204,25 @@ func (w *mockWaiter) Wait(_ context.Context, _ ...proxmox.WaitOption) error {
 // --- Mock Proxmox client (implements ProxmoxClient with Waiter return) ---
 
 type mockProxmoxClient struct {
-	mu                    sync.Mutex
-	nextID                int
-	nextIDErr             error
-	cloneErr              error
-	cloneWaitErr          error
-	startErr              error
-	startWaitErr          error
-	stopErr               error
-	stopWaitErr           error
-	deleteErr             error
-	deleteWaitErr         error
-	mountPointsErr        error
-	cloneCalled           bool
-	startCalled           bool
-	stopCalled            bool
-	deleteCalled          bool
-	mountPointsCalled     bool
-	deletedIDs            []int
-	mountPointsReceived   map[string]string
+	mu                  sync.Mutex
+	nextID              int
+	nextIDErr           error
+	cloneErr            error
+	cloneWaitErr        error
+	startErr            error
+	startWaitErr        error
+	stopErr             error
+	stopWaitErr         error
+	deleteErr           error
+	deleteWaitErr       error
+	mountPointsErr      error
+	cloneCalled         bool
+	startCalled         bool
+	stopCalled          bool
+	deleteCalled        bool
+	mountPointsCalled   bool
+	deletedIDs          []int
+	mountPointsReceived map[string]string
 }
 
 func (m *mockProxmoxClient) GetNextID(_ context.Context) (int, error) {
@@ -299,7 +299,7 @@ type mockSSHExec struct {
 
 type sshExecCall struct {
 	SSHHost string
-	VMID    int    // only for ExecInContainer
+	VMID    int // only for ExecInContainer
 	Command string
 }
 
@@ -1063,10 +1063,10 @@ func TestGetClient_EmptyToken(t *testing.T) {
 // --- CaddyClient tests ---
 
 type mockCaddyClient struct {
-	mu              sync.Mutex
-	addedRoutes     map[string]string
-	removedRoutes   []string
-	removeRouteErr  error
+	mu             sync.Mutex
+	addedRoutes    map[string]string
+	removedRoutes  []string
+	removeRouteErr error
 }
 
 func newMockCaddyClient() *mockCaddyClient {
@@ -1363,7 +1363,7 @@ func TestDeprovision_RealDeleteError_StillFails(t *testing.T) {
 type dynamicMockSSHExec struct {
 	mu         sync.Mutex
 	callCount  int
-	failOnCall int    // call number (1-based) at which to return error
+	failOnCall int // call number (1-based) at which to return error
 	err        error
 }
 
@@ -1735,4 +1735,3 @@ func TestProvision_AutoDeploy_ComposeUpFailure(t *testing.T) {
 		t.Errorf("expected 4 ExecInContainer calls (stopped at compose up), got %d", len(ssh.execInCtrCalls))
 	}
 }
-
