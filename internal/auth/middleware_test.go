@@ -50,11 +50,11 @@ func TestUserFromContext_WrongType(t *testing.T) {
 
 // --- Cookie fallback tests for JWTAuth middleware ---
 
-// mockUserStore — заглушка для user.Store (нужен pgxpool, но мы тестируем до DB-вызова)
-// JWTAuth middleware вызывает userStore.GetByID — на nil store будет паника.
-// Мы тестируем: 1) что cookie принимается, 2) что Authorization header приоритетнее.
+// mockUserStore — stub for user.Store (needs pgxpool, but we test before the DB call)
+// JWTAuth middleware calls userStore.GetByID — a nil store will panic.
+// We test: 1) that the cookie is accepted, 2) that the Authorization header takes priority.
 
-// TestJWTAuth_NoHeaderNoCookie проверяет 401 без auth header и без cookie.
+// TestJWTAuth_NoHeaderNoCookie verifies 401 without an auth header and without a cookie.
 func TestJWTAuth_NoHeaderNoCookie(t *testing.T) {
 	middleware := JWTAuth(nil, nil, "test-secret")
 	handler := middleware(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -71,12 +71,12 @@ func TestJWTAuth_NoHeaderNoCookie(t *testing.T) {
 	}
 }
 
-// TestJWTAuth_CookieFallback проверяет, что middleware читает JWT из access_token cookie.
+// TestJWTAuth_CookieFallback verifies that the middleware reads the JWT from the access_token cookie.
 func TestJWTAuth_CookieFallback(t *testing.T) {
 	jwtSecret := "test-secret-for-cookie"
 	userID := uuid.MustParse("22222222-2222-2222-2222-222222222222")
 
-	// Создаём валидный JWT
+	// Create a valid JWT
 	tok := jwt.NewWithClaims(jwt.SigningMethodHS256, jwt.MapClaims{
 		"sub":   userID.String(),
 		"email": "cookie@example.com",
@@ -89,15 +89,15 @@ func TestJWTAuth_CookieFallback(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	// tokenStore=nil → паника при IsRevoked? Нет — проверяем if tokenStore != nil.
-	// userStore=nil → паника при GetByID. Значит, если дошли до паники — cookie был прочитан.
+	// tokenStore=nil → panic on IsRevoked? No — we check if tokenStore != nil.
+	// userStore=nil → panic on GetByID. So if we reach the panic, the cookie was read.
 	middleware := JWTAuth(nil, nil, jwtSecret)
 	handler := middleware(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		t.Fatal("handler should not be called (userStore is nil)")
 	}))
 
 	req := httptest.NewRequest(http.MethodGet, "/test", nil)
-	// Нет Authorization header, только cookie
+	// No Authorization header, only a cookie
 	req.AddCookie(&http.Cookie{
 		Name:  "access_token",
 		Value: tokenStr,
@@ -115,21 +115,21 @@ func TestJWTAuth_CookieFallback(t *testing.T) {
 		handler.ServeHTTP(w, req)
 	}()
 
-	// Паника на nil userStore.GetByID = JWT из cookie был успешно распарсен
+	// A panic on nil userStore.GetByID = the JWT from the cookie was parsed successfully
 	if !panicked {
-		// Если не было паники, проверяем что не 401 "missing authorization"
+		// If there was no panic, verify it is not a 401 "missing authorization"
 		if w.Code == http.StatusUnauthorized {
 			t.Fatal("middleware should read JWT from cookie, but returned 401")
 		}
 	}
-	// Паника — значит cookie прочитан и JWT валидирован
+	// A panic means the cookie was read and the JWT was validated
 }
 
-// TestJWTAuth_HeaderPriorityOverCookie проверяет, что Authorization header приоритетнее cookie.
+// TestJWTAuth_HeaderPriorityOverCookie verifies that the Authorization header takes priority over the cookie.
 func TestJWTAuth_HeaderPriorityOverCookie(t *testing.T) {
 	jwtSecret := "test-secret-priority"
 
-	// Создаём валидный JWT для header
+	// Create a valid JWT for the header
 	headerToken := jwt.NewWithClaims(jwt.SigningMethodHS256, jwt.MapClaims{
 		"sub":   uuid.New().String(),
 		"email": "header@example.com",
@@ -138,7 +138,7 @@ func TestJWTAuth_HeaderPriorityOverCookie(t *testing.T) {
 	})
 	headerTokenStr, _ := headerToken.SignedString([]byte(jwtSecret))
 
-	// Невалидный токен для cookie
+	// Invalid token for the cookie
 	cookieTokenStr := "invalid-cookie-token"
 
 	middleware := JWTAuth(nil, nil, jwtSecret)
@@ -165,13 +165,13 @@ func TestJWTAuth_HeaderPriorityOverCookie(t *testing.T) {
 		handler.ServeHTTP(w, req)
 	}()
 
-	// Если header JWT валиден — должна быть паника на GetByID (= header токен использован, а не cookie)
+	// If the header JWT is valid, there should be a panic on GetByID (= the header token was used, not the cookie)
 	if !panicked && w.Code == http.StatusUnauthorized {
 		t.Fatal("valid header token should take priority over invalid cookie")
 	}
 }
 
-// TestJWTAuth_InvalidCookieToken проверяет, что невалидный JWT в cookie отклоняется.
+// TestJWTAuth_InvalidCookieToken verifies that an invalid JWT in the cookie is rejected.
 func TestJWTAuth_InvalidCookieToken(t *testing.T) {
 	middleware := JWTAuth(nil, nil, "test-secret")
 	handler := middleware(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

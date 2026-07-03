@@ -773,9 +773,9 @@ func TestCreate_NoTenantID_ReturnsBadRequest(t *testing.T) {
 }
 
 func TestCreate_NoTenantID_NoProviderAllowed(t *testing.T) {
-	// Когда tenantProvider не настроен, создание без tenant_id допустимо
+	// When tenantProvider is not configured, creation without tenant_id is allowed
 	store := newMockStationStore()
-	h := NewHandler(store, nil) // без tenantProvider
+	h := NewHandler(store, nil) // no tenantProvider
 	r := stationRouter(h)
 
 	body, _ := json.Marshal(CreateStationRequest{

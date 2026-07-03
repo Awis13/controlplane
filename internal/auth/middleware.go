@@ -24,7 +24,7 @@ func JWTAuth(userStore *user.Store, tokenStore *TokenStore, jwtSecret string) fu
 
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			// Приоритет: Authorization header → access_token cookie
+			// Priority: Authorization header → access_token cookie
 			var tokenStr string
 			authHeader := r.Header.Get("Authorization")
 			if strings.HasPrefix(authHeader, "Bearer ") {
