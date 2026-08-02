@@ -280,6 +280,39 @@ func TestValidateSubdomain(t *testing.T) {
 	}
 }
 
+// TestReservedSubdomains_EveryEntryIsRefused walks the whole reserved list
+// rather than the three names spot-checked in TestValidateSubdomain, which is
+// where the charset and length boundaries are pinned.
+func TestReservedSubdomains_EveryEntryIsRefused(t *testing.T) {
+	if len(reservedSubdomains) == 0 {
+		t.Fatal("the reserved list is empty, so nothing is protected")
+	}
+
+	for name := range reservedSubdomains {
+		t.Run(name, func(t *testing.T) {
+			err := ValidateSubdomain(name)
+			if err == nil {
+				t.Fatalf("ValidateSubdomain(%q) = nil, want a refusal", name)
+			}
+			if err.Message != "subdomain is reserved" {
+				t.Errorf("message = %q, want the reserved refusal", err.Message)
+			}
+		})
+	}
+}
+
+// TestReservedSubdomains_AreReachable guards a way this list can rot: the
+// charset check runs first, so a reserved entry that cannot pass it would never
+// be consulted, and the caller would see a confusing message about the charset
+// instead of learning the name is taken.
+func TestReservedSubdomains_AreReachable(t *testing.T) {
+	for name := range reservedSubdomains {
+		if len(name) > 63 || !subdomainRegexp.MatchString(name) {
+			t.Errorf("reserved entry %q cannot pass the format check, so it is dead configuration", name)
+		}
+	}
+}
+
 // --- Create ---
 
 func TestLifecycleCreate_WithoutOwner(t *testing.T) {

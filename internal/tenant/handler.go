@@ -5,7 +5,6 @@ import (
 	"errors"
 	"log/slog"
 	"net/http"
-	"regexp"
 
 	"github.com/go-chi/chi/v5"
 	"github.com/jackc/pgx/v5/pgconn"
@@ -50,15 +49,6 @@ type Provisioner interface {
 	Deprovision(ctx context.Context, tenantID, nodeID, subdomain string, lxcID, ramMB int) error
 	Suspend(ctx context.Context, tenantID, nodeID string, lxcID int) error
 	Resume(ctx context.Context, tenantID, nodeID string, lxcID int) error
-}
-
-var subdomainRegexp = regexp.MustCompile(`^[a-z0-9][a-z0-9-]*[a-z0-9]$`)
-
-// reservedSubdomains are subdomains that cannot be used by tenants.
-var reservedSubdomains = map[string]bool{
-	"www": true, "api": true, "admin": true, "app": true,
-	"mail": true, "smtp": true, "ftp": true, "ns1": true, "ns2": true,
-	"cdn": true, "static": true, "assets": true, "media": true,
 }
 
 // Handler handles tenant HTTP requests.

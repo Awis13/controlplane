@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"regexp"
 
 	"github.com/jackc/pgx/v5/pgconn"
 
@@ -145,6 +146,19 @@ func NewLifecycleService(store LifecycleTenantStore, nodeStore LifecycleNodeStor
 		provisioner:  provisioner,
 		auditStore:   normalizeAuditLogger(auditStore),
 	}
+}
+
+// subdomainRegexp accepts lowercase alphanumeric labels with interior hyphens.
+// The anchors require the first and last character to be alphanumeric, which
+// also makes a single character fail: the pattern needs at least two.
+var subdomainRegexp = regexp.MustCompile(`^[a-z0-9][a-z0-9-]*[a-z0-9]$`)
+
+// reservedSubdomains cannot be taken by tenants because the platform serves
+// something else from them.
+var reservedSubdomains = map[string]bool{
+	"www": true, "api": true, "admin": true, "app": true,
+	"mail": true, "smtp": true, "ftp": true, "ns1": true, "ns2": true,
+	"cdn": true, "static": true, "assets": true, "media": true,
 }
 
 // ValidateSubdomain applies the subdomain rules shared by every entry point.
