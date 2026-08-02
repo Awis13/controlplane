@@ -129,20 +129,21 @@ type CaddyClient interface {
 
 // Provisioner handles async provisioning and deprovisioning of tenant LXC containers.
 type Provisioner struct {
-	nodeStore        NodeStore
-	tenantStore      TenantStore
-	projectStore     ProjectStore
-	encryptionKey    string
-	clientFactory    ClientFactory
-	clients          map[string]ProxmoxClient // keyed by node ID, lazy-initialized
-	mu               sync.RWMutex             // guards clients map
-	sem              chan struct{}            // bounded concurrency for provision goroutines
-	wg               sync.WaitGroup           // tracks in-flight provisions for graceful shutdown
-	caddyClient      CaddyClient              // optional: Caddy route management
-	stationCreator   StationCreator           // optional: auto-create station on provisioning
-	caddyDomain      string                   // domain for station stream URLs
-	sshClient        SSHExec                  // optional: SSH exec for writing tokens and mount points
-	freeRadioRepoURL string                   // freeRadio repository URL for auto-deploy
+	nodeStore           NodeStore
+	tenantStore         TenantStore
+	projectStore        ProjectStore
+	encryptionKey       string
+	clientFactory       ClientFactory
+	clients             map[string]ProxmoxClient // keyed by node ID, lazy-initialized
+	mu                  sync.RWMutex             // guards clients map
+	sem                 chan struct{}            // bounded concurrency for provision goroutines
+	wg                  sync.WaitGroup           // tracks in-flight provisions for graceful shutdown
+	caddyClient         CaddyClient              // optional: Caddy route management
+	stationCreator      StationCreator           // optional: auto-create station on provisioning
+	caddyDomain         string                   // domain for station stream URLs
+	sshClient           SSHExec                  // optional: SSH exec for writing tokens and mount points
+	freeRadioRepoURL    string                   // freeRadio repository URL for auto-deploy
+	freeRadioRepoBranch string                   // branch to deploy; empty falls back to the default branch
 
 	// Health check timings. Fields rather than constants so tests can poll in
 	// milliseconds instead of waiting out the production budget.
@@ -189,9 +190,20 @@ func (p *Provisioner) WithSSHClient(c SSHExec) {
 	p.sshClient = c
 }
 
-// WithFreeRadioRepo sets the freeRadio repo URL for auto-deploy in new containers.
-func (p *Provisioner) WithFreeRadioRepo(url string) {
+// AutoDeployEnabled reports whether a freeRadio repo is configured. With one,
+// new containers get a full deploy; without one, the provisioner falls back to
+// writing only the dashboard token into a checkout the template already holds.
+func (p *Provisioner) AutoDeployEnabled() bool {
+	return p.freeRadioRepoURL != ""
+}
+
+// WithFreeRadioRepo enables auto-deploy of freeRadio into new containers.
+// The branch is explicit rather than left to the remote's default: the default
+// branch is main, which trails the branch this deploy targets, so cloning it
+// would install older code than the tenant is meant to run.
+func (p *Provisioner) WithFreeRadioRepo(url, branch string) {
 	p.freeRadioRepoURL = url
+	p.freeRadioRepoBranch = branch
 }
 
 // InvalidateClient removes the cached Proxmox client for a node,
@@ -437,7 +449,7 @@ func (p *Provisioner) doProvision(tenantID, nodeID, projectID, subdomain string,
 	}
 
 	// Write DASHBOARD_TOKEN to container (legacy path — when auto-deploy is not enabled)
-	if p.sshClient != nil && dashToken != "" && p.freeRadioRepoURL == "" {
+	if p.sshClient != nil && dashToken != "" && !p.AutoDeployEnabled() {
 		if sshHost, err := sshexec.ExtractHost(nodeInfo.ProxmoxURL); err != nil {
 			log.Warn("provision: extract ssh host from proxmox url", "error", err)
 		} else {
@@ -465,7 +477,7 @@ func (p *Provisioner) doProvision(tenantID, nodeID, projectID, subdomain string,
 	}
 
 	// Auto-deploy freeRadio (best-effort, don't fail provisioning)
-	if p.sshClient != nil && p.freeRadioRepoURL != "" {
+	if p.sshClient != nil && p.AutoDeployEnabled() {
 		if sshHost, err := sshexec.ExtractHost(nodeInfo.ProxmoxURL); err != nil {
 			log.Error("provision: extract ssh host for deploy", "error", err)
 		} else {

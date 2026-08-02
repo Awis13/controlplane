@@ -215,3 +215,48 @@ func TestLoad_Defaults(t *testing.T) {
 		t.Errorf("CORSOrigins default count = %d, want 2", len(cfg.CORSOrigins))
 	}
 }
+
+// --- freeRadio auto-deploy ---
+
+func TestLoad_FreeRadioDefaults(t *testing.T) {
+	t.Setenv("DATABASE_URL", "postgres://localhost/test")
+	t.Setenv("API_TOKEN", "test-token")
+	t.Setenv("ENCRYPTION_KEY", "test-key")
+	t.Setenv("JWT_SECRET", "test-jwt-secret")
+	os.Unsetenv("FREERADIO_REPO_URL")
+	os.Unsetenv("FREERADIO_REPO_BRANCH")
+
+	cfg, err := Load()
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	// An unset URL is what keeps auto-deploy off and the legacy path in use.
+	if cfg.FreeRadioRepoURL != "" {
+		t.Errorf("FreeRadioRepoURL = %q, want empty so auto-deploy stays disabled", cfg.FreeRadioRepoURL)
+	}
+	if cfg.FreeRadioRepoBranch != "dev" {
+		t.Errorf("FreeRadioRepoBranch = %q, want %q", cfg.FreeRadioRepoBranch, "dev")
+	}
+}
+
+func TestLoad_FreeRadioFromEnv(t *testing.T) {
+	t.Setenv("DATABASE_URL", "postgres://localhost/test")
+	t.Setenv("API_TOKEN", "test-token")
+	t.Setenv("ENCRYPTION_KEY", "test-key")
+	t.Setenv("JWT_SECRET", "test-jwt-secret")
+	t.Setenv("FREERADIO_REPO_URL", "https://github.com/example/freeRadio.git")
+	t.Setenv("FREERADIO_REPO_BRANCH", "main")
+
+	cfg, err := Load()
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	if cfg.FreeRadioRepoURL != "https://github.com/example/freeRadio.git" {
+		t.Errorf("FreeRadioRepoURL = %q", cfg.FreeRadioRepoURL)
+	}
+	if cfg.FreeRadioRepoBranch != "main" {
+		t.Errorf("FreeRadioRepoBranch = %q, want the configured branch to override the default", cfg.FreeRadioRepoBranch)
+	}
+}

@@ -1562,7 +1562,7 @@ func TestProvision_AutoDeploy_HappyPath(t *testing.T) {
 
 	ssh := &mockSSHExecWithDeployCalls{}
 	p.WithSSHClient(ssh)
-	p.WithFreeRadioRepo("https://github.com/Awis13/freeRadio.git")
+	p.WithFreeRadioRepo("https://github.com/Awis13/freeRadio.git", "dev")
 
 	waitForProvision(p, "tenant-1", n.ID, proj.ID, "myapp", proj.RAMMB)
 
@@ -1643,7 +1643,7 @@ func TestProvision_AutoDeploy_Failure_DoesNotFailProvisioning(t *testing.T) {
 		failErr:         fmt.Errorf("docker install failed"),
 	}
 	p.WithSSHClient(ssh)
-	p.WithFreeRadioRepo("https://github.com/Awis13/freeRadio.git")
+	p.WithFreeRadioRepo("https://github.com/Awis13/freeRadio.git", "dev")
 
 	waitForProvision(p, "tenant-1", n.ID, proj.ID, "myapp", proj.RAMMB)
 
@@ -1670,7 +1670,7 @@ func TestProvision_AutoDeploy_SkippedWithoutSSH(t *testing.T) {
 	p := setupProvisioner(nodeStore, tenantStore, projectStore, mockClient, n.ID)
 
 	// Only WithFreeRadioRepo, without WithSSHClient — the deploy should be skipped
-	p.WithFreeRadioRepo("https://github.com/Awis13/freeRadio.git")
+	p.WithFreeRadioRepo("https://github.com/Awis13/freeRadio.git", "dev")
 
 	waitForProvision(p, "tenant-1", n.ID, proj.ID, "myapp", proj.RAMMB)
 
@@ -1701,7 +1701,7 @@ func TestProvision_AutoDeploy_ComposeUpFailure(t *testing.T) {
 		failErr:         fmt.Errorf("docker compose up: exit status 1"),
 	}
 	p.WithSSHClient(ssh)
-	p.WithFreeRadioRepo("https://github.com/Awis13/freeRadio.git")
+	p.WithFreeRadioRepo("https://github.com/Awis13/freeRadio.git", "dev")
 
 	waitForProvision(p, "tenant-1", n.ID, proj.ID, "myapp", proj.RAMMB)
 
@@ -1719,5 +1719,92 @@ func TestProvision_AutoDeploy_ComposeUpFailure(t *testing.T) {
 	// There should be exactly 4 calls — after the compose up failure the rest are not executed
 	if len(ssh.execInCtrCalls) != 4 {
 		t.Errorf("expected 4 ExecInContainer calls (stopped at compose up), got %d", len(ssh.execInCtrCalls))
+	}
+}
+
+// --- Auto-deploy wiring ---
+
+// TestProvision_LegacyPathWhenRepoUnset pins the disabled case: with no repo
+// configured the provisioner keeps writing only the dashboard token into a
+// container that already holds a checkout, and never tries to deploy.
+func TestProvision_LegacyPathWhenRepoUnset(t *testing.T) {
+	nodeStore := newMockNodeStore()
+	tenantStore := newMockTenantStore()
+	projectStore := newMockProjectStore()
+
+	proj := testProjectNoHealth()
+	n := testNode()
+	projectStore.projects[proj.ID] = proj
+	nodeStore.nodes[n.ID] = n
+
+	mockClient := &mockProxmoxClient{nextID: 105}
+	p := setupProvisioner(nodeStore, tenantStore, projectStore, mockClient, n.ID)
+
+	ssh := &mockSSHExecWithDeployCalls{}
+	p.WithSSHClient(ssh)
+	// WithFreeRadioRepo is deliberately not called.
+
+	waitForProvision(p, "tenant-1", n.ID, proj.ID, "myapp", proj.RAMMB)
+
+	ssh.mu.Lock()
+	defer ssh.mu.Unlock()
+
+	var sawLegacyTokenWrite bool
+	for _, call := range ssh.execInCtrCalls {
+		if strings.Contains(call.Command, "DASHBOARD_TOKEN=") {
+			sawLegacyTokenWrite = true
+		}
+		if strings.Contains(call.Command, "git clone") || strings.Contains(call.Command, "docker compose") {
+			t.Errorf("deploy command ran with no repo configured: %q", call.Command)
+		}
+	}
+	if !sawLegacyTokenWrite {
+		t.Error("expected the legacy dashboard token write")
+	}
+}
+
+// TestProvision_DeployPathWhenRepoSet pins the enabled case: the deploy runs and
+// the legacy token write does not, since the deploy writes the whole .env.
+func TestProvision_DeployPathWhenRepoSet(t *testing.T) {
+	nodeStore := newMockNodeStore()
+	tenantStore := newMockTenantStore()
+	projectStore := newMockProjectStore()
+
+	proj := testProjectNoHealth()
+	n := testNode()
+	projectStore.projects[proj.ID] = proj
+	nodeStore.nodes[n.ID] = n
+
+	mockClient := &mockProxmoxClient{nextID: 105}
+	p := setupProvisioner(nodeStore, tenantStore, projectStore, mockClient, n.ID)
+
+	ssh := &mockSSHExecWithDeployCalls{}
+	p.WithSSHClient(ssh)
+	p.WithFreeRadioRepo("https://github.com/example/freeRadio.git", "dev")
+
+	waitForProvision(p, "tenant-1", n.ID, proj.ID, "myapp", proj.RAMMB)
+
+	ssh.mu.Lock()
+	defer ssh.mu.Unlock()
+
+	var sawClone, sawCompose, sawLegacyTokenWrite bool
+	for _, call := range ssh.execInCtrCalls {
+		switch {
+		case strings.Contains(call.Command, "https://github.com/example/freeRadio.git"):
+			sawClone = true
+		case strings.Contains(call.Command, "docker compose up"):
+			sawCompose = true
+		case strings.HasPrefix(call.Command, "sed -i '/^DASHBOARD_TOKEN=/d'"):
+			sawLegacyTokenWrite = true
+		}
+	}
+	if !sawClone {
+		t.Error("expected the configured repo to be fetched")
+	}
+	if !sawCompose {
+		t.Error("expected the compose stack to be started")
+	}
+	if sawLegacyTokenWrite {
+		t.Error("the legacy token write must not run when the deploy writes the whole .env")
 	}
 }
