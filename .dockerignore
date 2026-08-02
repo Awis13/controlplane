@@ -1,0 +1,22 @@
+# The build compiles ./cmd/server and nothing else, so the context is an
+# allowlist rather than a list of things to keep out. A denylist has to be
+# updated every time something new appears in the repository, and the cost of
+# forgetting is a secret baked into an image layer: before this file existed,
+# COPY . . put the live .env, the whole .git directory and a .DS_Store into the
+# builder image, and the .env carried a real API token.
+*
+
+!go.mod
+!go.sum
+!cmd/
+!internal/
+
+# Nothing below is needed to compile, and some of it must never be shipped:
+#   .env, .env.*      secrets, including the live one
+#   .git              history, ~10MB, and every secret ever committed
+#   .github, *.md     project furniture
+#   .DS_Store, ~$*    editor and finder droppings
+#   docker-compose.yml, Dockerfile   describe the build, not inputs to it
+#
+# Adding a package under a new top-level directory means adding it above. The
+# build fails loudly in that case rather than silently shipping something.
