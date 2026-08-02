@@ -143,6 +143,12 @@ type Provisioner struct {
 	caddyDomain      string                   // domain for station stream URLs
 	sshClient        SSHExec                  // optional: SSH exec for writing tokens and mount points
 	freeRadioRepoURL string                   // freeRadio repository URL for auto-deploy
+
+	// Health check timings. Fields rather than constants so tests can poll in
+	// milliseconds instead of waiting out the production budget.
+	healthTimeout       time.Duration // total budget for the post-provision health check
+	healthInterval      time.Duration // delay between polls
+	healthClientTimeout time.Duration // per-request timeout of a single poll
 }
 
 // New creates a new Provisioner.
@@ -155,6 +161,10 @@ func New(nodeStore NodeStore, tenantStore TenantStore, projectStore ProjectStore
 		clientFactory: defaultClientFactory,
 		clients:       make(map[string]ProxmoxClient),
 		sem:           make(chan struct{}, maxConcurrentJobs),
+
+		healthTimeout:       60 * time.Second,
+		healthInterval:      5 * time.Second,
+		healthClientTimeout: 5 * time.Second,
 	}
 }
 
@@ -497,7 +507,7 @@ func (p *Provisioner) doProvision(tenantID, nodeID, projectID, subdomain string,
 	if lxcIP != "" && len(proj.Ports) > 0 && proj.HealthPath != "" {
 		healthURL := fmt.Sprintf("http://%s:%d%s", lxcIP, proj.Ports[0], proj.HealthPath)
 		log.Info("provision: checking health", "url", healthURL)
-		healthy := p.waitForHealth(ctx, healthURL, 60*time.Second, 5*time.Second)
+		healthy := p.waitForHealth(ctx, healthURL)
 		status := "healthy"
 		if !healthy {
 			status = "unhealthy"
@@ -512,9 +522,9 @@ func (p *Provisioner) doProvision(tenantID, nodeID, projectID, subdomain string,
 }
 
 // waitForHealth polls a URL until it returns 200 or timeout.
-func (p *Provisioner) waitForHealth(ctx context.Context, url string, timeout, interval time.Duration) bool {
-	deadline := time.Now().Add(timeout)
-	client := &http.Client{Timeout: 5 * time.Second}
+func (p *Provisioner) waitForHealth(ctx context.Context, url string) bool {
+	deadline := time.Now().Add(p.healthTimeout)
+	client := &http.Client{Timeout: p.healthClientTimeout}
 	for time.Now().Before(deadline) {
 		resp, err := client.Get(url)
 		if err == nil {
@@ -526,7 +536,7 @@ func (p *Provisioner) waitForHealth(ctx context.Context, url string, timeout, in
 		select {
 		case <-ctx.Done():
 			return false
-		case <-time.After(interval):
+		case <-time.After(p.healthInterval):
 		}
 	}
 	return false
