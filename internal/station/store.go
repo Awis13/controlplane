@@ -35,34 +35,53 @@ func scanStation(row pgx.Row) (*Station, error) {
 	return &s, nil
 }
 
-// ListPublic returns public stations with search, filtering, sorting and pagination.
-func (s *Store) ListPublic(ctx context.Context, p ListPublicParams) ([]Station, int, error) {
+// likeEscaper neutralises LIKE/ILIKE metacharacters so a search term matches
+// literally. Without it a search for "100%" matches every row. Backslash is the
+// escape character, declared explicitly by the ESCAPE clause on each comparison.
+var likeEscaper = strings.NewReplacer(`\`, `\\`, `%`, `\%`, `_`, `\_`)
+
+// likePattern wraps a user search term in wildcards after escaping the term itself.
+func likePattern(q string) string {
+	return "%" + likeEscaper.Replace(q) + "%"
+}
+
+// buildListPublicQuery assembles the WHERE clause, the ORDER BY and the leading
+// arguments for ListPublic. It is split out from the query so the escaping and
+// ordering rules are testable without a database.
+func buildListPublicQuery(p ListPublicParams) (where, orderBy string, args []any) {
 	whereClauses := []string{"is_public = true"}
-	args := []any{}
 	argIdx := 1
 
 	if p.Query != "" {
 		whereClauses = append(whereClauses, fmt.Sprintf(
-			"(name ILIKE $%d OR genre ILIKE $%d OR description ILIKE $%d)", argIdx, argIdx, argIdx))
-		args = append(args, "%"+p.Query+"%")
+			`(name ILIKE $%d ESCAPE '\' OR genre ILIKE $%d ESCAPE '\' OR description ILIKE $%d ESCAPE '\')`,
+			argIdx, argIdx, argIdx))
+		args = append(args, likePattern(p.Query))
 		argIdx++
 	}
 	if p.Genre != "" {
 		whereClauses = append(whereClauses, fmt.Sprintf("genre = $%d", argIdx))
 		args = append(args, p.Genre)
-		argIdx++
 	}
 
-	where := "WHERE " + strings.Join(whereClauses, " AND ")
-
-	orderBy := "ORDER BY name"
+	orderBy = "ORDER BY name"
 	switch p.Sort {
 	case "newest":
 		orderBy = "ORDER BY created_at DESC"
 	case "online_first":
 		orderBy = "ORDER BY is_online DESC, name"
 	}
-	// "listeners" sort is done post-query in handler after poller enrichment
+	// "listeners" deliberately keeps ORDER BY name. The listener count is not a
+	// column — it exists only in the poller's in-process cache — so the handler
+	// sorts and pages that case itself and depends on this scan window being
+	// deterministic.
+
+	return "WHERE " + strings.Join(whereClauses, " AND "), orderBy, args
+}
+
+// ListPublic returns public stations with search, filtering, sorting and pagination.
+func (s *Store) ListPublic(ctx context.Context, p ListPublicParams) ([]Station, int, error) {
+	where, orderBy, args := buildListPublicQuery(p)
 
 	// Count total
 	var total int
@@ -72,9 +91,10 @@ func (s *Store) ListPublic(ctx context.Context, p ListPublicParams) ([]Station, 
 	}
 
 	// Fetch page
+	limitIdx := len(args) + 1
 	args = append(args, p.Limit, p.Offset)
 	query := fmt.Sprintf("SELECT %s FROM stations %s %s LIMIT $%d OFFSET $%d",
-		stationColumns, where, orderBy, argIdx, argIdx+1)
+		stationColumns, where, orderBy, limitIdx, limitIdx+1)
 
 	rows, err := s.pool.Query(ctx, query, args...)
 	if err != nil {

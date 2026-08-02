@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"sort"
 	"testing"
 	"time"
 
@@ -25,6 +26,10 @@ type mockStationStore struct {
 	createErr    error
 	updateErr    error
 	deleteErr    error
+
+	// lastListParams records what the handler asked the store for, so tests can
+	// pin which window the handler requested and not just what came back.
+	lastListParams ListPublicParams
 }
 
 func newMockStationStore() *mockStationStore {
@@ -40,14 +45,29 @@ func (m *mockStationStore) addStation(st *Station) {
 	m.slugIndex[st.Slug] = st
 }
 
-func (m *mockStationStore) ListPublic(_ context.Context, _ ListPublicParams) ([]Station, int, error) {
+// ListPublic mirrors the real store closely enough for pagination to mean
+// something: it orders by name, applies Limit/Offset to the returned page, and
+// reports the total before paging.
+func (m *mockStationStore) ListPublic(_ context.Context, p ListPublicParams) ([]Station, int, error) {
+	m.lastListParams = p
+
 	var result []Station
 	for _, st := range m.stations {
 		if st.IsPublic {
 			result = append(result, *st)
 		}
 	}
-	return result, len(result), nil
+	sort.Slice(result, func(i, j int) bool { return result[i].Name < result[j].Name })
+
+	total := len(result)
+	if p.Offset >= len(result) {
+		return nil, total, nil
+	}
+	end := p.Offset + p.Limit
+	if p.Limit <= 0 || end > len(result) {
+		end = len(result)
+	}
+	return result[p.Offset:end], total, nil
 }
 
 func (m *mockStationStore) ListGenres(_ context.Context) ([]string, error) {
@@ -312,6 +332,218 @@ func TestList_NoPollerNoEnrichment(t *testing.T) {
 	if result.Items[0].ListenersCount != 0 {
 		t.Errorf("expected 0 listeners without poller, got %d", result.Items[0].ListenersCount)
 	}
+}
+
+// --- sort=listeners ---
+
+// listenerFixture builds public stations whose name order and listener order
+// disagree, so a page taken before the sort is visibly not the top N.
+// By name: A, B, C, D, E. By listeners: D(9), E(7), B(5), C(3), A(1).
+func listenerFixture() (*mockStationStore, *mockStatusProvider) {
+	counts := map[string]int{"A": 1, "B": 5, "C": 3, "D": 9, "E": 7}
+
+	store := newMockStationStore()
+	poller := &mockStatusProvider{statuses: map[string]*StationStatus{}}
+	for _, name := range []string{"A", "B", "C", "D", "E"} {
+		tenantID := "tenant-" + name
+		store.addStation(&Station{
+			ID:       "id-" + name,
+			Name:     name,
+			Slug:     "slug-" + name,
+			TenantID: &tenantID,
+			IsPublic: true,
+		})
+		poller.statuses[tenantID] = &StationStatus{ListenersCount: counts[name]}
+	}
+	return store, poller
+}
+
+func listNames(t *testing.T, h *Handler, target string) response.ListResult[Station] {
+	t.Helper()
+	r := stationRouter(h)
+	req := httptest.NewRequest("GET", target, nil)
+	w := httptest.NewRecorder()
+	r.ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("GET %s: expected 200, got %d: %s", target, w.Code, w.Body.String())
+	}
+	var result response.ListResult[Station]
+	if err := json.NewDecoder(w.Body).Decode(&result); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	return result
+}
+
+func namesOf(items []Station) []string {
+	names := make([]string, len(items))
+	for i, st := range items {
+		names[i] = st.Name
+	}
+	return names
+}
+
+func assertNames(t *testing.T, got []Station, want ...string) {
+	t.Helper()
+	names := namesOf(got)
+	if len(names) != len(want) {
+		t.Fatalf("items = %v, want %v", names, want)
+	}
+	for i := range want {
+		if names[i] != want[i] {
+			t.Fatalf("items = %v, want %v", names, want)
+		}
+	}
+}
+
+// TestList_SortByListeners_PageOneIsTopN is the regression: page 1 used to be
+// the first page by name re-sorted within itself, so the busiest stations never
+// surfaced. Here A and B are the first page by name but D and E are the top two.
+func TestList_SortByListeners_PageOneIsTopN(t *testing.T) {
+	store, poller := listenerFixture()
+	h := NewHandler(store, nil)
+	h.WithPoller(poller)
+
+	result := listNames(t, h, "/stations?sort=listeners&limit=2&offset=0")
+
+	assertNames(t, result.Items, "D", "E")
+	if result.Total != 5 {
+		t.Errorf("total = %d, want 5", result.Total)
+	}
+	if !result.HasMore {
+		t.Error("has_more = false, want true")
+	}
+}
+
+func TestList_SortByListeners_LaterPagesContinueTheRanking(t *testing.T) {
+	store, poller := listenerFixture()
+	h := NewHandler(store, nil)
+	h.WithPoller(poller)
+
+	assertNames(t, listNames(t, h, "/stations?sort=listeners&limit=2&offset=2").Items, "B", "C")
+	assertNames(t, listNames(t, h, "/stations?sort=listeners&limit=2&offset=4").Items, "A")
+}
+
+func TestList_SortByListeners_OffsetPastEndReturnsEmptyArray(t *testing.T) {
+	store, poller := listenerFixture()
+	h := NewHandler(store, nil)
+	h.WithPoller(poller)
+
+	result := listNames(t, h, "/stations?sort=listeners&limit=2&offset=99")
+
+	if len(result.Items) != 0 {
+		t.Errorf("items = %v, want empty", namesOf(result.Items))
+	}
+	if result.Total != 5 {
+		t.Errorf("total = %d, want 5", result.Total)
+	}
+}
+
+// TestList_SortByListeners_ScansFromTheStart pins the mechanism: the handler
+// must ask the store for the whole window from offset 0, not the caller's page.
+func TestList_SortByListeners_ScansFromTheStart(t *testing.T) {
+	store, poller := listenerFixture()
+	h := NewHandler(store, nil)
+	h.WithPoller(poller)
+
+	listNames(t, h, "/stations?sort=listeners&limit=2&offset=2")
+
+	if store.lastListParams.Offset != 0 {
+		t.Errorf("store offset = %d, want 0", store.lastListParams.Offset)
+	}
+	if store.lastListParams.Limit != listenersScanLimit {
+		t.Errorf("store limit = %d, want %d", store.lastListParams.Limit, listenersScanLimit)
+	}
+}
+
+// TestList_OtherSortsPageInTheStore pins that only sort=listeners changed: every
+// other sort still hands the caller's window straight to the store.
+func TestList_OtherSortsPageInTheStore(t *testing.T) {
+	for _, sortKey := range []string{"", "name", "newest", "online_first"} {
+		store, poller := listenerFixture()
+		h := NewHandler(store, nil)
+		h.WithPoller(poller)
+
+		listNames(t, h, "/stations?sort="+sortKey+"&limit=2&offset=1")
+
+		if store.lastListParams.Offset != 1 || store.lastListParams.Limit != 2 {
+			t.Errorf("sort=%q: store got limit=%d offset=%d, want limit=2 offset=1",
+				sortKey, store.lastListParams.Limit, store.lastListParams.Offset)
+		}
+	}
+}
+
+// TestList_SortByListeners_MissingStatsSortLast answers where stations the
+// poller knows nothing about land: they keep the zero count and sit at the
+// bottom, and equal counts hold the store's name order.
+func TestList_SortByListeners_MissingStatsSortLast(t *testing.T) {
+	store, poller := listenerFixture()
+	// Two stations the poller has no entry for, plus one with no tenant at all.
+	for _, name := range []string{"X", "Y"} {
+		tenantID := "tenant-unpolled-" + name
+		store.addStation(&Station{ID: "id-" + name, Name: name, Slug: "slug-" + name, TenantID: &tenantID, IsPublic: true})
+	}
+	store.addStation(&Station{ID: "id-Z", Name: "Z", Slug: "slug-z", IsPublic: true})
+
+	h := NewHandler(store, nil)
+	h.WithPoller(poller)
+
+	result := listNames(t, h, "/stations?sort=listeners&limit=10&offset=0")
+
+	assertNames(t, result.Items, "D", "E", "B", "C", "A", "X", "Y", "Z")
+}
+
+// TestList_SortByListeners_NoPollerKeepsStoreOrder covers the degenerate case:
+// with no poller every count is zero, so the sort must leave the store's name
+// order untouched rather than shuffling it. The fixture is deliberately larger
+// than Go's insertion-sort threshold (12) — below it an unstable sort happens to
+// preserve order anyway and the assertion would prove nothing.
+func TestList_SortByListeners_NoPollerKeepsStoreOrder(t *testing.T) {
+	const n = 30
+	store := newMockStationStore()
+	want := make([]string, n)
+	for i := range n {
+		name := fmt.Sprintf("station-%02d", i)
+		want[i] = name
+		store.addStation(&Station{ID: name, Name: name, Slug: name, IsPublic: true})
+	}
+
+	h := NewHandler(store, nil) // no poller, so every count is zero
+
+	result := listNames(t, h, "/stations?sort=listeners&limit=50&offset=0")
+
+	assertNames(t, result.Items, want...)
+}
+
+// TestList_SortByListeners_TiesKeepStoreOrder pins that equal counts hold the
+// store's name order instead of being shuffled, which is what makes paging
+// through a tied ranking repeatable rather than dropping and duplicating rows
+// between pages. The fixture is two large interleaved tie groups: a single
+// uniform group is left untouched even by an unstable sort, so it would prove
+// nothing.
+func TestList_SortByListeners_TiesKeepStoreOrder(t *testing.T) {
+	const n = 30
+	store := newMockStationStore()
+	poller := &mockStatusProvider{statuses: map[string]*StationStatus{}}
+	var busy, quiet []string
+	for i := range n {
+		name := fmt.Sprintf("station-%02d", i)
+		tenantID := "tenant-" + name
+		store.addStation(&Station{ID: name, Name: name, Slug: name, TenantID: &tenantID, IsPublic: true})
+		poller.statuses[tenantID] = &StationStatus{ListenersCount: i % 2}
+		if i%2 == 1 {
+			busy = append(busy, name)
+		} else {
+			quiet = append(quiet, name)
+		}
+	}
+
+	h := NewHandler(store, nil)
+	h.WithPoller(poller)
+
+	result := listNames(t, h, "/stations?sort=listeners&limit=50&offset=0")
+
+	assertNames(t, result.Items, append(busy, quiet...)...)
 }
 
 func TestGetBySlug_EnrichedWithPollerData(t *testing.T) {
