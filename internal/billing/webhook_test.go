@@ -468,6 +468,182 @@ func TestWebhook_HandlerLevelParseFailure(t *testing.T) {
 	}
 }
 
+// --- Retry semantics ---
+
+// TestWebhook_TransientStoreFailure_Returns500 pins that a store failure asks
+// Stripe to redeliver rather than silently dropping a billing change.
+func TestWebhook_TransientStoreFailure_Returns500(t *testing.T) {
+	tests := []struct {
+		name      string
+		eventType string
+		object    any
+		setup     func(*mockTenantStore)
+	}{
+		{
+			name:      "checkout lookup fails",
+			eventType: EventCheckoutCompleted,
+			object:    checkoutSessionObject(),
+			setup:     func(s *mockTenantStore) { s.byOwnerErr = errStore },
+		},
+		{
+			name:      "checkout update fails",
+			eventType: EventCheckoutCompleted,
+			object:    checkoutSessionObject(),
+			setup: func(s *mockTenantStore) {
+				s.tenantsByOwner = []TenantBilling{{ID: "tenant-1"}}
+				s.updateBillingErr = errStore
+			},
+		},
+		{
+			name:      "subscription updated lookup fails",
+			eventType: EventSubscriptionUpdated,
+			object:    subscriptionObject("price_pro"),
+			setup:     func(s *mockTenantStore) { s.byCustomerErr = errStore },
+		},
+		{
+			name:      "subscription updated write fails",
+			eventType: EventSubscriptionUpdated,
+			object:    subscriptionObject("price_pro"),
+			setup: func(s *mockTenantStore) {
+				s.tenantByCustomer = &TenantBilling{ID: "tenant-1"}
+				s.updateBillingErr = errStore
+			},
+		},
+		{
+			name:      "subscription deleted lookup fails",
+			eventType: EventSubscriptionDeleted,
+			object:    subscriptionObject("price_pro"),
+			setup:     func(s *mockTenantStore) { s.byCustomerErr = errStore },
+		},
+		{
+			name:      "subscription deleted write fails",
+			eventType: EventSubscriptionDeleted,
+			object:    subscriptionObject("price_pro"),
+			setup: func(s *mockTenantStore) {
+				s.tenantByCustomer = &TenantBilling{ID: "tenant-1"}
+				s.updateBillingErr = errStore
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			h, store := newTestHandler()
+			tt.setup(store)
+
+			payload := eventPayload(t, tt.eventType, tt.object)
+			rec := httptest.NewRecorder()
+			h.Webhook(rec, signedRequest(payload, testWebhookSecret, time.Now()))
+
+			if rec.Code != http.StatusInternalServerError {
+				t.Errorf("status = %d, want %d so Stripe retries (body: %s)",
+					rec.Code, http.StatusInternalServerError, rec.Body.String())
+			}
+		})
+	}
+}
+
+// TestWebhook_PermanentConditions_Return200 pins the other half of the
+// contract: conditions a retry can never fix are acknowledged, so Stripe stops.
+func TestWebhook_PermanentConditions_Return200(t *testing.T) {
+	tests := []struct {
+		name      string
+		eventType string
+		object    any
+		setup     func(*mockTenantStore)
+	}{
+		{
+			name:      "checkout for a user with no tenants",
+			eventType: EventCheckoutCompleted,
+			object:    checkoutSessionObject(),
+			setup:     func(s *mockTenantStore) { s.tenantsByOwner = nil },
+		},
+		{
+			name:      "checkout without metadata",
+			eventType: EventCheckoutCompleted,
+			object:    map[string]any{"customer": "cus_123", "subscription": "sub_123"},
+			setup:     func(s *mockTenantStore) {},
+		},
+		{
+			name:      "subscription update for an unknown customer",
+			eventType: EventSubscriptionUpdated,
+			object:    subscriptionObject("price_pro"),
+			setup:     func(s *mockTenantStore) { s.tenantByCustomer = nil },
+		},
+		{
+			name:      "subscription deletion for an unknown customer",
+			eventType: EventSubscriptionDeleted,
+			object:    subscriptionObject("price_pro"),
+			setup:     func(s *mockTenantStore) { s.tenantByCustomer = nil },
+		},
+		{
+			name:      "data the handler cannot parse",
+			eventType: EventSubscriptionUpdated,
+			object:    map[string]any{"id": "sub_1", "customer": "cus_1", "items": "wrong-shape"},
+			setup:     func(s *mockTenantStore) {},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			h, store := newTestHandler()
+			tt.setup(store)
+
+			payload := eventPayload(t, tt.eventType, tt.object)
+			rec := httptest.NewRecorder()
+			h.Webhook(rec, signedRequest(payload, testWebhookSecret, time.Now()))
+
+			if rec.Code != http.StatusOK {
+				t.Errorf("status = %d, want %d so Stripe stops retrying (body: %s)",
+					rec.Code, http.StatusOK, rec.Body.String())
+			}
+		})
+	}
+}
+
+// TestWebhook_RetryConvergesOnSameState covers the idempotency requirement: a
+// delivery that fails transiently and is then redelivered leaves the tenant in
+// the same state a single successful delivery would have produced.
+func TestWebhook_RetryConvergesOnSameState(t *testing.T) {
+	h, store := newTestHandler()
+	store.tenantByCustomer = &TenantBilling{ID: "tenant-1", Tier: TierFree}
+	store.updateBillingErr = errStore
+
+	payload := eventPayload(t, EventSubscriptionUpdated, subscriptionObject("price_pro"))
+
+	// First delivery: the store is down.
+	first := httptest.NewRecorder()
+	h.Webhook(first, signedRequest(payload, testWebhookSecret, time.Now()))
+	if first.Code != http.StatusInternalServerError {
+		t.Fatalf("first delivery status = %d, want %d", first.Code, http.StatusInternalServerError)
+	}
+
+	// Stripe redelivers the same event once the store recovers.
+	store.updateBillingErr = nil
+	second := httptest.NewRecorder()
+	h.Webhook(second, signedRequest(payload, testWebhookSecret, time.Now()))
+	if second.Code != http.StatusOK {
+		t.Fatalf("redelivery status = %d, want %d", second.Code, http.StatusOK)
+	}
+
+	// A third delivery of the same event must not change anything further.
+	third := httptest.NewRecorder()
+	h.Webhook(third, signedRequest(payload, testWebhookSecret, time.Now()))
+	if third.Code != http.StatusOK {
+		t.Fatalf("third delivery status = %d, want %d", third.Code, http.StatusOK)
+	}
+
+	want := updateBillingCall{TenantID: "tenant-1", CustomerID: "cus_123", SubscriptionID: "sub_123", Tier: TierPro}
+	if len(store.updateBillingCalls) != 3 {
+		t.Fatalf("UpdateBilling calls = %d, want 3 (one per delivery)", len(store.updateBillingCalls))
+	}
+	for i, got := range store.updateBillingCalls {
+		if got != want {
+			t.Errorf("delivery %d wrote %+v, want %+v", i+1, got, want)
+		}
+	}
+}
+
 // failingReader stands in for a request body that fails mid-read.
 type failingReader struct{}
 

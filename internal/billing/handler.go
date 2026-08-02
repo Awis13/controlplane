@@ -2,6 +2,7 @@ package billing
 
 import (
 	"context"
+	"fmt"
 	"io"
 	"log/slog"
 	"net/http"
@@ -241,121 +242,144 @@ func (h *Handler) Webhook(w http.ResponseWriter, r *http.Request) {
 
 	slog.Info("billing: webhook received", "type", event.Type, "id", event.ID)
 
+	// Handlers return an error only for transient failures, which are worth
+	// retrying. Conditions that can never succeed on a retry -- unparseable
+	// data, missing metadata, an unknown tenant, an event type we ignore --
+	// are logged inside the handler and reported as success.
+	var handlerErr error
 	switch event.Type {
 	case EventCheckoutCompleted:
-		h.handleCheckoutCompleted(r.Context(), event.Data.Raw)
+		handlerErr = h.handleCheckoutCompleted(r.Context(), event.Data.Raw)
 	case EventSubscriptionUpdated:
-		h.handleSubscriptionUpdated(r.Context(), event.Data.Raw)
+		handlerErr = h.handleSubscriptionUpdated(r.Context(), event.Data.Raw)
 	case EventSubscriptionDeleted:
-		h.handleSubscriptionDeleted(r.Context(), event.Data.Raw)
+		handlerErr = h.handleSubscriptionDeleted(r.Context(), event.Data.Raw)
 	case EventInvoicePaymentFailed:
 		h.handleInvoicePaymentFailed(event.Data.Raw)
 	default:
 		slog.Debug("billing: unhandled webhook event", "type", event.Type)
 	}
 
-	// Always return 200 to acknowledge receipt
+	if handlerErr != nil {
+		// Ask Stripe to redeliver. Handlers are idempotent: every write is an
+		// absolute update, so a replay converges on the same tenant state.
+		slog.Error("billing: webhook processing failed, requesting redelivery",
+			"error", handlerErr, "type", event.Type, "id", event.ID)
+		response.Error(w, http.StatusInternalServerError, "failed to process webhook")
+		return
+	}
+
 	w.WriteHeader(http.StatusOK)
 }
 
 // handleCheckoutCompleted processes checkout.session.completed events.
 // Updates the tenant with Stripe customer ID, subscription ID, and tier.
-func (h *Handler) handleCheckoutCompleted(ctx context.Context, data []byte) {
+// Returns an error only when a retry could still succeed.
+func (h *Handler) handleCheckoutCompleted(ctx context.Context, data []byte) error {
 	session, err := ParseCheckoutSession(data)
 	if err != nil {
+		// Permanent: the same payload will never parse.
 		slog.Error("billing: parse checkout session", "error", err)
-		return
+		return nil
 	}
 
 	userID := session.Metadata["user_id"]
 	tier := session.Metadata["tier"]
 	if userID == "" || tier == "" {
+		// Permanent: the metadata is fixed at session creation.
 		slog.Error("billing: checkout session missing metadata", "customer", session.CustomerID)
-		return
+		return nil
 	}
 
 	// Find the user's tenant to update
 	tenants, err := h.tenantStore.GetByOwnerID(ctx, userID)
 	if err != nil {
-		slog.Error("billing: get tenants for checkout", "error", err, "user_id", userID)
-		return
+		// Transient: the store may recover.
+		return fmt.Errorf("get tenants for checkout (user %s): %w", userID, err)
 	}
 
 	if len(tenants) == 0 {
+		// Permanent: the user owns nothing to upgrade.
 		slog.Warn("billing: no tenants found for user after checkout", "user_id", userID)
-		return
+		return nil
 	}
 
 	// Update the first tenant (in multi-tenant future, metadata could specify which)
 	t := tenants[0]
 	if err := h.tenantStore.UpdateBilling(ctx, t.ID, session.CustomerID, session.SubscriptionID, tier); err != nil {
-		slog.Error("billing: update tenant after checkout",
-			"error", err, "tenant_id", t.ID, "tier", tier)
-		return
+		// Transient: the tier change is lost unless Stripe redelivers.
+		return fmt.Errorf("update tenant %s after checkout: %w", t.ID, err)
 	}
 
 	slog.Info("billing: checkout completed",
 		"tenant_id", t.ID, "tier", tier, "customer", session.CustomerID)
+	return nil
 }
 
 // handleSubscriptionUpdated processes customer.subscription.updated events.
 // Updates the tenant tier based on the new price ID.
-func (h *Handler) handleSubscriptionUpdated(ctx context.Context, data []byte) {
+// Returns an error only when a retry could still succeed.
+func (h *Handler) handleSubscriptionUpdated(ctx context.Context, data []byte) error {
 	sub, err := ParseSubscription(data)
 	if err != nil {
+		// Permanent: the same payload will never parse.
 		slog.Error("billing: parse subscription updated", "error", err)
-		return
+		return nil
 	}
 
 	tier := h.service.GetTierFromPriceID(sub.PriceID)
 
 	tenant, err := h.tenantStore.GetByStripeCustomerID(ctx, sub.CustomerID)
 	if err != nil {
-		slog.Error("billing: get tenant by customer ID", "error", err, "customer", sub.CustomerID)
-		return
+		// Transient: the store may recover.
+		return fmt.Errorf("get tenant by customer %s: %w", sub.CustomerID, err)
 	}
 	if tenant == nil {
+		// Permanent: we do not know this customer.
 		slog.Warn("billing: no tenant found for subscription update", "customer", sub.CustomerID)
-		return
+		return nil
 	}
 
 	if err := h.tenantStore.UpdateBilling(ctx, tenant.ID, sub.CustomerID, sub.ID, tier); err != nil {
-		slog.Error("billing: update tenant tier",
-			"error", err, "tenant_id", tenant.ID, "tier", tier)
-		return
+		// Transient: the tier change is lost unless Stripe redelivers.
+		return fmt.Errorf("update tier for tenant %s: %w", tenant.ID, err)
 	}
 
 	slog.Info("billing: subscription updated",
 		"tenant_id", tenant.ID, "tier", tier, "subscription", sub.ID)
+	return nil
 }
 
 // handleSubscriptionDeleted processes customer.subscription.deleted events.
 // Downgrades the tenant to the free tier.
-func (h *Handler) handleSubscriptionDeleted(ctx context.Context, data []byte) {
+// Returns an error only when a retry could still succeed.
+func (h *Handler) handleSubscriptionDeleted(ctx context.Context, data []byte) error {
 	sub, err := ParseSubscription(data)
 	if err != nil {
+		// Permanent: the same payload will never parse.
 		slog.Error("billing: parse subscription deleted", "error", err)
-		return
+		return nil
 	}
 
 	tenant, err := h.tenantStore.GetByStripeCustomerID(ctx, sub.CustomerID)
 	if err != nil {
-		slog.Error("billing: get tenant by customer ID", "error", err, "customer", sub.CustomerID)
-		return
+		// Transient: the store may recover.
+		return fmt.Errorf("get tenant by customer %s: %w", sub.CustomerID, err)
 	}
 	if tenant == nil {
+		// Permanent: we do not know this customer.
 		slog.Warn("billing: no tenant found for subscription deletion", "customer", sub.CustomerID)
-		return
+		return nil
 	}
 
 	if err := h.tenantStore.UpdateBilling(ctx, tenant.ID, sub.CustomerID, "", TierFree); err != nil {
-		slog.Error("billing: downgrade tenant to free",
-			"error", err, "tenant_id", tenant.ID)
-		return
+		// Transient: the tenant would stay on a paid tier it no longer has.
+		return fmt.Errorf("downgrade tenant %s to free: %w", tenant.ID, err)
 	}
 
 	slog.Info("billing: subscription deleted, downgraded to free",
 		"tenant_id", tenant.ID, "customer", sub.CustomerID)
+	return nil
 }
 
 // handleInvoicePaymentFailed logs a warning but does not suspend the tenant.

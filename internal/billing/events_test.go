@@ -20,6 +20,24 @@ func objectJSON(t *testing.T, v any) []byte {
 
 var errStore = errors.New("store unavailable")
 
+// mustHandle asserts the handler reported success, meaning either the update
+// went through or the condition is permanent and a retry would not help.
+func mustHandle(t *testing.T, err error) {
+	t.Helper()
+	if err != nil {
+		t.Fatalf("expected no error, so the webhook is acknowledged: %v", err)
+	}
+}
+
+// wantRetry asserts the handler surfaced a transient failure, which the webhook
+// endpoint turns into a 500 so Stripe redelivers.
+func wantRetry(t *testing.T, err error) {
+	t.Helper()
+	if err == nil {
+		t.Fatal("expected an error so Stripe retries the delivery, got nil")
+	}
+}
+
 // --- handleCheckoutCompleted ---
 
 func TestHandleCheckoutCompleted_HappyPath(t *testing.T) {
@@ -29,7 +47,7 @@ func TestHandleCheckoutCompleted_HappyPath(t *testing.T) {
 		{ID: "tenant-2", Name: "second", Tier: TierFree},
 	}
 
-	h.handleCheckoutCompleted(context.Background(), objectJSON(t, checkoutSessionObject()))
+	mustHandle(t, h.handleCheckoutCompleted(context.Background(), objectJSON(t, checkoutSessionObject())))
 
 	if len(store.byOwnerCalls) != 1 || store.byOwnerCalls[0] != "owner-1" {
 		t.Fatalf("GetByOwnerID calls = %v, want one lookup for owner-1", store.byOwnerCalls)
@@ -68,7 +86,7 @@ func TestHandleCheckoutCompleted_MissingMetadata(t *testing.T) {
 
 			session := checkoutSessionObject()
 			session["metadata"] = tt.metadata
-			h.handleCheckoutCompleted(context.Background(), objectJSON(t, session))
+			mustHandle(t, h.handleCheckoutCompleted(context.Background(), objectJSON(t, session)))
 
 			if store.callCount() != 0 {
 				t.Errorf("expected the handler to bail out before touching the store, got %d calls", store.callCount())
@@ -86,7 +104,7 @@ func TestHandleCheckoutCompleted_TierFromMetadataIsNotValidated(t *testing.T) {
 
 	session := checkoutSessionObject()
 	session["metadata"] = map[string]string{"user_id": "owner-1", "tier": "enterprise"}
-	h.handleCheckoutCompleted(context.Background(), objectJSON(t, session))
+	mustHandle(t, h.handleCheckoutCompleted(context.Background(), objectJSON(t, session)))
 
 	if len(store.updateBillingCalls) != 1 {
 		t.Fatalf("UpdateBilling calls = %d, want 1", len(store.updateBillingCalls))
@@ -100,7 +118,7 @@ func TestHandleCheckoutCompleted_NoTenantsForOwner(t *testing.T) {
 	h, store := newTestHandler()
 	store.tenantsByOwner = nil
 
-	h.handleCheckoutCompleted(context.Background(), objectJSON(t, checkoutSessionObject()))
+	mustHandle(t, h.handleCheckoutCompleted(context.Background(), objectJSON(t, checkoutSessionObject())))
 
 	if len(store.byOwnerCalls) != 1 {
 		t.Errorf("GetByOwnerID calls = %d, want 1", len(store.byOwnerCalls))
@@ -115,21 +133,19 @@ func TestHandleCheckoutCompleted_StoreErrors(t *testing.T) {
 		h, store := newTestHandler()
 		store.byOwnerErr = errStore
 
-		h.handleCheckoutCompleted(context.Background(), objectJSON(t, checkoutSessionObject()))
+		wantRetry(t, h.handleCheckoutCompleted(context.Background(), objectJSON(t, checkoutSessionObject())))
 
 		if len(store.updateBillingCalls) != 0 {
 			t.Errorf("expected no UpdateBilling after a failed lookup, got %d", len(store.updateBillingCalls))
 		}
 	})
 
-	t.Run("update fails and is swallowed", func(t *testing.T) {
+	t.Run("update fails", func(t *testing.T) {
 		h, store := newTestHandler()
 		store.tenantsByOwner = []TenantBilling{{ID: "tenant-1", Tier: TierFree}}
 		store.updateBillingErr = errStore
 
-		// The handler logs and returns; the webhook is still acknowledged, so a
-		// failed write is silently lost.
-		h.handleCheckoutCompleted(context.Background(), objectJSON(t, checkoutSessionObject()))
+		wantRetry(t, h.handleCheckoutCompleted(context.Background(), objectJSON(t, checkoutSessionObject())))
 
 		if len(store.updateBillingCalls) != 1 {
 			t.Errorf("UpdateBilling calls = %d, want 1", len(store.updateBillingCalls))
@@ -140,7 +156,7 @@ func TestHandleCheckoutCompleted_StoreErrors(t *testing.T) {
 func TestHandleCheckoutCompleted_UnparseableData(t *testing.T) {
 	h, store := newTestHandler()
 
-	h.handleCheckoutCompleted(context.Background(), []byte(`{"metadata": "not-a-map"}`))
+	mustHandle(t, h.handleCheckoutCompleted(context.Background(), []byte(`{"metadata": "not-a-map"}`)))
 
 	if store.callCount() != 0 {
 		t.Errorf("expected no store calls for unparseable data, got %d", store.callCount())
@@ -167,7 +183,7 @@ func TestHandleSubscriptionUpdated_TierMapping(t *testing.T) {
 			h, store := newTestHandler()
 			store.tenantByCustomer = &TenantBilling{ID: "tenant-1", Tier: TierPro}
 
-			h.handleSubscriptionUpdated(context.Background(), objectJSON(t, subscriptionObject(tt.priceID)))
+			mustHandle(t, h.handleSubscriptionUpdated(context.Background(), objectJSON(t, subscriptionObject(tt.priceID))))
 
 			if len(store.updateBillingCalls) != 1 {
 				t.Fatalf("UpdateBilling calls = %d, want 1", len(store.updateBillingCalls))
@@ -199,7 +215,7 @@ func TestHandleSubscriptionUpdated_NoItems(t *testing.T) {
 		"status":   "active",
 		"items":    map[string]any{"data": []map[string]any{}},
 	}
-	h.handleSubscriptionUpdated(context.Background(), objectJSON(t, sub))
+	mustHandle(t, h.handleSubscriptionUpdated(context.Background(), objectJSON(t, sub)))
 
 	if len(store.updateBillingCalls) != 1 {
 		t.Fatalf("UpdateBilling calls = %d, want 1", len(store.updateBillingCalls))
@@ -213,7 +229,7 @@ func TestHandleSubscriptionUpdated_TenantNotFound(t *testing.T) {
 	h, store := newTestHandler()
 	store.tenantByCustomer = nil // store reports "no such customer" as a nil tenant
 
-	h.handleSubscriptionUpdated(context.Background(), objectJSON(t, subscriptionObject("price_pro")))
+	mustHandle(t, h.handleSubscriptionUpdated(context.Background(), objectJSON(t, subscriptionObject("price_pro"))))
 
 	if len(store.byCustomerCalls) != 1 {
 		t.Errorf("GetByStripeCustomerID calls = %d, want 1", len(store.byCustomerCalls))
@@ -228,19 +244,19 @@ func TestHandleSubscriptionUpdated_StoreErrors(t *testing.T) {
 		h, store := newTestHandler()
 		store.byCustomerErr = errStore
 
-		h.handleSubscriptionUpdated(context.Background(), objectJSON(t, subscriptionObject("price_pro")))
+		wantRetry(t, h.handleSubscriptionUpdated(context.Background(), objectJSON(t, subscriptionObject("price_pro"))))
 
 		if len(store.updateBillingCalls) != 0 {
 			t.Errorf("expected no UpdateBilling after a failed lookup, got %d", len(store.updateBillingCalls))
 		}
 	})
 
-	t.Run("update fails and is swallowed", func(t *testing.T) {
+	t.Run("update fails", func(t *testing.T) {
 		h, store := newTestHandler()
 		store.tenantByCustomer = &TenantBilling{ID: "tenant-1", Tier: TierFree}
 		store.updateBillingErr = errStore
 
-		h.handleSubscriptionUpdated(context.Background(), objectJSON(t, subscriptionObject("price_pro")))
+		wantRetry(t, h.handleSubscriptionUpdated(context.Background(), objectJSON(t, subscriptionObject("price_pro"))))
 
 		if len(store.updateBillingCalls) != 1 {
 			t.Errorf("UpdateBilling calls = %d, want 1", len(store.updateBillingCalls))
@@ -251,7 +267,7 @@ func TestHandleSubscriptionUpdated_StoreErrors(t *testing.T) {
 func TestHandleSubscriptionUpdated_UnparseableData(t *testing.T) {
 	h, store := newTestHandler()
 
-	h.handleSubscriptionUpdated(context.Background(), []byte(`{"items": "not-the-expected-shape"}`))
+	mustHandle(t, h.handleSubscriptionUpdated(context.Background(), []byte(`{"items": "not-the-expected-shape"}`)))
 
 	if store.callCount() != 0 {
 		t.Errorf("expected no store calls for unparseable data, got %d", store.callCount())
@@ -264,7 +280,7 @@ func TestHandleSubscriptionDeleted_DowngradesToFree(t *testing.T) {
 	h, store := newTestHandler()
 	store.tenantByCustomer = &TenantBilling{ID: "tenant-1", Tier: TierStudio}
 
-	h.handleSubscriptionDeleted(context.Background(), objectJSON(t, subscriptionObject("price_studio")))
+	mustHandle(t, h.handleSubscriptionDeleted(context.Background(), objectJSON(t, subscriptionObject("price_studio"))))
 
 	if len(store.updateBillingCalls) != 1 {
 		t.Fatalf("UpdateBilling calls = %d, want 1", len(store.updateBillingCalls))
@@ -289,7 +305,7 @@ func TestHandleSubscriptionDeleted_IgnoresPriceID(t *testing.T) {
 			h, store := newTestHandler()
 			store.tenantByCustomer = &TenantBilling{ID: "tenant-1", Tier: TierPro}
 
-			h.handleSubscriptionDeleted(context.Background(), objectJSON(t, subscriptionObject(priceID)))
+			mustHandle(t, h.handleSubscriptionDeleted(context.Background(), objectJSON(t, subscriptionObject(priceID))))
 
 			if len(store.updateBillingCalls) != 1 {
 				t.Fatalf("UpdateBilling calls = %d, want 1", len(store.updateBillingCalls))
@@ -305,7 +321,7 @@ func TestHandleSubscriptionDeleted_TenantNotFound(t *testing.T) {
 	h, store := newTestHandler()
 	store.tenantByCustomer = nil
 
-	h.handleSubscriptionDeleted(context.Background(), objectJSON(t, subscriptionObject("price_pro")))
+	mustHandle(t, h.handleSubscriptionDeleted(context.Background(), objectJSON(t, subscriptionObject("price_pro"))))
 
 	if len(store.byCustomerCalls) != 1 {
 		t.Errorf("GetByStripeCustomerID calls = %d, want 1", len(store.byCustomerCalls))
@@ -320,20 +336,21 @@ func TestHandleSubscriptionDeleted_StoreErrors(t *testing.T) {
 		h, store := newTestHandler()
 		store.byCustomerErr = errStore
 
-		h.handleSubscriptionDeleted(context.Background(), objectJSON(t, subscriptionObject("price_pro")))
+		wantRetry(t, h.handleSubscriptionDeleted(context.Background(), objectJSON(t, subscriptionObject("price_pro"))))
 
 		if len(store.updateBillingCalls) != 0 {
 			t.Errorf("expected no UpdateBilling after a failed lookup, got %d", len(store.updateBillingCalls))
 		}
 	})
 
-	t.Run("update fails and is swallowed", func(t *testing.T) {
+	t.Run("update fails", func(t *testing.T) {
 		h, store := newTestHandler()
 		store.tenantByCustomer = &TenantBilling{ID: "tenant-1", Tier: TierPro}
 		store.updateBillingErr = errStore
 
-		// A failed downgrade leaves the tenant on a paid tier with no retry.
-		h.handleSubscriptionDeleted(context.Background(), objectJSON(t, subscriptionObject("price_pro")))
+		// A failed downgrade must be retried, otherwise the tenant keeps a paid
+		// tier it no longer pays for.
+		wantRetry(t, h.handleSubscriptionDeleted(context.Background(), objectJSON(t, subscriptionObject("price_pro"))))
 
 		if len(store.updateBillingCalls) != 1 {
 			t.Errorf("UpdateBilling calls = %d, want 1", len(store.updateBillingCalls))
@@ -369,7 +386,7 @@ func TestHandleInvoicePaymentFailed(t *testing.T) {
 func TestHandleSubscriptionDeleted_UnparseableData(t *testing.T) {
 	h, store := newTestHandler()
 
-	h.handleSubscriptionDeleted(context.Background(), []byte(`not json at all`))
+	mustHandle(t, h.handleSubscriptionDeleted(context.Background(), []byte(`not json at all`)))
 
 	if store.callCount() != 0 {
 		t.Errorf("expected no store calls for unparseable data, got %d", store.callCount())
