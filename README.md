@@ -30,7 +30,7 @@ Controlplane is the backend and brain of **STUDIO 23**, a multi-tenant streaming
 
 Sibling repositories:
 
-- **[freeradio](https://github.com/Awis13/freeradio)** — the per-tenant streaming stack (Node dashboard, Icecast, Liquidsoap, FFmpeg, nginx-rtmp) that controlplane deploys into each tenant LXC. _(May be private for a few more hours while it is published in the same sweep.)_
+- **[freeradio](https://github.com/Awis13/freeradio)** — the per-tenant streaming stack (Node dashboard, Icecast, Liquidsoap, FFmpeg, nginx-rtmp) that controlplane deploys into each tenant LXC.
 - **[freeradio-web](https://github.com/Awis13/freeradio-web)** — the SvelteKit frontend users interact with, talking to controlplane over `/api/v1/*`.
 
 ### System interconnection
@@ -38,7 +38,7 @@ Sibling repositories:
 ```mermaid
 flowchart TD
     U[User browser] --> W[freeradio-web · SvelteKit :5173/:3000]
-    W -->|/api/v1/* cookie+JWT| CP[controlplane · Go API :8085]
+    W -->|/api/v1/* cookie+JWT| CP[controlplane · Go API :8080]
     CP --> PG[(Postgres 17)]
     CP -->|provision LXC| PX[Proxmox VE]
     PX -->|deploy stack| FR[freeradio tenant]
@@ -118,13 +118,13 @@ flowchart TD
 | Billing | [Stripe](https://github.com/stripe/stripe-go) |
 | VPN | WireGuard (wgctrl) |
 | Logging | `log/slog` (structured JSON) |
-| Container | Docker multi-stage (Alpine 3.21) |
+| Container | Docker multi-stage (Alpine 3.24) |
 
 ## Quick Start
 
 ```bash
 # Clone the repo
-git clone https://github.com/yourusername/controlplane.git
+git clone https://github.com/Awis13/controlplane.git
 cd controlplane
 
 # Configure environment
@@ -163,6 +163,17 @@ All configuration is via environment variables. See [`.env.example`](.env.exampl
 | `WG_HUB_PUBLIC_KEY` | -- | Enables WireGuard module |
 | `CADDY_ADMIN_URL` | -- | Enables dynamic DNS routing |
 | `STRIPE_SECRET_KEY` | -- | Enables Stripe billing |
+| `STRIPE_WEBHOOK_SECRET` | -- | Required with billing: unset rejects every webhook |
+| `COOKIE_SECURE` | `false` | Marks session cookies Secure; set true behind HTTPS |
+| `SSH_KEY_PATH` | `/root/.ssh/id_ed25519` | Key for LXC provisioning; unreadable disables it |
+| `POLLER_INTERVAL` | `10s` | Station status poll interval |
+| `AUTH_JANITOR_INTERVAL` | `1h` | Expired-token and login-limiter sweep interval |
+| `FREERADIO_REPO_URL` | -- | Enables auto-deploy of freeRadio into new tenants |
+
+Topology defaults (`LXC_BRIDGE`, `TENANT_MOUNT_ROOT`, `TENANT_APP_DIR`,
+`CADDY_UPSTREAM_PORT`, `SSH_USER`, `SSH_PORT`, `WG_INTERFACE`, `WG_DNS_ADDR`,
+`WG_KEEPALIVE_SECONDS`) each match what the code used to hardcode; see
+[`.env.example`](.env.example).
 
 ## API Endpoints
 
@@ -281,7 +292,7 @@ controlplane/
     billing/                      Stripe integration
     caddy/                        Dynamic reverse proxy routing
   docker-compose.yml              PostgreSQL + controlplane
-  Dockerfile                      Multi-stage build (Go 1.25 -> Alpine 3.21)
+  Dockerfile                      Multi-stage build (Go 1.25 -> Alpine 3.24)
 ```
 
 ## Key Design Decisions
