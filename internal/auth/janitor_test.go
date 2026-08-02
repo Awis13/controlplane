@@ -81,8 +81,10 @@ func TestLoginLimiter_BoundedByCap(t *testing.T) {
 	}
 }
 
-// TestLoginLimiter_CapEvictsStaleFirst pins that the cap prefers dropping
-// entries whose window has already closed over live ones.
+// TestLoginLimiter_CapEvictsStaleFirst pins that reaching the cap sweeps the
+// closed windows rather than dropping a single entry. Evicting just one would
+// also leave the live entry alone, so the count is what distinguishes them:
+// after the sweep only the live entry and the newcomer remain.
 func TestLoginLimiter_CapEvictsStaleFirst(t *testing.T) {
 	l := &loginLimiter{entries: map[string]*limitEntry{}}
 	stale := time.Now().Add(-loginLimitWindow - time.Minute)
@@ -96,6 +98,44 @@ func TestLoginLimiter_CapEvictsStaleFirst(t *testing.T) {
 
 	if _, ok := l.entries["live@example.com"]; !ok {
 		t.Error("a live entry must survive while stale ones are available to drop")
+	}
+	if _, ok := l.entries["newcomer@example.com"]; !ok {
+		t.Error("the new failure must be recorded")
+	}
+	if len(l.entries) != 2 {
+		t.Errorf("entries = %d, want 2: every closed window should have gone, not just enough to make room", len(l.entries))
+	}
+}
+
+// TestLoginLimiter_CapEvictsOldestWhenAllLive exercises the comparator, which
+// the stale-heavy case above never reaches. Direction matters: dropping the
+// freshest entry would evict the caller currently being locked out, which is
+// precisely the one worth keeping.
+func TestLoginLimiter_CapEvictsOldestWhenAllLive(t *testing.T) {
+	l := &loginLimiter{entries: map[string]*limitEntry{}}
+	now := time.Now()
+
+	// A full map, every window still open, each entry a minute fresher than the
+	// last. Ages stay well inside loginLimitWindow so nothing is sweepable.
+	for i := 0; i < maxLimiterEntries; i++ {
+		l.entries[fmt.Sprintf("live-%d@example.com", i)] = &limitEntry{
+			failures: maxLoginAttempts,
+			lastFail: now.Add(-time.Duration(maxLimiterEntries-i) * time.Millisecond),
+		}
+	}
+	oldest := "live-0@example.com"
+	freshest := fmt.Sprintf("live-%d@example.com", maxLimiterEntries-1)
+
+	l.recordFailure("newcomer@example.com")
+
+	if len(l.entries) > maxLimiterEntries {
+		t.Fatalf("entries = %d, want the cap held at %d", len(l.entries), maxLimiterEntries)
+	}
+	if _, ok := l.entries[oldest]; ok {
+		t.Error("the least recently failed entry should have been evicted")
+	}
+	if _, ok := l.entries[freshest]; !ok {
+		t.Error("the most recent lockout must survive: evicting it would clear the attacker being throttled")
 	}
 	if _, ok := l.entries["newcomer@example.com"]; !ok {
 		t.Error("the new failure must be recorded")
@@ -208,6 +248,37 @@ func TestJanitor_RunCallsCleanupOnTick(t *testing.T) {
 		select {
 		case <-deadline:
 			t.Fatal("Cleanup was not called within 2s")
+		case <-time.After(time.Millisecond):
+		}
+	}
+}
+
+// TestJanitor_RunCleansImmediately pins the first pass. With an hourly default,
+// waiting for the first tick means a service that restarts more often than that
+// never cleans at all. The interval here is long enough that only an immediate
+// pass can satisfy it.
+func TestJanitor_RunCleansImmediately(t *testing.T) {
+	tokens := &fakeTokenCleaner{}
+	l := &loginLimiter{entries: map[string]*limitEntry{
+		"stale@example.com": {failures: 2, lastFail: time.Now().Add(-loginLimitWindow - time.Minute)},
+	}}
+	j := &Janitor{tokens: tokens, limiter: l, interval: time.Hour}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go j.Run(ctx)
+
+	deadline := time.After(2 * time.Second)
+	for {
+		l.mu.Lock()
+		swept := len(l.entries) == 0
+		l.mu.Unlock()
+		if swept && tokens.callCount() > 0 {
+			return
+		}
+		select {
+		case <-deadline:
+			t.Fatalf("no cleanup within 2s on an hourly interval: sweep=%v cleanupCalls=%d", swept, tokens.callCount())
 		case <-time.After(time.Millisecond):
 		}
 	}

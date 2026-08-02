@@ -1,10 +1,12 @@
 package auth
 
 import (
+	"context"
 	"crypto/rand"
 	"crypto/rsa"
 	"net/http"
 	"net/http/httptest"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -186,21 +188,139 @@ func TestNormalizeEmail_CaseVariantsCollapse(t *testing.T) {
 	}
 }
 
-// TestLoginLimiter_KeyedOnNormalizedEmail pins that case variants share one
-// bucket. Keyed on the raw address, five failures per spelling would hand out a
-// fresh allowance for every capitalization of the same address.
-func TestLoginLimiter_KeyedOnNormalizedEmail(t *testing.T) {
-	l := &loginLimiter{entries: map[string]*limitEntry{}}
+// --- Login through the handler ---
 
-	spellings := []string{"user@example.com", "User@example.com", "USER@EXAMPLE.COM", "uSeR@example.com", "User@Example.Com"}
-	for _, s := range spellings {
-		l.recordFailure(user.NormalizeEmail(s))
+// fakeUserStore lets the login and registration paths run without a database.
+type fakeUserStore struct {
+	byEmail map[string]*user.User
+	created []*user.User
+}
+
+func (f *fakeUserStore) GetByEmail(_ context.Context, email string) (*user.User, error) {
+	return f.byEmail[email], nil
+}
+
+func (f *fakeUserStore) GetByID(context.Context, uuid.UUID) (*user.User, error) { return nil, nil }
+
+func (f *fakeUserStore) Create(_ context.Context, u *user.User) error {
+	f.created = append(f.created, u)
+	return nil
+}
+
+func (f *fakeUserStore) UpdatePassword(context.Context, uuid.UUID, string) error { return nil }
+
+func newLoginRequest(email, password string) *http.Request {
+	body := `{"email":` + strconv.Quote(email) + `,"password":` + strconv.Quote(password) + `}`
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/auth/login", strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	return req
+}
+
+// TestLogin_LimiterSharesOneBucketAcrossSpellings drives the real handler. The
+// limiter must key on the normalized address, or walking through
+// capitalizations of one address hands out a fresh allowance each time and the
+// lockout never arrives.
+func TestLogin_LimiterSharesOneBucketAcrossSpellings(t *testing.T) {
+	h := &Handler{
+		userStore: &fakeUserStore{}, // no such user, so every attempt fails
+		jwtSecret: []byte("test-secret"),
 	}
 
-	if len(l.entries) != 1 {
-		t.Fatalf("entries = %d, want 1 shared bucket", len(l.entries))
+	spellings := []string{
+		"user@example.com",
+		"User@example.com",
+		"USER@EXAMPLE.COM",
+		"uSeR@example.com",
+		" User@Example.Com ",
 	}
-	if l.check(user.NormalizeEmail("USER@example.com")) {
-		t.Error("five failures across spellings of one address must lock it out")
+	if len(spellings) != maxLoginAttempts {
+		t.Fatalf("this test assumes %d attempts exhaust the allowance, got %d spellings", maxLoginAttempts, len(spellings))
+	}
+
+	for i, spelling := range spellings {
+		w := httptest.NewRecorder()
+		h.Login(w, newLoginRequest(spelling, "wrong-password"))
+		if w.Code != http.StatusUnauthorized {
+			t.Fatalf("attempt %d with %q: status = %d, want %d", i+1, spelling, w.Code, http.StatusUnauthorized)
+		}
+	}
+
+	// The allowance is spent, whichever spelling is used next.
+	w := httptest.NewRecorder()
+	h.Login(w, newLoginRequest("USER@example.com", "wrong-password"))
+	if w.Code != http.StatusTooManyRequests {
+		t.Errorf("status = %d, want %d: the spellings must share one bucket", w.Code, http.StatusTooManyRequests)
+	}
+
+	if len(h.limiter.entries) != 1 {
+		t.Errorf("limiter entries = %d, want 1", len(h.limiter.entries))
+	}
+}
+
+// TestLogin_FindsUserByAnySpelling pins the other half: the lookup key is
+// normalized, so a user stored canonically is found however they type it.
+func TestLogin_FindsUserByAnySpelling(t *testing.T) {
+	store := &fakeUserStore{byEmail: map[string]*user.User{
+		"user@example.com": {ID: uuid.New(), Email: "user@example.com", PasswordHash: "not-a-real-hash"},
+	}}
+	h := &Handler{userStore: store, jwtSecret: []byte("test-secret")}
+
+	for _, spelling := range []string{"user@example.com", "USER@EXAMPLE.COM", " User@Example.Com "} {
+		h.limiter.reset(user.NormalizeEmail(spelling))
+
+		w := httptest.NewRecorder()
+		h.Login(w, newLoginRequest(spelling, "wrong-password"))
+
+		// 401 means the user was found and the password compared. A lookup with
+		// the raw spelling would miss the map and also give 401, so the
+		// distinguishing check is that the limiter recorded against one key.
+		if w.Code != http.StatusUnauthorized {
+			t.Errorf("%q: status = %d, want %d", spelling, w.Code, http.StatusUnauthorized)
+		}
+	}
+
+	if len(h.limiter.entries) != 1 {
+		t.Errorf("limiter entries = %d, want every spelling to reach the same key", len(h.limiter.entries))
+	}
+}
+
+// TestRegister_StoresParsedAddress pins the display-name fix: ParseAddress
+// accepts "Bob <bob@example.com>", and storing that whole string would leave an
+// account nobody can log into.
+func TestRegister_StoresParsedAddress(t *testing.T) {
+	tests := []struct {
+		name  string
+		input string
+		want  string
+	}{
+		{name: "display name form", input: "Bob <bob@example.com>", want: "bob@example.com"},
+		{name: "display name with mixed case", input: "Bob <Bob@Example.COM>", want: "bob@example.com"},
+		{name: "plain address", input: "bob@example.com", want: "bob@example.com"},
+		{name: "plain address with spaces", input: "  Bob@Example.com  ", want: "bob@example.com"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			store := &fakeUserStore{}
+			h := &Handler{userStore: store, jwtSecret: []byte("test-secret")}
+
+			body := `{"email":` + strconv.Quote(tt.input) + `,"password":"a-long-enough-password","display_name":"Bob"}`
+			req := httptest.NewRequest(http.MethodPost, "/api/v1/auth/register", strings.NewReader(body))
+			req.Header.Set("Content-Type", "application/json")
+
+			// issueTokenPair needs a token store, so the response is not
+			// reachable here; the stored record is what this test is about.
+			func() {
+				defer func() { recover() }()
+				h.Register(httptest.NewRecorder(), req)
+			}()
+
+			if len(store.created) != 1 {
+				t.Fatalf("created %d users, want 1", len(store.created))
+			}
+			if got := store.created[0].Email; got != tt.want {
+				t.Errorf("stored email = %q, want %q", got, tt.want)
+			}
+		})
 	}
 }

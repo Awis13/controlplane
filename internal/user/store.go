@@ -37,9 +37,18 @@ func (s *Store) GetByEmail(ctx context.Context, email string) (*User, error) {
 	err := s.pool.QueryRow(ctx,
 		// Compared case-insensitively rather than on the raw column: rows
 		// written before addresses were normalized may hold mixed case, and
-		// those users must still be able to sign in.
+		// those users must still be able to sign in. idx_users_email_lower
+		// keeps this an index scan.
+		//
+		// Legacy data may hold two rows differing only in case, and without an
+		// order the row returned would be whichever the planner reached first,
+		// so the same credentials could resolve to different accounts between
+		// queries. Oldest wins: among case-variant duplicates the first account
+		// registered is the real one.
 		`SELECT id, email, password_hash, display_name, created_at, updated_at
-		 FROM users WHERE lower(email) = lower($1)`, email).
+		 FROM users WHERE lower(email) = lower($1)
+		 ORDER BY created_at, email
+		 LIMIT 1`, email).
 		Scan(&u.ID, &u.Email, &u.PasswordHash, &u.DisplayName, &u.CreatedAt, &u.UpdatedAt)
 	if err != nil {
 		if err == pgx.ErrNoRows {
