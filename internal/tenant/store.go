@@ -192,17 +192,6 @@ func (s *Store) ListByOwnerID(ctx context.Context, ownerID string) ([]Tenant, er
 	return tenants, nil
 }
 
-func (s *Store) Delete(ctx context.Context, id string) error {
-	tag, err := s.pool.Exec(ctx, `DELETE FROM tenants WHERE id = $1`, id)
-	if err != nil {
-		return fmt.Errorf("delete tenant: %w", err)
-	}
-	if tag.RowsAffected() == 0 {
-		return pgx.ErrNoRows
-	}
-	return nil
-}
-
 // ErrNoUpdate is returned when an update request has no fields to update.
 var ErrNoUpdate = fmt.Errorf("no fields to update")
 

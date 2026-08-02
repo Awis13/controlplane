@@ -15,16 +15,14 @@ import (
 	"controlplane/internal/response"
 )
 
-// TenantStore defines the data operations for tenants.
+// TenantStore is what the tenant HTTP handlers need from the store. It is the
+// handlers' view, not the store's surface: the provisioner and the admin UI
+// declare their own, and the store carries methods none of these three name.
 type TenantStore interface {
-	List(ctx context.Context) ([]Tenant, error)
 	ListPaginated(ctx context.Context, limit, offset int, status, nodeID, projectID string) ([]Tenant, int, error)
 	GetByID(ctx context.Context, id string) (*Tenant, error)
 	Create(ctx context.Context, req CreateTenantRequest) (*Tenant, error)
 	Update(ctx context.Context, id string, req UpdateTenantRequest) (*Tenant, error)
-	Delete(ctx context.Context, id string) error
-	SetActive(ctx context.Context, id string, lxcID int) error
-	SetError(ctx context.Context, id string, errMsg string) error
 	SetDeleting(ctx context.Context, id string) error
 	SetDeleted(ctx context.Context, id string) error
 	SetSuspended(ctx context.Context, id string) error
