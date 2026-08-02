@@ -8,3 +8,5 @@ tmp/
 CLAUDE.md
 TODO.md
 .DS_Store
+# Produced by the CI test command when run locally.
+coverage.out
