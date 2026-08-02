@@ -1066,6 +1066,37 @@ func TestDeleteTenant_WrongStatus(t *testing.T) {
 	if w.Header().Get("HX-Retarget") != "#flash" {
 		t.Errorf("expected flash error for wrong status")
 	}
+	// A refused delete is a state conflict, not a success. The layout config
+	// tells htmx to swap 409 so the flash still reaches the page.
+	if w.Code != http.StatusConflict {
+		t.Errorf("status = %d, want %d", w.Code, http.StatusConflict)
+	}
+}
+
+// TestDeleteTenant_SuspendedIsAllowed covers the drift this cutover resolves:
+// the admin UI used to refuse to delete a suspended tenant even though the
+// store has accepted that transition since 96c2cf0.
+func TestDeleteTenant_SuspendedIsAllowed(t *testing.T) {
+	h, _, ps, ts, prov := testHandler(t)
+	lxcID := 105
+	ts.tenants[testTenantID] = &tenant.Tenant{
+		ID: testTenantID, Name: "tenant-1", ProjectID: testProjectID, NodeID: testNodeID,
+		LXCID: &lxcID, Status: "suspended", Subdomain: "test",
+		CreatedAt: time.Now(), UpdatedAt: time.Now(),
+	}
+	ps.projects[testProjectID] = &project.Project{
+		ID: testProjectID, Name: "project-1", RAMMB: 1536,
+		CreatedAt: time.Now(), UpdatedAt: time.Now(),
+	}
+
+	w := doRequest(t, h, "DELETE", "/tenants/"+testTenantID, nil)
+
+	if w.Code != http.StatusOK {
+		t.Errorf("status = %d, want 200, body: %s", w.Code, w.Body.String())
+	}
+	if !prov.deprovisionCalled {
+		t.Error("expected the container to be deprovisioned")
+	}
 }
 
 func TestDeleteTenant_AlreadyDeleting(t *testing.T) {
@@ -1085,6 +1116,9 @@ func TestDeleteTenant_AlreadyDeleting(t *testing.T) {
 
 	if w.Header().Get("HX-Retarget") != "#flash" {
 		t.Errorf("expected flash error for concurrent delete")
+	}
+	if w.Code != http.StatusConflict {
+		t.Errorf("status = %d, want %d", w.Code, http.StatusConflict)
 	}
 }
 

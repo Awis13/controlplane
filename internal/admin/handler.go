@@ -74,6 +74,7 @@ type Handler struct {
 	webauthnSessions *webauthnSessions
 	wgService        WireGuardService
 	wgStore          WireGuardStore
+	lifecycle        *tenant.LifecycleService
 }
 
 // NewHandler creates a new admin Handler. Returns error if templates fail to parse.
@@ -94,6 +95,7 @@ func NewHandler(nodes NodeStore, projects ProjectStore, tenants TenantStore, aud
 		webauthn:         wa,
 		webauthnStore:    waStore,
 		webauthnSessions: newWebAuthnSessions(),
+		lifecycle:        tenant.NewLifecycleService(tenants, nodes, projects, provisioner, auditStore),
 	}, nil
 }
 
@@ -218,13 +220,8 @@ type enrichedTenant struct {
 // --- Shared validation ---
 
 var nameRegexp = regexp.MustCompile(`^[a-z0-9][a-z0-9._-]*[a-z0-9]$`)
-var subdomainRegexp = regexp.MustCompile(`^[a-z0-9][a-z0-9-]*[a-z0-9]$`)
 
-var reservedSubdomains = map[string]bool{
-	"www": true, "api": true, "admin": true, "app": true,
-	"mail": true, "smtp": true, "ftp": true, "ns1": true, "ns2": true,
-	"cdn": true, "static": true, "assets": true, "media": true,
-}
+// Subdomain rules live in the tenant package: see tenant.ValidateSubdomain.
 
 // --- Shared helpers ---
 
@@ -234,6 +231,30 @@ func (h *Handler) renderFlash(w http.ResponseWriter, name string, msg string) {
 	if err := h.tmpl.RenderPartial(w, name, msg); err != nil {
 		slog.Error("admin: render flash", "error", err)
 	}
+}
+
+// flashLifecycle renders a lifecycle failure as a flash message.
+//
+// A state conflict answers 409 rather than 200, so the response is honest to
+// anything watching the endpoint. htmx discards 4xx bodies by default, so the
+// layout's htmx-config meta lists 409 as swappable; without that pairing the
+// message would never reach the page. The other kinds keep the status they have
+// always returned, since widening that would need htmx to swap every 4xx and
+// 5xx, which would start injecting raw http.Error text across the admin UI.
+func (h *Handler) flashLifecycle(w http.ResponseWriter, lerr *tenant.LifecycleError) {
+	if lerr.Kind == tenant.FailureInternal {
+		slog.Error("admin: tenant lifecycle", "error", lerr)
+	}
+	if lerr.Kind == tenant.FailureConflict {
+		w.Header().Set("HX-Retarget", "#flash")
+		w.Header().Set("HX-Reswap", "innerHTML")
+		w.WriteHeader(http.StatusConflict)
+		if err := h.tmpl.RenderPartial(w, "flash_error", lerr.Message); err != nil {
+			slog.Error("admin: render flash", "error", err)
+		}
+		return
+	}
+	h.renderFlash(w, "flash_error", lerr.Message)
 }
 
 // triggerToast sets an HX-Trigger header to display a toast notification via Alpine.js.

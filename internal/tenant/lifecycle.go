@@ -44,6 +44,25 @@ type LifecycleProvisioner interface {
 	Deprovision(ctx context.Context, tenantID, nodeID, subdomain string, lxcID, ramMB int) error
 }
 
+// AuditLogger records lifecycle actions. *audit.Store implements it; tests
+// substitute their own recorder.
+type AuditLogger interface {
+	Log(ctx context.Context, action, entityType, entityID string, details any)
+}
+
+// normalizeAuditLogger collapses a nil *audit.Store into a nil interface. An
+// interface holding a nil pointer is itself non-nil, so without this a caller
+// passing a nil store would defeat the nil check and panic inside Log.
+func normalizeAuditLogger(a AuditLogger) AuditLogger {
+	if a == nil {
+		return nil
+	}
+	if store, ok := a.(*audit.Store); ok && store == nil {
+		return nil
+	}
+	return a
+}
+
 // OwnerCreator is implemented by stores that can create owner-scoped tenants.
 // Only the user path needs it; the real store implements it, so a caller that
 // passes an owner without an owner-capable store is a programming error.
@@ -113,18 +132,18 @@ type LifecycleService struct {
 	nodeStore    LifecycleNodeStore
 	projectStore LifecycleProjectStore
 	provisioner  LifecycleProvisioner
-	auditStore   *audit.Store
+	auditStore   AuditLogger
 }
 
 // NewLifecycleService creates a lifecycle service. auditStore may be nil, in
 // which case actions are not audited.
-func NewLifecycleService(store LifecycleTenantStore, nodeStore LifecycleNodeStore, projectStore LifecycleProjectStore, provisioner LifecycleProvisioner, auditStore *audit.Store) *LifecycleService {
+func NewLifecycleService(store LifecycleTenantStore, nodeStore LifecycleNodeStore, projectStore LifecycleProjectStore, provisioner LifecycleProvisioner, auditStore AuditLogger) *LifecycleService {
 	return &LifecycleService{
 		store:        store,
 		nodeStore:    nodeStore,
 		projectStore: projectStore,
 		provisioner:  provisioner,
-		auditStore:   auditStore,
+		auditStore:   normalizeAuditLogger(auditStore),
 	}
 }
 
@@ -267,6 +286,13 @@ func (s *LifecycleService) Delete(ctx context.Context, t *Tenant, actor Actor) (
 
 func (s *LifecycleService) audit(ctx context.Context, action, tenantID string, meta map[string]string) {
 	if s.auditStore == nil {
+		return
+	}
+	if meta == nil {
+		// Log takes an any, and a nil map placed in one is not a nil any. Pass
+		// an untyped nil so the details column stays NULL instead of holding
+		// the JSON literal null.
+		s.auditStore.Log(ctx, action, "tenant", tenantID, nil)
 		return
 	}
 	s.auditStore.Log(ctx, action, "tenant", tenantID, meta)

@@ -8,6 +8,7 @@ import (
 
 	"github.com/jackc/pgx/v5/pgconn"
 
+	"controlplane/internal/audit"
 	"controlplane/internal/node"
 	"controlplane/internal/project"
 )
@@ -50,6 +51,182 @@ func testNodeRecord() *node.Node {
 }
 
 func lxcPtr(id int) *int { return &id }
+
+// --- Audit logging ---
+
+type auditEntry struct {
+	Action     string
+	EntityType string
+	EntityID   string
+	Details    any
+}
+
+type mockAuditLogger struct {
+	entries []auditEntry
+}
+
+func (m *mockAuditLogger) Log(_ context.Context, action, entityType, entityID string, details any) {
+	m.entries = append(m.entries, auditEntry{Action: action, EntityType: entityType, EntityID: entityID, Details: details})
+}
+
+func TestLifecycleAudit_Create(t *testing.T) {
+	tests := []struct {
+		name        string
+		actor       Actor
+		ownerID     string
+		wantDetails map[string]string
+	}{
+		{
+			name:        "without an actor, as the API and admin paths call it",
+			wantDetails: map[string]string{"name": "app", "subdomain": "myapp"},
+		},
+		{
+			name:        "with an actor, as the user path calls it",
+			actor:       Actor{UserID: "owner-1"},
+			ownerID:     "owner-1",
+			wantDetails: map[string]string{"name": "app", "subdomain": "myapp", "user_id": "owner-1"},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			logger := &mockAuditLogger{}
+			var store LifecycleTenantStore = newMockTenantStore()
+			if tt.ownerID != "" {
+				store = newMockUserTenantStore()
+			}
+			svc := NewLifecycleService(store, newMockNodeStore(), newMockProjectStore(), newMockProvisioner(), logger)
+
+			tn, err := svc.Create(context.Background(), CreateParams{
+				Name: "app", Subdomain: "myapp", Project: testProject(), Node: testNodeRecord(), OwnerID: tt.ownerID,
+			}, tt.actor)
+			if err != nil {
+				t.Fatalf("Create: %v", err)
+			}
+
+			if len(logger.entries) != 1 {
+				t.Fatalf("audit entries = %d, want 1", len(logger.entries))
+			}
+			got := logger.entries[0]
+			if got.Action != "create" || got.EntityType != "tenant" || got.EntityID != tn.ID {
+				t.Errorf("entry = %+v, want a create entry for tenant %s", got, tn.ID)
+			}
+			details, ok := got.Details.(map[string]string)
+			if !ok {
+				t.Fatalf("details = %T, want map[string]string", got.Details)
+			}
+			if len(details) != len(tt.wantDetails) {
+				t.Fatalf("details = %v, want %v", details, tt.wantDetails)
+			}
+			for k, v := range tt.wantDetails {
+				if details[k] != v {
+					t.Errorf("details[%q] = %q, want %q", k, details[k], v)
+				}
+			}
+		})
+	}
+}
+
+func TestLifecycleAudit_Delete(t *testing.T) {
+	tests := []struct {
+		name        string
+		actor       Actor
+		wantDetails map[string]string
+	}{
+		{name: "without an actor the details stay nil", actor: Actor{}},
+		{name: "with an actor the user is recorded", actor: Actor{UserID: "owner-1"}, wantDetails: map[string]string{"user_id": "owner-1"}},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			logger := &mockAuditLogger{}
+			store := newMockTenantStore()
+			projects := newMockProjectStore()
+			svc := NewLifecycleService(store, newMockNodeStore(), projects, newMockProvisioner(), logger)
+
+			tn := &Tenant{ID: "t-1", ProjectID: "proj-1", NodeID: "node-1", Status: "active"}
+			store.tenants[tn.ID] = tn
+			projects.projects["proj-1"] = testProject()
+
+			if _, err := svc.Delete(context.Background(), tn, tt.actor); err != nil {
+				t.Fatalf("Delete: %v", err)
+			}
+
+			if len(logger.entries) != 1 {
+				t.Fatalf("audit entries = %d, want 1", len(logger.entries))
+			}
+			got := logger.entries[0]
+			if got.Action != "delete" || got.EntityType != "tenant" || got.EntityID != "t-1" {
+				t.Errorf("entry = %+v", got)
+			}
+			if tt.wantDetails == nil {
+				if got.Details != nil {
+					t.Errorf("details = %v, want nil so the entry matches what these paths logged before", got.Details)
+				}
+				return
+			}
+			details, ok := got.Details.(map[string]string)
+			if !ok {
+				t.Fatalf("details = %T, want map[string]string", got.Details)
+			}
+			if details["user_id"] != tt.wantDetails["user_id"] {
+				t.Errorf("details = %v, want %v", details, tt.wantDetails)
+			}
+		})
+	}
+}
+
+// TestLifecycleAudit_FailedOperationsAreNotLogged pins that only completed
+// actions reach the audit log.
+func TestLifecycleAudit_FailedOperationsAreNotLogged(t *testing.T) {
+	logger := &mockAuditLogger{}
+	store := newMockTenantStore()
+	store.createErr = errBoom
+	svc := NewLifecycleService(store, newMockNodeStore(), newMockProjectStore(), newMockProvisioner(), logger)
+
+	if _, err := svc.Create(context.Background(), CreateParams{
+		Name: "app", Subdomain: "myapp", Project: testProject(), Node: testNodeRecord(),
+	}, Actor{}); err == nil {
+		t.Fatal("expected an error")
+	}
+
+	if len(logger.entries) != 0 {
+		t.Errorf("audit entries = %d, want 0", len(logger.entries))
+	}
+}
+
+// TestLifecycleAudit_NilLoggers pins that both an absent logger and a nil
+// *audit.Store are skipped rather than panicking. The second case is the trap:
+// a nil pointer stored in an interface is not itself nil.
+func TestLifecycleAudit_NilLoggers(t *testing.T) {
+	tests := []struct {
+		name   string
+		logger AuditLogger
+	}{
+		{name: "no logger at all", logger: nil},
+		{name: "a nil audit store", logger: (*audit.Store)(nil)},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			store := newMockTenantStore()
+			projects := newMockProjectStore()
+			svc := NewLifecycleService(store, newMockNodeStore(), projects, newMockProvisioner(), tt.logger)
+
+			tn := &Tenant{ID: "t-1", ProjectID: "proj-1", NodeID: "node-1", Status: "active"}
+			store.tenants[tn.ID] = tn
+			projects.projects["proj-1"] = testProject()
+
+			// The operation must still complete: auditing is not load-bearing.
+			if _, err := svc.Delete(context.Background(), tn, Actor{UserID: "owner-1"}); err != nil {
+				t.Fatalf("Delete: %v", err)
+			}
+			if got := store.tenants["t-1"].Status; got != "deleted" {
+				t.Errorf("status = %q, want deleted", got)
+			}
+		})
+	}
+}
 
 // --- ValidateSubdomain ---
 
