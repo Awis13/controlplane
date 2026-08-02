@@ -35,8 +35,11 @@ func (s *Store) GetByID(ctx context.Context, id uuid.UUID) (*User, error) {
 func (s *Store) GetByEmail(ctx context.Context, email string) (*User, error) {
 	var u User
 	err := s.pool.QueryRow(ctx,
+		// Compared case-insensitively rather than on the raw column: rows
+		// written before addresses were normalized may hold mixed case, and
+		// those users must still be able to sign in.
 		`SELECT id, email, password_hash, display_name, created_at, updated_at
-		 FROM users WHERE email = $1`, email).
+		 FROM users WHERE lower(email) = lower($1)`, email).
 		Scan(&u.ID, &u.Email, &u.PasswordHash, &u.DisplayName, &u.CreatedAt, &u.UpdatedAt)
 	if err != nil {
 		if err == pgx.ErrNoRows {
