@@ -187,7 +187,7 @@ func (h *Handler) UpdatePeer(w http.ResponseWriter, r *http.Request) {
 	response.JSON(w, http.StatusOK, peer)
 }
 
-// DeletePeer removes a peer from the DB and wg0.
+// DeletePeer removes a peer from the DB and the WireGuard interface.
 func (h *Handler) DeletePeer(w http.ResponseWriter, r *http.Request) {
 	id := chi.URLParam(r, "id")
 	if !response.ValidUUID(id) {
@@ -195,7 +195,7 @@ func (h *Handler) DeletePeer(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Get peer for public key (needed to remove from wg0)
+	// Get peer for public key (needed to remove from the interface)
 	peer, err := h.service.store.GetByID(r.Context(), id)
 	if err != nil {
 		slog.Error("wireguard: get peer for delete", "error", err)
@@ -207,7 +207,7 @@ func (h *Handler) DeletePeer(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Remove from wg0 (ignore error — wg may be unavailable)
+	// Remove from the interface (ignore error — wg may be unavailable)
 	if err := h.service.RemovePeer(peer.PublicKey); err != nil {
 		slog.Warn("wireguard: failed to remove peer from wg0", "peer", peer.Name, "error", err)
 	}
@@ -250,7 +250,7 @@ func (h *Handler) EnablePeer(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Apply to wg0
+	// Apply to the WireGuard interface
 	peer, err := h.service.store.GetByID(r.Context(), id)
 	if err == nil && peer != nil {
 		if applyErr := h.service.ApplyPeer(peer); applyErr != nil {
@@ -295,7 +295,7 @@ func (h *Handler) DisablePeer(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Remove from wg0
+	// Remove from the WireGuard interface
 	if removeErr := h.service.RemovePeer(peer.PublicKey); removeErr != nil {
 		slog.Warn("wireguard: failed to remove peer from wg0", "peer", peer.Name, "error", removeErr)
 	}

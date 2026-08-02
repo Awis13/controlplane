@@ -164,7 +164,7 @@ func (h *Handler) createPeerAdmin(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Try to apply to wg0
+	// Try to apply to the WireGuard interface
 	if applyErr := h.wgService.ApplyPeer(peer); applyErr != nil {
 		slog.Warn("admin: failed to apply peer to wg0", "peer", peer.Name, "error", applyErr)
 	}
@@ -326,7 +326,7 @@ func (h *Handler) deletePeerAdmin(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Remove from wg0
+	// Remove from the WireGuard interface
 	if removeErr := h.wgService.RemovePeer(peer.PublicKey); removeErr != nil {
 		slog.Warn("admin: failed to remove peer from wg0", "peer", peer.Name, "error", removeErr)
 	}
@@ -370,7 +370,7 @@ func (h *Handler) enablePeerAdmin(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Apply to wg0
+	// Apply to the WireGuard interface
 	peer, err := h.wgStore.GetByID(r.Context(), id)
 	if err == nil && peer != nil {
 		if applyErr := h.wgService.ApplyPeer(peer); applyErr != nil {
@@ -412,7 +412,7 @@ func (h *Handler) disablePeerAdmin(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Remove from wg0
+	// Remove from the WireGuard interface
 	if removeErr := h.wgService.RemovePeer(peer.PublicKey); removeErr != nil {
 		slog.Warn("admin: failed to remove peer from wg0", "peer", peer.Name, "error", removeErr)
 	}

@@ -11,13 +11,18 @@ import (
 	"golang.org/x/crypto/ssh"
 )
 
-// Client executes commands on remote hosts via SSH.
 // Defaults are the values this client used before they became configurable.
 const (
 	defaultSSHUser = "root"
 	defaultSSHPort = "22"
 )
 
+// dialAddr is the address this client connects to for a given host.
+func (c *Client) dialAddr(host string) string {
+	return net.JoinHostPort(host, c.port)
+}
+
+// Client executes commands on remote hosts via SSH.
 type Client struct {
 	keyPath string
 	user    string
@@ -97,7 +102,7 @@ func (c *Client) execCommand(ctx context.Context, sshHost string, fullCommand st
 		HostKeyCallback: ssh.InsecureIgnoreHostKey(),
 	}
 
-	addr := net.JoinHostPort(sshHost, c.port)
+	addr := c.dialAddr(sshHost)
 
 	// Use context for connection timeout
 	var conn net.Conn

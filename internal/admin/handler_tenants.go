@@ -448,7 +448,7 @@ func (h *Handler) createTenantPeer(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Apply to wg0
+	// Apply to the WireGuard interface
 	if applyErr := h.wgService.ApplyPeer(peer); applyErr != nil {
 		slog.Warn("admin: failed to apply peer to wg0", "peer", peer.Name, "error", applyErr)
 	}

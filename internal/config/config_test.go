@@ -263,19 +263,21 @@ func TestLoad_FreeRadioFromEnv(t *testing.T) {
 
 // --- Topology ---
 
-// TestLoad_TopologyDefaultsMatchTheOldLiterals pins that an unset environment
-// reproduces exactly the values that used to be hardcoded. If one of these
-// drifts, a deployment that never set the variable changes behaviour silently.
+// TestLoad_TopologyDefaults pins that an unset environment reproduces exactly
+// the values that used to be hardcoded. If one of these drifts, a deployment
+// that never set the variable changes behaviour silently.
 func TestLoad_TopologyDefaults(t *testing.T) {
 	t.Setenv("DATABASE_URL", "postgres://localhost/test")
 	t.Setenv("API_TOKEN", "test-token")
 	t.Setenv("ENCRYPTION_KEY", "test-key")
 	t.Setenv("JWT_SECRET", "test-jwt-secret")
+	// t.Setenv rather than os.Unsetenv: an empty value takes the same default
+	// path, and the environment is restored when the test ends.
 	for _, k := range []string{
 		"LXC_BRIDGE", "TENANT_MOUNT_ROOT", "TENANT_APP_DIR", "CADDY_UPSTREAM_PORT",
 		"SSH_USER", "SSH_PORT", "WG_INTERFACE", "WG_DNS_ADDR", "WG_KEEPALIVE_SECONDS",
 	} {
-		os.Unsetenv(k)
+		t.Setenv(k, "")
 	}
 
 	cfg, err := Load()
