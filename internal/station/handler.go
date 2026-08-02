@@ -42,6 +42,27 @@ type StatusProvider interface {
 
 var slugRegexp = regexp.MustCompile(`^[a-z0-9][a-z0-9-]*[a-z0-9]$`)
 
+// listenersScanLimit bounds how many matching stations a sort=listeners request
+// pulls from the store. The listener count is not a column — it exists only in
+// the poller's in-process cache — so ordering by it means materialising the
+// filtered set here and sorting it after enrichment. Past this many matching
+// public stations the result degrades to the top N of the first
+// listenersScanLimit rows by name; persisting the count is the fix at that scale.
+const listenersScanLimit = 1000
+
+// pageOf returns the [offset, offset+limit) window of items, or an empty slice
+// when the offset is past the end.
+func pageOf(items []Station, offset, limit int) []Station {
+	if offset >= len(items) {
+		return []Station{}
+	}
+	end := offset + limit
+	if end > len(items) {
+		end = len(items)
+	}
+	return items[offset:end]
+}
+
 // Handler handles station HTTP requests.
 type Handler struct {
 	store          StationStore
@@ -81,7 +102,18 @@ func (h *Handler) List(w http.ResponseWriter, r *http.Request) {
 		Offset: lp.Offset,
 	}
 
-	stations, total, err := h.store.ListPublic(r.Context(), params)
+	// The store cannot ORDER BY the listener count, so for that sort we scan the
+	// whole filtered set from the start and page it below — applying LIMIT/OFFSET
+	// first would sort only within a page, leaving page 1 something other than the
+	// top N.
+	byListeners := params.Sort == "listeners"
+	scan := params
+	if byListeners {
+		scan.Limit = listenersScanLimit
+		scan.Offset = 0
+	}
+
+	stations, total, err := h.store.ListPublic(r.Context(), scan)
 	if err != nil {
 		slog.Error("list stations", "error", err)
 		response.Error(w, http.StatusInternalServerError, "failed to list stations")
@@ -106,11 +138,14 @@ func (h *Handler) List(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	// In-memory sort by listeners (requires poller data)
-	if params.Sort == "listeners" {
-		sort.Slice(stations, func(i, j int) bool {
+	// Sort by listeners, then page. Stations the poller has no data for keep the
+	// zero count and land at the bottom; the sort is stable so equal counts keep
+	// the store's ORDER BY name.
+	if byListeners {
+		sort.SliceStable(stations, func(i, j int) bool {
 			return stations[i].ListenersCount > stations[j].ListenersCount
 		})
+		stations = pageOf(stations, params.Offset, params.Limit)
 	}
 
 	response.JSON(w, http.StatusOK, response.ListResult[Station]{
