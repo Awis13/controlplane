@@ -154,6 +154,17 @@ func (s *Store) CreateWithOwner(ctx context.Context, req CreateTenantRequest, ow
 	return t, nil
 }
 
+// Count returns the total number of tenants, ignoring every filter. The admin
+// tenants page reports its filtered rows against this number, so it deliberately
+// counts what ListPaginated's own total does not.
+func (s *Store) Count(ctx context.Context) (int, error) {
+	var count int
+	if err := s.pool.QueryRow(ctx, `SELECT COUNT(*) FROM tenants`).Scan(&count); err != nil {
+		return 0, fmt.Errorf("count tenants: %w", err)
+	}
+	return count, nil
+}
+
 // CountByOwnerID returns the number of non-deleted tenants belonging to a user.
 func (s *Store) CountByOwnerID(ctx context.Context, ownerID string) (int, error) {
 	var count int
@@ -355,20 +366,33 @@ type ActiveTenant struct {
 	LXCIP     string
 }
 
-// ListActiveWithIP returns all active tenants that have an lxc_ip set.
-func (s *Store) ListActiveWithIP(ctx context.Context) ([]ActiveTenant, error) {
+// activeWithIP is the row the reachable-tenant listings project from.
+type activeWithIP struct {
+	ID        string
+	Subdomain string
+	LXCIP     string
+}
+
+// listActiveWithIP returns every tenant that is active and has an address, the
+// set of tenants the control plane can currently reach. The route reconciler
+// and the station poller both work from this list and each wants a different
+// pair of columns, but they must always agree on which tenants are in it: two
+// copies of this predicate drifting apart would route traffic to a tenant the
+// poller considers gone, or the reverse. So the predicate lives here once and
+// the callers differ only in what they project.
+func (s *Store) listActiveWithIP(ctx context.Context) ([]activeWithIP, error) {
 	rows, err := s.pool.Query(ctx,
-		`SELECT subdomain, lxc_ip FROM tenants
+		`SELECT id, subdomain, lxc_ip FROM tenants
 		 WHERE status = 'active' AND lxc_ip IS NOT NULL AND lxc_ip != ''`)
 	if err != nil {
 		return nil, fmt.Errorf("query active tenants with ip: %w", err)
 	}
 	defer rows.Close()
 
-	var tenants []ActiveTenant
+	var tenants []activeWithIP
 	for rows.Next() {
-		var t ActiveTenant
-		if err := rows.Scan(&t.Subdomain, &t.LXCIP); err != nil {
+		var t activeWithIP
+		if err := rows.Scan(&t.ID, &t.Subdomain, &t.LXCIP); err != nil {
 			return nil, fmt.Errorf("scan active tenant: %w", err)
 		}
 		tenants = append(tenants, t)
@@ -378,6 +402,24 @@ func (s *Store) ListActiveWithIP(ctx context.Context) ([]ActiveTenant, error) {
 	}
 
 	return tenants, nil
+}
+
+// toActiveTenants projects the shared rows onto what route reconciliation needs.
+func toActiveTenants(rows []activeWithIP) []ActiveTenant {
+	var tenants []ActiveTenant
+	for _, r := range rows {
+		tenants = append(tenants, ActiveTenant{Subdomain: r.Subdomain, LXCIP: r.LXCIP})
+	}
+	return tenants
+}
+
+// ListActiveWithIP returns all active tenants that have an lxc_ip set.
+func (s *Store) ListActiveWithIP(ctx context.Context) ([]ActiveTenant, error) {
+	rows, err := s.listActiveWithIP(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("list active tenants with ip: %w", err)
+	}
+	return toActiveTenants(rows), nil
 }
 
 // GetNextAvailableIP finds the next free IP in the given CIDR, under the

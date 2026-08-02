@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"sort"
 	"strings"
 	"testing"
 	"time"
@@ -202,18 +203,29 @@ func (m *mockProjectStore) CountTenants(_ context.Context, _ string) (int, error
 // ---
 
 type mockTenantStore struct {
-	tenants         map[string]*tenant.Tenant
-	createErr       error
-	setDeletingErr  error
-	setDeletedErr   error
-	setSuspendedErr error
-	setResumedErr   error
+	tenants          map[string]*tenant.Tenant
+	createErr        error
+	setDeletingErr   error
+	setDeletedErr    error
+	setSuspendedErr  error
+	setResumedErr    error
+	countErr         error
+	listPaginatedErr error
+
+	// lastListPaginated records the arguments the handler passed, so a test can
+	// pin that filtering was delegated to the query instead of done afterwards.
+	lastListPaginated listPaginatedArgs
 
 	// getByIDCalls counts lookups so a test can fail a specific one: a delete
 	// reads the tenant once up front and once again afterwards.
 	getByIDCalls   int
 	getErrOnCall   int
 	getByIDErrWith error
+}
+
+type listPaginatedArgs struct {
+	limit, offset             int
+	status, nodeID, projectID string
 }
 
 func newMockTenantStore() *mockTenantStore {
@@ -226,6 +238,50 @@ func (m *mockTenantStore) List(_ context.Context) ([]tenant.Tenant, error) {
 		result = append(result, *t)
 	}
 	return result, nil
+}
+
+func (m *mockTenantStore) Count(_ context.Context) (int, error) {
+	if m.countErr != nil {
+		return 0, m.countErr
+	}
+	return len(m.tenants), nil
+}
+
+// ListPaginated mirrors the real store: it filters in the query rather than
+// afterwards, orders newest first, and reports the filtered total separately
+// from the page it returns.
+func (m *mockTenantStore) ListPaginated(_ context.Context, limit, offset int, status, nodeID, projectID string) ([]tenant.Tenant, int, error) {
+	m.lastListPaginated = listPaginatedArgs{limit, offset, status, nodeID, projectID}
+	if m.listPaginatedErr != nil {
+		return nil, 0, m.listPaginatedErr
+	}
+
+	var result []tenant.Tenant
+	for _, t := range m.tenants {
+		if status != "" && t.Status != status {
+			continue
+		}
+		if nodeID != "" && t.NodeID != nodeID {
+			continue
+		}
+		if projectID != "" && t.ProjectID != projectID {
+			continue
+		}
+		result = append(result, *t)
+	}
+	sort.Slice(result, func(i, j int) bool { return result[i].CreatedAt.After(result[j].CreatedAt) })
+
+	// LIMIT is applied as Postgres would: a limit of zero yields no rows rather
+	// than every row, so a handler that miscomputes the limit is not masked here.
+	total := len(result)
+	if offset >= len(result) {
+		return nil, total, nil
+	}
+	end := offset + limit
+	if end > len(result) {
+		end = len(result)
+	}
+	return result[offset:end], total, nil
 }
 
 func (m *mockTenantStore) GetByID(_ context.Context, id string) (*tenant.Tenant, error) {
@@ -851,8 +907,9 @@ func TestDeleteProject_HasTenants(t *testing.T) {
 
 // --- Tenant tests ---
 
-func TestTenantsList(t *testing.T) {
-	h, ns, ps, ts, _ := testHandler(t)
+// seedTenantsPage sets up one node, one project and the given tenants, so the
+// tenants page has something to render.
+func seedTenantsPage(ns *mockNodeStore, ps *mockProjectStore, ts *mockTenantStore, tenants ...*tenant.Tenant) {
 	ns.nodes[testNodeID] = &node.Node{
 		ID: testNodeID, Name: "node-1", Status: "active",
 		CreatedAt: time.Now(), UpdatedAt: time.Now(),
@@ -861,23 +918,131 @@ func TestTenantsList(t *testing.T) {
 		ID: testProjectID, Name: "project-1",
 		CreatedAt: time.Now(), UpdatedAt: time.Now(),
 	}
-	ts.tenants[testTenantID] = &tenant.Tenant{
-		ID: testTenantID, Name: "tenant-1", ProjectID: testProjectID, NodeID: testNodeID,
-		Status: "active", Subdomain: "test", CreatedAt: time.Now(), UpdatedAt: time.Now(),
-	}
-
-	w := doRequest(t, h, "GET", "/tenants", nil)
-	if w.Code != http.StatusOK {
-		t.Errorf("status = %d, want 200", w.Code)
+	for _, t := range tenants {
+		ts.tenants[t.ID] = t
 	}
 }
 
-func TestTenantsListWithFilters(t *testing.T) {
-	h, _, _, _, _ := testHandler(t)
+func TestTenantsList(t *testing.T) {
+	h, ns, ps, ts, _ := testHandler(t)
+	seedTenantsPage(ns, ps, ts, &tenant.Tenant{
+		ID: testTenantID, Name: "tenant-1", ProjectID: testProjectID, NodeID: testNodeID,
+		Status: "active", Subdomain: "test", CreatedAt: time.Now(), UpdatedAt: time.Now(),
+	})
+
+	w := doRequest(t, h, "GET", "/tenants", nil)
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200", w.Code)
+	}
+
+	body := w.Body.String()
+	for _, want := range []string{"tenant-1", "project-1", "node-1", "1 of 1 tenants"} {
+		if !strings.Contains(body, want) {
+			t.Errorf("page does not contain %q", want)
+		}
+	}
+}
+
+// TestTenantsList_FilterNarrowsRowsNotTheTotal pins the header the page has
+// always shown: the row count reflects the filter, the total behind "of" does
+// not. ListPaginated reports the filtered total, so taking the number from
+// there would collapse this to "1 of 1".
+func TestTenantsList_FilterNarrowsRowsNotTheTotal(t *testing.T) {
+	h, ns, ps, ts, _ := testHandler(t)
+	otherNode := "99999999-9999-9999-9999-999999999999"
+	seedTenantsPage(ns, ps, ts,
+		&tenant.Tenant{
+			ID: testTenantID, Name: "keeper", ProjectID: testProjectID, NodeID: testNodeID,
+			Status: "active", Subdomain: "keeper", CreatedAt: time.Now(), UpdatedAt: time.Now(),
+		},
+		&tenant.Tenant{
+			ID: "44444444-4444-4444-4444-444444444444", Name: "wrong-status", ProjectID: testProjectID, NodeID: testNodeID,
+			Status: "suspended", Subdomain: "wrong-status", CreatedAt: time.Now(), UpdatedAt: time.Now(),
+		},
+		&tenant.Tenant{
+			ID: "55555555-5555-5555-5555-555555555555", Name: "wrong-node", ProjectID: testProjectID, NodeID: otherNode,
+			Status: "active", Subdomain: "wrong-node", CreatedAt: time.Now(), UpdatedAt: time.Now(),
+		},
+	)
 
 	w := doRequest(t, h, "GET", "/tenants?status=active&node_id="+testNodeID, nil)
 	if w.Code != http.StatusOK {
-		t.Errorf("status = %d, want 200", w.Code)
+		t.Fatalf("status = %d, want 200", w.Code)
+	}
+
+	body := w.Body.String()
+	if !strings.Contains(body, "1 of 3 tenants") {
+		t.Error("header should count filtered rows against the unfiltered total")
+	}
+	if !strings.Contains(body, "keeper") {
+		t.Error("matching tenant missing from the page")
+	}
+	for _, excluded := range []string{"wrong-status", "wrong-node"} {
+		if strings.Contains(body, excluded) {
+			t.Errorf("tenant %q should have been filtered out", excluded)
+		}
+	}
+}
+
+// TestTenantsList_FiltersAreDelegatedToTheQuery pins that the filters reach the
+// store rather than being applied to a full list afterwards, and that the row
+// limit cannot truncate the page.
+func TestTenantsList_FiltersAreDelegatedToTheQuery(t *testing.T) {
+	h, ns, ps, ts, _ := testHandler(t)
+	seedTenantsPage(ns, ps, ts, &tenant.Tenant{
+		ID: testTenantID, Name: "tenant-1", ProjectID: testProjectID, NodeID: testNodeID,
+		Status: "active", Subdomain: "test", CreatedAt: time.Now(), UpdatedAt: time.Now(),
+	})
+
+	doRequest(t, h, "GET", "/tenants?status=active&node_id="+testNodeID+"&project_id="+testProjectID, nil)
+
+	got := ts.lastListPaginated
+	if got.status != "active" || got.nodeID != testNodeID || got.projectID != testProjectID {
+		t.Errorf("filters reached the store as %+v, want status/node/project passed through", got)
+	}
+	if got.offset != 0 {
+		t.Errorf("offset = %d, want 0 — the page is not paginated", got.offset)
+	}
+	if got.limit < len(ts.tenants) {
+		t.Errorf("limit = %d, want at least the tenant count %d so no row is dropped",
+			got.limit, len(ts.tenants))
+	}
+}
+
+func TestTenantsList_EmptyRendersNoMatchRow(t *testing.T) {
+	h, ns, ps, ts, _ := testHandler(t)
+	seedTenantsPage(ns, ps, ts)
+
+	w := doRequest(t, h, "GET", "/tenants", nil)
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200", w.Code)
+	}
+	body := w.Body.String()
+	if !strings.Contains(body, "No tenants match filters") {
+		t.Error("empty list should render the no-match row")
+	}
+	if !strings.Contains(body, "0 of 0 tenants") {
+		t.Error("empty list should report a zero total")
+	}
+}
+
+func TestTenantsList_CountErrorReturns500(t *testing.T) {
+	h, _, _, ts, _ := testHandler(t)
+	ts.countErr = errors.New("boom")
+
+	w := doRequest(t, h, "GET", "/tenants", nil)
+	if w.Code != http.StatusInternalServerError {
+		t.Errorf("status = %d, want 500", w.Code)
+	}
+}
+
+func TestTenantsList_ListErrorReturns500(t *testing.T) {
+	h, _, _, ts, _ := testHandler(t)
+	ts.listPaginatedErr = errors.New("boom")
+
+	w := doRequest(t, h, "GET", "/tenants", nil)
+	if w.Code != http.StatusInternalServerError {
+		t.Errorf("status = %d, want 500", w.Code)
 	}
 }
 

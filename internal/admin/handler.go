@@ -44,6 +44,8 @@ type ProjectStore interface {
 
 type TenantStore interface {
 	List(ctx context.Context) ([]tenant.Tenant, error)
+	ListPaginated(ctx context.Context, limit, offset int, status, nodeID, projectID string) ([]tenant.Tenant, int, error)
+	Count(ctx context.Context) (int, error)
 	GetByID(ctx context.Context, id string) (*tenant.Tenant, error)
 	Create(ctx context.Context, req tenant.CreateTenantRequest) (*tenant.Tenant, error)
 	SetDeleting(ctx context.Context, id string) error

@@ -30,30 +30,26 @@ func (h *Handler) tenantsList(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "internal error", 500)
 		return
 	}
-	allTenants, err := h.tenants.List(r.Context())
-	if err != nil {
-		slog.Error("admin: list tenants", "error", err)
-		http.Error(w, "internal error", 500)
-		return
-	}
-
-	// Apply filters
 	filterStatus := r.URL.Query().Get("status")
 	filterProject := r.URL.Query().Get("project_id")
 	filterNode := r.URL.Query().Get("node_id")
 
-	var filtered []tenant.Tenant
-	for _, t := range allTenants {
-		if filterStatus != "" && t.Status != filterStatus {
-			continue
-		}
-		if filterProject != "" && t.ProjectID != filterProject {
-			continue
-		}
-		if filterNode != "" && t.NodeID != filterNode {
-			continue
-		}
-		filtered = append(filtered, t)
+	// The page reports its rows as "N of M tenants", where M counts every tenant
+	// regardless of the filters, so it needs a count ListPaginated cannot give it.
+	// Counting first also supplies the row limit: the filtered set is a subset of
+	// all tenants, so a limit of the total can never truncate the page.
+	total, err := h.tenants.Count(r.Context())
+	if err != nil {
+		slog.Error("admin: count tenants", "error", err)
+		http.Error(w, "internal error", 500)
+		return
+	}
+
+	filtered, _, err := h.tenants.ListPaginated(r.Context(), total, 0, filterStatus, filterNode, filterProject)
+	if err != nil {
+		slog.Error("admin: list tenants", "error", err)
+		http.Error(w, "internal error", 500)
+		return
 	}
 
 	nodeMap, projectMap := buildMaps(nodes, projects)
@@ -80,7 +76,7 @@ func (h *Handler) tenantsList(w http.ResponseWriter, r *http.Request) {
 		FilterStatus:  filterStatus,
 		FilterProject: filterProject,
 		FilterNode:    filterNode,
-		TotalCount:    len(allTenants),
+		TotalCount:    total,
 	}
 
 	if err := h.tmpl.RenderPage(w, "tenants", data); err != nil {

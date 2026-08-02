@@ -12,26 +12,21 @@ type PollableTenant struct {
 }
 
 // ListPollable returns active tenants with LXC IPs for station status polling.
+// It is the same tenant set the route reconciler sees — see listActiveWithIP —
+// projected onto the two columns the poller needs.
 func (s *Store) ListPollable(ctx context.Context) ([]PollableTenant, error) {
-	rows, err := s.pool.Query(ctx,
-		`SELECT id, lxc_ip FROM tenants
-		 WHERE status = 'active' AND lxc_ip IS NOT NULL AND lxc_ip != ''`)
+	rows, err := s.listActiveWithIP(ctx)
 	if err != nil {
-		return nil, fmt.Errorf("query pollable tenants: %w", err)
+		return nil, fmt.Errorf("list pollable tenants: %w", err)
 	}
-	defer rows.Close()
+	return toPollableTenants(rows), nil
+}
 
+// toPollableTenants projects the shared rows onto what the poller needs.
+func toPollableTenants(rows []activeWithIP) []PollableTenant {
 	var tenants []PollableTenant
-	for rows.Next() {
-		var t PollableTenant
-		if err := rows.Scan(&t.ID, &t.LXCIP); err != nil {
-			return nil, fmt.Errorf("scan pollable tenant: %w", err)
-		}
-		tenants = append(tenants, t)
+	for _, r := range rows {
+		tenants = append(tenants, PollableTenant{ID: r.ID, LXCIP: r.LXCIP})
 	}
-	if err := rows.Err(); err != nil {
-		return nil, fmt.Errorf("iterate pollable tenants: %w", err)
-	}
-
-	return tenants, nil
+	return tenants
 }
