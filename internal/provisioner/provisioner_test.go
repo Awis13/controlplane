@@ -2288,3 +2288,93 @@ func TestTopology_HostileValuesCannotReshapeCommands(t *testing.T) {
 		t.Errorf("expected the mount root to appear quoted, got %+v", ssh.execOnHostCalls)
 	}
 }
+
+// TestDeploy_HostileValuesCannotReshapeCommands covers the deploy path, which
+// the provisioning test above never reaches: it walks host commands only, and
+// auto-deploy is off there. The repository URL and branch are the values most
+// likely to be hand-edited later, and they land in git argument positions.
+func TestDeploy_HostileValuesCannotReshapeCommands(t *testing.T) {
+	p := New(newMockNodeStore(), newMockTenantStore(), newMockProjectStore(), "test-key")
+	ssh := &mockSSHExecWithDeployCalls{}
+	p.WithSSHClient(ssh)
+	p.WithTopology("", "", "/opt/a b")
+	p.WithFreeRadioRepo("https://example.com/r.git;touch /pwned", "dev;reboot")
+
+	if err := p.deployFreeRadio(context.Background(), "10.0.0.1", 105, "tenant-1", "dash-token"); err != nil {
+		t.Fatalf("deployFreeRadio: %v", err)
+	}
+
+	ssh.mu.Lock()
+	defer ssh.mu.Unlock()
+
+	hostile := []struct {
+		name   string
+		raw    string
+		quoted string
+	}{
+		{name: "app dir", raw: "/opt/a b", quoted: `'/opt/a b'`},
+		{name: "repo url", raw: "https://example.com/r.git;touch /pwned", quoted: `'https://example.com/r.git;touch /pwned'`},
+		{name: "branch", raw: "dev;reboot", quoted: `'dev;reboot'`},
+	}
+
+	for _, call := range ssh.execInCtrCalls {
+		for _, h := range hostile {
+			if strings.Contains(call.Command, h.raw) && !strings.Contains(call.Command, h.quoted) {
+				t.Errorf("%s appears unquoted in %q", h.name, call.Command)
+			}
+		}
+	}
+
+	// Each hostile value must actually reach a command, or the assertions above
+	// pass by never seeing them.
+	for _, h := range hostile {
+		var seen bool
+		for _, call := range ssh.execInCtrCalls {
+			if strings.Contains(call.Command, h.quoted) {
+				seen = true
+			}
+		}
+		if !seen {
+			t.Errorf("%s never appeared quoted in any deploy command: %+v", h.name, ssh.execInCtrCalls)
+		}
+	}
+}
+
+// TestProvision_LegacyTokenWriteQuotesTheAppDir covers the remaining call site,
+// the legacy dashboard token write, which runs when auto-deploy is off.
+func TestProvision_LegacyTokenWriteQuotesTheAppDir(t *testing.T) {
+	nodeStore := newMockNodeStore()
+	tenantStore := newMockTenantStore()
+	projectStore := newMockProjectStore()
+
+	proj := testProjectNoHealth()
+	n := testNode()
+	projectStore.projects[proj.ID] = proj
+	nodeStore.nodes[n.ID] = n
+
+	mockClient := &mockProxmoxClient{nextID: 105}
+	p := setupProvisioner(nodeStore, tenantStore, projectStore, mockClient, n.ID)
+	p.WithTopology("", "", "/opt/a;touch /pwned")
+
+	ssh := &mockSSHExecWithDeployCalls{}
+	p.WithSSHClient(ssh)
+
+	waitForProvision(p, "tenant-1", n.ID, proj.ID, "myapp", proj.RAMMB)
+
+	ssh.mu.Lock()
+	defer ssh.mu.Unlock()
+
+	var seen bool
+	for _, call := range ssh.execInCtrCalls {
+		if !strings.Contains(call.Command, "DASHBOARD_TOKEN=") {
+			continue
+		}
+		seen = true
+		if !strings.Contains(call.Command, `'/opt/a;touch /pwned'`) {
+			t.Errorf("app dir appears unquoted in the token write: %q", call.Command)
+		}
+	}
+	if !seen {
+		t.Errorf("expected the legacy token write, got %+v", ssh.execInCtrCalls)
+	}
+}

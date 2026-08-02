@@ -99,6 +99,12 @@ func TestNext_TinySubnets(t *testing.T) {
 		{cidr: "10.10.0.0/30", want: "10.10.0.2"},
 		{cidr: "10.10.0.0/31", wantErr: true},
 		{cidr: "10.10.0.0/32", wantErr: true},
+		// At the very top of the address space the walk runs off the end:
+		// Next on 255.255.255.255 yields the zero Addr, which formats as
+		// "invalid IP". These must be refusals, not that string.
+		{cidr: "255.255.255.252/30", want: "255.255.255.254"},
+		{cidr: "255.255.255.254/31", wantErr: true},
+		{cidr: "255.255.255.255/32", wantErr: true},
 	}
 
 	for _, tt := range tests {
@@ -109,6 +115,9 @@ func TestNext_TinySubnets(t *testing.T) {
 					t.Fatalf("Next(%s) = %q, want an error: no host space", tt.cidr, got)
 				}
 				return
+			}
+			if got == "invalid IP" {
+				t.Fatalf("Next(%s) returned the zero address formatted as a string", tt.cidr)
 			}
 			if err != nil {
 				t.Fatalf("Next(%s): %v", tt.cidr, err)

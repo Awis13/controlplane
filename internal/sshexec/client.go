@@ -78,14 +78,21 @@ func shellEscape(s string) string {
 // interpolated as they are. Anything outside this set has to be quoted.
 var shellSafe = regexp.MustCompile(`^[A-Za-z0-9_@%+=:,./-]+$`)
 
-// Quote renders a value safe to interpolate into a shell command.
+// Quote stops a value from changing the shape of a shell command.
 //
 // A value made only of ordinary path and identifier characters is returned
 // unchanged, so commands built from well-formed configuration read exactly as
 // they did before. Anything else, including the empty string, comes back
 // single-quoted with embedded quotes escaped, so a value carrying a space, a
-// semicolon or a quote becomes one argument instead of changing the shape of
-// the command.
+// semicolon or a quote becomes one word instead of a second command.
+//
+// What this does not do is prevent argument injection. A quoted value is still
+// one argument, and a program reading it may treat it as an option: a value of
+// "--upload-pack=..." passes through as a single word and git will still read
+// it as a flag, because that is a decision the receiving program makes about
+// its own argv. The repository URL and branch reach git in argument positions,
+// so they carry that caveat. Guarding it means validating those values against
+// what they are meant to be, not quoting them harder.
 //
 // Callers building a command from values they did not author should pass each
 // one through this. ExecOnHost cannot do it for them: by the time it sees the
