@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/go-chi/chi/v5"
+	"github.com/jackc/pgx/v5/pgconn"
 
 	"controlplane/internal/audit"
 	"controlplane/internal/crypto"
@@ -123,6 +124,7 @@ type mockProjectStore struct {
 	createErr    error
 	updateErr    error
 	deleteErr    error
+	getErr       error
 	countTenants int
 	countErr     error
 }
@@ -140,6 +142,9 @@ func (m *mockProjectStore) List(_ context.Context) ([]project.Project, error) {
 }
 
 func (m *mockProjectStore) GetByID(_ context.Context, id string) (*project.Project, error) {
+	if m.getErr != nil {
+		return nil, m.getErr
+	}
 	p, ok := m.projects[id]
 	if !ok {
 		return nil, nil
@@ -203,6 +208,12 @@ type mockTenantStore struct {
 	setDeletedErr   error
 	setSuspendedErr error
 	setResumedErr   error
+
+	// getByIDCalls counts lookups so a test can fail a specific one: a delete
+	// reads the tenant once up front and once again afterwards.
+	getByIDCalls   int
+	getErrOnCall   int
+	getByIDErrWith error
 }
 
 func newMockTenantStore() *mockTenantStore {
@@ -218,6 +229,10 @@ func (m *mockTenantStore) List(_ context.Context) ([]tenant.Tenant, error) {
 }
 
 func (m *mockTenantStore) GetByID(_ context.Context, id string) (*tenant.Tenant, error) {
+	m.getByIDCalls++
+	if m.getErrOnCall != 0 && m.getByIDCalls == m.getErrOnCall {
+		return nil, m.getByIDErrWith
+	}
 	t, ok := m.tenants[id]
 	if !ok {
 		return nil, nil
@@ -1096,6 +1111,150 @@ func TestDeleteTenant_SuspendedIsAllowed(t *testing.T) {
 	}
 	if !prov.deprovisionCalled {
 		t.Error("expected the container to be deprovisioned")
+	}
+}
+
+// TestAdminFlashWording pins this UI's own wording for lifecycle failures. The
+// service phrases its messages for the JSON APIs, so without the translation at
+// this boundary these flashes silently drop into lowercase API style.
+func TestAdminFlashWording(t *testing.T) {
+	tests := []struct {
+		name       string
+		setup      func(*mockNodeStore, *mockProjectStore, *mockTenantStore)
+		method     string
+		target     string
+		form       url.Values
+		wantStatus int
+		wantBody   string
+	}{
+		{
+			name:   "reserved subdomain",
+			method: "POST", target: "/tenants",
+			form:       url.Values{"name": {"t"}, "subdomain": {"www"}, "project_id": {testProjectID}, "node_id": {testNodeID}},
+			wantStatus: http.StatusOK,
+			wantBody:   "Subdomain is reserved",
+		},
+		{
+			name:   "malformed subdomain",
+			method: "POST", target: "/tenants",
+			form:       url.Values{"name": {"t"}, "subdomain": {"NOPE"}, "project_id": {testProjectID}, "node_id": {testNodeID}},
+			wantStatus: http.StatusOK,
+			wantBody:   "Invalid subdomain: lowercase alphanumeric with hyphens, 2-63 chars",
+		},
+		{
+			name: "insufficient capacity",
+			setup: func(ns *mockNodeStore, _ *mockProjectStore, _ *mockTenantStore) {
+				ns.reserveErr = node.ErrInsufficientCapacity
+			},
+			method: "POST", target: "/tenants",
+			form: url.Values{"name": {"t"}, "subdomain": {"ok"}, "project_id": {testProjectID}, "node_id": {testNodeID}},
+			// Create now answers 409 for a capacity refusal, where it used to
+			// render the same flash with 200.
+			wantStatus: http.StatusConflict,
+			wantBody:   "Insufficient RAM capacity on node",
+		},
+		{
+			name: "duplicate name or subdomain",
+			setup: func(_ *mockNodeStore, _ *mockProjectStore, ts *mockTenantStore) {
+				ts.createErr = &pgconn.PgError{Code: "23505"}
+			},
+			method: "POST", target: "/tenants",
+			form:       url.Values{"name": {"t"}, "subdomain": {"ok"}, "project_id": {testProjectID}, "node_id": {testNodeID}},
+			wantStatus: http.StatusConflict,
+			wantBody:   "Name or subdomain already exists",
+		},
+		{
+			name: "create fails in the store",
+			setup: func(_ *mockNodeStore, _ *mockProjectStore, ts *mockTenantStore) {
+				ts.createErr = errors.New("boom")
+			},
+			method: "POST", target: "/tenants",
+			form:       url.Values{"name": {"t"}, "subdomain": {"ok"}, "project_id": {testProjectID}, "node_id": {testNodeID}},
+			wantStatus: http.StatusOK,
+			wantBody:   "Failed to create tenant",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			h, ns, ps, ts, _ := testHandler(t)
+			ns.nodes[testNodeID] = &node.Node{ID: testNodeID, Name: "n", Status: "active"}
+			ps.projects[testProjectID] = &project.Project{ID: testProjectID, Name: "p", RAMMB: 1536}
+			if tt.setup != nil {
+				tt.setup(ns, ps, ts)
+			}
+
+			w := doRequest(t, h, tt.method, tt.target, tt.form)
+
+			if w.Code != tt.wantStatus {
+				t.Errorf("status = %d, want %d", w.Code, tt.wantStatus)
+			}
+			if !strings.Contains(w.Body.String(), tt.wantBody) {
+				t.Errorf("body = %q, want it to contain %q", w.Body.String(), tt.wantBody)
+			}
+		})
+	}
+}
+
+// TestDeleteTenant_WrongStatusWording pins the one lifecycle message carrying a
+// value, which the admin renders with its own phrasing.
+func TestDeleteTenant_WrongStatusWording(t *testing.T) {
+	h, _, _, ts, _ := testHandler(t)
+	ts.tenants[testTenantID] = &tenant.Tenant{
+		ID: testTenantID, Name: "tenant-1", Status: "provisioning",
+		ProjectID: testProjectID, NodeID: testNodeID, Subdomain: "test",
+		CreatedAt: time.Now(), UpdatedAt: time.Now(),
+	}
+
+	w := doRequest(t, h, "DELETE", "/tenants/"+testTenantID, nil)
+
+	if !strings.Contains(w.Body.String(), "Cannot delete tenant in status: provisioning") {
+		t.Errorf("body = %q, want the admin phrasing with the status appended", w.Body.String())
+	}
+}
+
+// TestDeleteTenant_ProjectLookupFailure pins a delta from the cutover: a failed
+// project lookup now renders a flash where the handler used to send a bare
+// "internal error" page with 500.
+func TestDeleteTenant_ProjectLookupFailure(t *testing.T) {
+	h, _, ps, ts, _ := testHandler(t)
+	ts.tenants[testTenantID] = &tenant.Tenant{
+		ID: testTenantID, Name: "tenant-1", Status: "active",
+		ProjectID: testProjectID, NodeID: testNodeID, Subdomain: "test",
+		CreatedAt: time.Now(), UpdatedAt: time.Now(),
+	}
+	ps.getErr = errors.New("boom")
+
+	w := doRequest(t, h, "DELETE", "/tenants/"+testTenantID, nil)
+
+	if w.Code != http.StatusOK {
+		t.Errorf("status = %d, want 200", w.Code)
+	}
+	if !strings.Contains(w.Body.String(), "Failed to get project") {
+		t.Errorf("body = %q, want a flash naming the project lookup", w.Body.String())
+	}
+}
+
+// TestDeleteTenant_ReReadFailure pins the same delta on the post-delete re-read.
+func TestDeleteTenant_ReReadFailure(t *testing.T) {
+	h, _, ps, ts, _ := testHandler(t)
+	ts.tenants[testTenantID] = &tenant.Tenant{
+		ID: testTenantID, Name: "tenant-1", Status: "active",
+		ProjectID: testProjectID, NodeID: testNodeID, Subdomain: "test",
+		CreatedAt: time.Now(), UpdatedAt: time.Now(),
+	}
+	ps.projects[testProjectID] = &project.Project{ID: testProjectID, RAMMB: 1536}
+	// The handler reads the tenant once, the service reads it again afterwards.
+	ts.getErrOnCall = 2
+	ts.getByIDErrWith = errors.New("boom")
+
+	w := doRequest(t, h, "DELETE", "/tenants/"+testTenantID, nil)
+
+	if w.Code != http.StatusOK {
+		t.Errorf("status = %d, want 200", w.Code)
+	}
+	if !strings.Contains(w.Body.String(), "Failed to get tenant") {
+		t.Errorf("body = %q, want a flash naming the tenant re-read", w.Body.String())
 	}
 }
 
