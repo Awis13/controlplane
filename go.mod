@@ -18,6 +18,7 @@ require (
 	golang.zx2c4.com/wireguard/wgctrl v0.0.0-20241231184526-a9ab2273dd10
 )
 
+// golang-migrate v4 requires adal v0.9.16, which upstream has retracted; force the fixed v0.9.24.
 replace github.com/Azure/go-autorest/autorest/adal v0.9.16 => github.com/Azure/go-autorest/autorest/adal v0.9.24
 
 require (

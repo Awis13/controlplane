@@ -34,3 +34,10 @@ jobs:
 
       - name: Test
         run: go test ./...
+
+      # Fails the job on vulnerabilities reachable from our code. Findings in
+      # dependencies we never call are reported but do not fail the scan.
+      - name: Vulnerability scan
+        run: |
+          go install golang.org/x/vuln/cmd/govulncheck@v1.6.0
+          "$(go env GOPATH)/bin/govulncheck" ./...
