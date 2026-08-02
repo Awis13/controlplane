@@ -153,19 +153,6 @@ func parseCORSOrigins(raw string) []string {
 // parseDuration parses a duration from an env var.
 // Accepts both Go duration format ("30s", "1m") and plain seconds ("30").
 // Falls back to the default if not set or invalid.
-// parseInt reads a positive integer, falling back on anything unparseable or
-// non-positive so a typo cannot turn a tuning value into zero.
-func parseInt(key string, fallback int) int {
-	v := os.Getenv(key)
-	if v == "" {
-		return fallback
-	}
-	if n, err := strconv.Atoi(v); err == nil && n > 0 {
-		return n
-	}
-	return fallback
-}
-
 func parseDuration(key string, fallback time.Duration) time.Duration {
 	v := os.Getenv(key)
 	if v == "" {
@@ -216,4 +203,17 @@ func parseStripePrices() map[string]string {
 		}
 	}
 	return prices
+}
+
+// parseInt reads a positive integer, falling back on anything unparseable or
+// non-positive so a typo cannot turn a tuning value into zero.
+func parseInt(key string, fallback int) int {
+	v := os.Getenv(key)
+	if v == "" {
+		return fallback
+	}
+	if n, err := strconv.Atoi(v); err == nil && n > 0 {
+		return n
+	}
+	return fallback
 }

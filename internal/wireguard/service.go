@@ -15,7 +15,7 @@ import (
 	"controlplane/internal/crypto"
 )
 
-// Service manages WireGuard operations: key generation, configs, QR codes, applying to wg0.
+// Service manages WireGuard operations: key generation, configs, QR codes, applying to the hub interface.
 type Service struct {
 	store         *Store
 	encryptionKey string
@@ -217,7 +217,7 @@ func (s *Service) GenerateQRCode(config string) ([]byte, error) {
 	return png, nil
 }
 
-// ApplyPeer adds/updates a peer on the host's wg0 interface.
+// ApplyPeer adds/updates a peer on the host's WireGuard interface.
 func (s *Service) ApplyPeer(peer *Peer) error {
 	args := []string{"set", s.iface, "peer", peer.PublicKey, "allowed-ips", peer.AllowedIPs}
 
@@ -250,7 +250,7 @@ func (s *Service) ApplyPeer(peer *Peer) error {
 	return nil
 }
 
-// RemovePeer removes a peer from the wg0 interface.
+// RemovePeer removes a peer from the WireGuard interface.
 func (s *Service) RemovePeer(publicKey string) error {
 	cmd := exec.Command("wg", "set", s.iface, "peer", publicKey, "remove")
 	if output, err := cmd.CombinedOutput(); err != nil {
@@ -259,14 +259,14 @@ func (s *Service) RemovePeer(publicKey string) error {
 	return nil
 }
 
-// SyncPeers syncs DB state with wg0: adds enabled peers, removes disabled/deleted ones.
+// SyncPeers syncs DB state with the interface: adds enabled peers, removes disabled/deleted ones.
 func (s *Service) SyncPeers(ctx context.Context) error {
 	peers, err := s.store.List(ctx)
 	if err != nil {
 		return fmt.Errorf("list peers for sync: %w", err)
 	}
 
-	// Get current peers on wg0
+	// Get current peers on the interface
 	currentPeers, err := s.getWGPeers()
 	if err != nil {
 		slog.Warn("wireguard: failed to get current wg0 peers, skipping sync", "error", err)
@@ -278,7 +278,7 @@ func (s *Service) SyncPeers(ctx context.Context) error {
 	for _, p := range peers {
 		if p.Enabled {
 			enabledKeys[p.PublicKey] = true
-			// Apply peer to wg0
+			// Apply peer to the interface
 			if err := s.ApplyPeer(&p); err != nil {
 				slog.Error("wireguard: failed to apply peer", "peer", p.Name, "error", err)
 			}
@@ -297,7 +297,7 @@ func (s *Service) SyncPeers(ctx context.Context) error {
 	return nil
 }
 
-// getWGPeers gets the list of public keys of current wg0 peers.
+// getWGPeers gets the list of public keys of current peers on the interface.
 func (s *Service) getWGPeers() ([]string, error) {
 	cmd := exec.Command("wg", "show", s.iface, "peers")
 	output, err := cmd.CombinedOutput()

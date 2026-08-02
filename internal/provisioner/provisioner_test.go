@@ -2204,3 +2204,38 @@ func commandsOf(calls []sshExecCall) []string {
 	}
 	return out
 }
+
+// TestTopology_ConfiguredValuesReachTheAPIMountFallback covers the branch taken
+// when no SSH client is configured, where the mount points go through the
+// Proxmox API instead of pct. It builds its own strings, so the configured
+// topology has to reach it separately from the SSH path.
+func TestTopology_ConfiguredValuesReachTheAPIMountFallback(t *testing.T) {
+	nodeStore := newMockNodeStore()
+	tenantStore := newMockTenantStore()
+	projectStore := newMockProjectStore()
+
+	proj := testProject()
+	n := testNode()
+	projectStore.projects[proj.ID] = proj
+	nodeStore.nodes[n.ID] = n
+
+	mockClient := &mockProxmoxClient{nextID: 105}
+	p := setupProvisioner(nodeStore, tenantStore, projectStore, mockClient, n.ID)
+	p.WithTopology("vmbr1", "/srv/tenants", "/opt/app")
+	// No SSH client: this is what selects the API fallback.
+
+	waitForProvision(p, "tenant-1", n.ID, proj.ID, "myapp", proj.RAMMB)
+
+	mockClient.mu.Lock()
+	defer mockClient.mu.Unlock()
+
+	if !mockClient.mountPointsCalled {
+		t.Fatal("expected the API mount fallback to be used without an SSH client")
+	}
+	if got := mockClient.mountPointsReceived["mp0"]; got != "/srv/tenants/105/visuals,mp=/opt/app/content/visuals" {
+		t.Errorf("mp0 = %q, want the configured mount root and app dir", got)
+	}
+	if got := mockClient.mountPointsReceived["mp1"]; got != "/srv/tenants/105/music,mp=/opt/app/content/music" {
+		t.Errorf("mp1 = %q, want the configured mount root and app dir", got)
+	}
+}

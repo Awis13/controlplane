@@ -33,18 +33,6 @@ type Client struct {
 
 // NewClient creates a new Caddy Admin API client.
 // serverName defaults to "srv1", domain defaults to "example.com".
-// defaultUpstreamPort is the tenant port Caddy proxied to before it became
-// configurable.
-const defaultUpstreamPort = "80"
-
-// WithUpstreamPort overrides the port routes proxy to. Empty keeps the default.
-func (c *Client) WithUpstreamPort(port string) *Client {
-	if port != "" {
-		c.upstreamPort = port
-	}
-	return c
-}
-
 func NewClient(baseURL, serverName, domain string) *Client {
 	if serverName == "" {
 		serverName = "srv1"
@@ -61,6 +49,18 @@ func NewClient(baseURL, serverName, domain string) *Client {
 			Timeout: 10 * time.Second,
 		},
 	}
+}
+
+// defaultUpstreamPort is the tenant port Caddy proxied to before it became
+// configurable.
+const defaultUpstreamPort = "80"
+
+// WithUpstreamPort overrides the port routes proxy to. Empty keeps the default.
+func (c *Client) WithUpstreamPort(port string) *Client {
+	if port != "" {
+		c.upstreamPort = port
+	}
+	return c
 }
 
 // routeID returns the Caddy route @id for a subdomain.

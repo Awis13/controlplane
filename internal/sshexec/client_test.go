@@ -191,3 +191,62 @@ func TestExecInContainer_ValidKeyConnectionRefused(t *testing.T) {
 		t.Error("expected connection error")
 	}
 }
+
+// --- Topology ---
+
+// TestClientTopology_Defaults pins the login user and port this client used
+// before they became configurable.
+func TestClientTopology_Defaults(t *testing.T) {
+	c := NewClient("/path/to/key")
+
+	if c.user != "root" {
+		t.Errorf("user = %q, want the previous default", c.user)
+	}
+	if c.port != "22" {
+		t.Errorf("port = %q, want the previous default", c.port)
+	}
+	if got := c.dialAddr("10.0.0.1"); got != "10.0.0.1:22" {
+		t.Errorf("dialAddr = %q, want the default port", got)
+	}
+}
+
+// TestClientTopology_Overrides pins that configured values are kept and reach
+// the address actually dialled.
+func TestClientTopology_Overrides(t *testing.T) {
+	c := NewClient("/path/to/key").WithUser("operator").WithPort("2222")
+
+	if c.user != "operator" {
+		t.Errorf("user = %q, want the configured user", c.user)
+	}
+	if c.port != "2222" {
+		t.Errorf("port = %q, want the configured port", c.port)
+	}
+	if got := c.dialAddr("10.0.0.1"); got != "10.0.0.1:2222" {
+		t.Errorf("dialAddr = %q, want the configured port", got)
+	}
+}
+
+// TestClientTopology_EmptyOverridesKeepDefaults pins that a partially
+// configured deployment does not lose the defaults, which is what an empty
+// environment variable would otherwise do.
+func TestClientTopology_EmptyOverridesKeepDefaults(t *testing.T) {
+	c := NewClient("/path/to/key").WithUser("").WithPort("")
+
+	if c.user != "root" || c.port != "22" {
+		t.Errorf("empty overrides clobbered the defaults: user=%q port=%q", c.user, c.port)
+	}
+	if got := c.dialAddr("10.0.0.1"); got != "10.0.0.1:22" {
+		t.Errorf("dialAddr = %q, want the default port", got)
+	}
+}
+
+// TestClientTopology_IPv6HostIsBracketed pins that the address stays valid for
+// an IPv6 host, which is why this uses net.JoinHostPort rather than a format
+// string.
+func TestClientTopology_IPv6HostIsBracketed(t *testing.T) {
+	c := NewClient("/path/to/key").WithPort("2222")
+
+	if got := c.dialAddr("fd00::1"); got != "[fd00::1]:2222" {
+		t.Errorf("dialAddr = %q, want the host bracketed", got)
+	}
+}
