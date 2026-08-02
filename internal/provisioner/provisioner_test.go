@@ -4,6 +4,10 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"net"
+	"net/http"
+	"net/http/httptest"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -65,6 +69,8 @@ type mockTenantStore struct {
 	errors          map[string]string
 	tenants         map[string]*tenant.Tenant
 	dashboardTokens map[string]string
+	healthStatuses  map[string]string
+	nextIP          string // overrides the allocated address, for health-check tests
 
 	setDeletingErr error
 }
@@ -120,12 +126,19 @@ func (m *mockTenantStore) SetLXCIP(_ context.Context, id string, ip string) erro
 }
 
 func (m *mockTenantStore) GetNextAvailableIP(_ context.Context, cidr string) (string, error) {
+	if m.nextIP != "" {
+		return m.nextIP, nil
+	}
 	return "10.10.10.5", nil
 }
 
 func (m *mockTenantStore) SetHealthStatus(_ context.Context, id string, status string) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
+	if m.healthStatuses == nil {
+		m.healthStatuses = make(map[string]string)
+	}
+	m.healthStatuses[id] = status
 	return nil
 }
 
@@ -332,11 +345,13 @@ func testNode() *node.Node {
 // setupProvisioner creates a provisioner with a pre-cached mock client.
 func setupProvisioner(nodeStore *mockNodeStore, tenantStore *mockTenantStore, projectStore *mockProjectStore, mockClient *mockProxmoxClient, nodeID string) *Provisioner {
 	p := New(nodeStore, tenantStore, projectStore, "test-key")
-	// Production timings scaled down by 1000: the health check still runs its
-	// full poll loop against an unreachable container, it just costs
-	// milliseconds instead of a minute per test.
-	p.healthTimeout = 60 * time.Millisecond
-	p.healthInterval = 5 * time.Millisecond
+	// The health check still runs its full poll loop against an unreachable
+	// container, it just costs a handful of milliseconds instead of a minute.
+	// The budget is deliberately several times the interval so the loop really
+	// polls; the outcome is asserted, so a budget too short to reach the first
+	// poll would show up as a wrong verdict rather than passing quietly.
+	p.healthTimeout = 12 * time.Millisecond
+	p.healthInterval = 1 * time.Millisecond
 	p.healthClientTimeout = 5 * time.Millisecond
 	p.mu.Lock()
 	p.clients[nodeID] = mockClient
@@ -393,6 +408,57 @@ func TestProvision_HappyPath(t *testing.T) {
 	}
 	if !mockClient.startCalled {
 		t.Error("expected start to be called")
+	}
+
+	// The health check ran and its verdict was recorded. Nothing answers at the
+	// tenant address in a test, so the expected verdict is unhealthy: this is
+	// what proves the poll loop executed rather than being skipped.
+	if got := tenantStore.healthStatuses["tenant-1"]; got != "unhealthy" {
+		t.Errorf("health status = %q, want %q", got, "unhealthy")
+	}
+}
+
+// TestProvision_HealthyWhenTheTenantAnswers is the other half: with something
+// answering 200 at the health URL the tenant is recorded healthy. Without it,
+// a health check that never succeeded would look identical to one that was
+// never run.
+func TestProvision_HealthyWhenTheTenantAnswers(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer srv.Close()
+
+	host, port, err := net.SplitHostPort(strings.TrimPrefix(srv.URL, "http://"))
+	if err != nil {
+		t.Fatalf("split %q: %v", srv.URL, err)
+	}
+	portNum, err := strconv.Atoi(port)
+	if err != nil {
+		t.Fatalf("port %q: %v", port, err)
+	}
+
+	nodeStore := newMockNodeStore()
+	tenantStore := newMockTenantStore()
+	projectStore := newMockProjectStore()
+
+	proj := testProject()
+	// Point the health check at the stub server.
+	proj.Ports = []int{portNum}
+	proj.NetworkCIDR = host + "/32"
+	n := testNode()
+	projectStore.projects[proj.ID] = proj
+	nodeStore.nodes[n.ID] = n
+	tenantStore.nextIP = host
+
+	mockClient := &mockProxmoxClient{nextID: 105}
+	p := setupProvisioner(nodeStore, tenantStore, projectStore, mockClient, n.ID)
+
+	waitForProvision(p, "tenant-1", n.ID, proj.ID, "myapp", proj.RAMMB)
+
+	tenantStore.mu.Lock()
+	defer tenantStore.mu.Unlock()
+	if got := tenantStore.healthStatuses["tenant-1"]; got != "healthy" {
+		t.Errorf("health status = %q, want %q", got, "healthy")
 	}
 }
 

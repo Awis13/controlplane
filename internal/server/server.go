@@ -251,8 +251,15 @@ func New(pool *pgxpool.Pool, cfg *config.Config) (http.Handler, *provisioner.Pro
 	// Stripe webhook (public, no auth — signature verified by Stripe SDK)
 	r.Post("/api/v1/stripe/webhook", billingHandler.Webhook)
 
-	// Billing management (JWT protected)
+	// Billing management (JWT protected).
+	//
+	// Rate limited like the other user-scoped groups: each of these calls
+	// reaches out to Stripe, so an unthrottled caller can burn a rate budget
+	// that belongs to the whole deployment. The Stripe webhook is not in this
+	// group -- it is registered above at /api/v1/stripe/webhook -- so limiting
+	// here cannot throttle Stripe's deliveries.
 	r.Route("/api/v1/billing", func(r chi.Router) {
+		r.Use(httprate.LimitByIP(20, time.Minute))
 		r.Use(auth.JWTAuth(userStore, tokenStore, cfg.JWTSecret))
 		r.Post("/checkout", billingHandler.CreateCheckout)
 		r.Post("/portal", billingHandler.CreatePortal)
