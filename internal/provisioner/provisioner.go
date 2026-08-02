@@ -29,6 +29,14 @@ type SSHExec interface {
 const (
 	provisionTimeout  = 10 * time.Minute
 	maxConcurrentJobs = 10
+
+	// freeRadioDir is where the tenant's checkout lives inside the container.
+	// The content mount points are attached beneath it.
+	freeRadioDir = "/root/freeRadio"
+
+	// defaultFreeRadioBranch is used when no branch is configured. The remote's
+	// default branch is not a safe fallback: it trails this one.
+	defaultFreeRadioBranch = "dev"
 )
 
 // NodeStore defines what the provisioner needs from the node store.
@@ -711,8 +719,9 @@ func (p *Provisioner) deployFreeRadio(ctx context.Context, sshHost string, lxcID
 	log := slog.With("tenant_id", tenantID, "lxc_id", lxcID)
 
 	repoURL := p.freeRadioRepoURL
-	if repoURL == "" {
-		repoURL = "https://github.com/Awis13/freeRadio.git"
+	branch := p.freeRadioRepoBranch
+	if branch == "" {
+		branch = defaultFreeRadioBranch
 	}
 
 	// Step 1: Install Docker (if not in the template)
@@ -722,37 +731,110 @@ func (p *Provisioner) deployFreeRadio(ctx context.Context, sshHost string, lxcID
 		return fmt.Errorf("install docker: %w", err)
 	}
 
-	// Step 2: Clone the repo
-	log.Info("provision: deploy — cloning freeRadio repo", "repo_url", repoURL)
-	cloneCmd := fmt.Sprintf("mkdir -p /root/freeRadio && git clone %s /root/freeRadio 2>&1 || (cd /root/freeRadio && git pull origin master)", repoURL)
-	if err := p.sshClient.ExecInContainer(ctx, sshHost, lxcID, cloneCmd); err != nil {
-		return fmt.Errorf("clone repo: %w", err)
+	// Step 2: Fetch the repo into the deploy directory.
+	//
+	// git clone refuses a non-empty directory, and this one always is: the
+	// content mount points are attached under it before the container starts.
+	// Initializing in place and fetching avoids that, leaves the mounted
+	// content alone, and re-running updates an existing checkout instead of
+	// failing, which the old "pull origin master" fallback was trying to do
+	// against a branch that does not exist.
+	//
+	// The branch is explicit. The remote's default branch trails the branch
+	// tenants are meant to run, so an unqualified fetch installs older code.
+	log.Info("provision: deploy — fetching freeRadio", "repo_url", repoURL, "branch", branch)
+	fetchCmd := fmt.Sprintf(
+		"mkdir -p %[1]s && cd %[1]s && git init -q && "+
+			"(git remote add origin %[2]s 2>/dev/null || git remote set-url origin %[2]s) && "+
+			"git fetch --depth 1 origin %[3]s && git checkout -f -B %[3]s FETCH_HEAD",
+		freeRadioDir, repoURL, branch)
+	if err := p.sshClient.ExecInContainer(ctx, sshHost, lxcID, fetchCmd); err != nil {
+		return fmt.Errorf("fetch repo: %w", err)
 	}
 
-	// Step 3: Write .env with the tenant settings
+	// Step 3: Write .env.
+	//
+	// Every variable here is one the stack refuses to start without: the
+	// dashboard throws on boot with no STREAM_KEYS_SECRET, and the four
+	// ICECAST_* variables are interpolated by compose with no default, so an
+	// absent one leaves the broker with an empty password.
 	log.Info("provision: deploy — writing .env")
-	envContent := fmt.Sprintf("TENANT_ID=%s\nDASHBOARD_TOKEN=%s\nS3_ENABLED=false\nNODE_ENV=production\n", tenantID, dashboardToken)
-	writeEnvCmd := fmt.Sprintf("cat > /root/freeRadio/.env << 'ENVEOF'\n%sENVEOF", envContent)
+	secrets, err := generateDeploySecrets()
+	if err != nil {
+		return fmt.Errorf("generate deploy secrets: %w", err)
+	}
+	envContent := fmt.Sprintf(
+		"TENANT_ID=%s\n"+
+			"DASHBOARD_TOKEN=%s\n"+
+			"STREAM_KEYS_SECRET=%s\n"+
+			"ICECAST_SOURCE_PASSWORD=%s\n"+
+			"ICECAST_ADMIN_PASSWORD=%s\n"+
+			"ICECAST_PASSWORD=%s\n"+
+			"ICECAST_RELAY_PASSWORD=%s\n"+
+			"S3_ENABLED=false\n"+
+			"NODE_ENV=production\n",
+		tenantID, dashboardToken, secrets.StreamKeys,
+		secrets.IcecastSource, secrets.IcecastAdmin, secrets.IcecastListen, secrets.IcecastRelay)
+	writeEnvCmd := fmt.Sprintf("cat > %s/.env << 'ENVEOF'\n%sENVEOF", freeRadioDir, envContent)
 	if err := p.sshClient.ExecInContainer(ctx, sshHost, lxcID, writeEnvCmd); err != nil {
 		return fmt.Errorf("write .env: %w", err)
 	}
 
-	// Step 4: Start the Docker services
+	// Step 4: Generate the TLS certificate the proxy needs.
+	//
+	// certs/ is gitignored, so a fresh checkout has none, and the proxy's nginx
+	// config hard-requires the pair. Without this the proxy exits at startup
+	// and nothing is reachable. Must happen before the stack comes up.
+	log.Info("provision: deploy — bootstrapping certificates")
+	certsCmd := fmt.Sprintf("cd %[1]s && chmod +x scripts/bootstrap-certs.sh && scripts/bootstrap-certs.sh", freeRadioDir)
+	if err := p.sshClient.ExecInContainer(ctx, sshHost, lxcID, certsCmd); err != nil {
+		return fmt.Errorf("bootstrap certs: %w", err)
+	}
+
+	// Step 5: Start the Docker services
 	log.Info("provision: deploy — starting docker compose")
-	composeCmd := "cd /root/freeRadio && docker compose up -d"
+	composeCmd := fmt.Sprintf("cd %s && docker compose up -d", freeRadioDir)
 	if err := p.sshClient.ExecInContainer(ctx, sshHost, lxcID, composeCmd); err != nil {
 		return fmt.Errorf("docker compose up: %w", err)
 	}
 
-	// Step 5: Health check (wait up to 60 seconds)
+	// Step 6: Health check.
+	//
+	// The dashboard listens on 9090 inside its container and publishes no port,
+	// so the old 127.0.0.1:9090 probe cannot connect. The proxy is the only
+	// service publishing to the host, and /api/health is public, so it answers
+	// without the dashboard token.
 	log.Info("provision: deploy — waiting for health check")
-	healthCmd := "for i in $(seq 1 12); do curl -s http://127.0.0.1:9090/api/status && exit 0; sleep 5; done; exit 1"
+	healthCmd := "for i in $(seq 1 12); do curl -fsS http://127.0.0.1/api/health && exit 0; sleep 5; done; exit 1"
 	if err := p.sshClient.ExecInContainer(ctx, sshHost, lxcID, healthCmd); err != nil {
 		return fmt.Errorf("health check: %w", err)
 	}
 
 	log.Info("provision: deploy — freeRadio deployed successfully")
 	return nil
+}
+
+// deploySecrets are the per-tenant secrets written into the deployed .env.
+// They are generated rather than fixed: each tenant gets its own stack, and
+// these are the credentials protecting it.
+type deploySecrets struct {
+	StreamKeys    string
+	IcecastSource string
+	IcecastAdmin  string
+	IcecastListen string
+	IcecastRelay  string
+}
+
+func generateDeploySecrets() (deploySecrets, error) {
+	var s deploySecrets
+	for _, target := range []*string{&s.StreamKeys, &s.IcecastSource, &s.IcecastAdmin, &s.IcecastListen, &s.IcecastRelay} {
+		token, err := generateToken()
+		if err != nil {
+			return deploySecrets{}, err
+		}
+		*target = token
+	}
+	return s, nil
 }
 
 // generateToken generates a cryptographically random token (64 hex chars).

@@ -1577,12 +1577,12 @@ func TestProvision_AutoDeploy_HappyPath(t *testing.T) {
 	ssh.mu.Lock()
 	defer ssh.mu.Unlock()
 
-	// Expect 5 deploy calls (docker install, clone, .env, compose up, health) +
-	// the 1 legacy dashboard token write call should NOT happen (freeRadioRepoURL is set)
-	// There is also a sed call for the dashboard token in the legacy path — it is skipped, since freeRadioRepoURL != ""
-	// Total ExecInContainer: 5 calls from deployFreeRadio
-	if len(ssh.execInCtrCalls) != 5 {
-		t.Fatalf("expected 5 ExecInContainer calls for deploy, got %d", len(ssh.execInCtrCalls))
+	// Six deploy calls: docker install, fetch, .env, certificates, compose up,
+	// health. The legacy dashboard token write is skipped because a repo is
+	// configured. Certificates are the step added when the deploy was fixed
+	// against post-refactor freeRadio, where the proxy exits without them.
+	if len(ssh.execInCtrCalls) != 6 {
+		t.Fatalf("expected 6 ExecInContainer calls for deploy, got %d", len(ssh.execInCtrCalls))
 	}
 
 	// Verify the command order
@@ -1593,8 +1593,8 @@ func TestProvision_AutoDeploy_HappyPath(t *testing.T) {
 		t.Errorf("step 1: unexpected command: %s", calls[0].Command)
 	}
 
-	// Step 2: clone repo
-	if calls[1].Command != "mkdir -p /root/freeRadio && git clone https://github.com/Awis13/freeRadio.git /root/freeRadio 2>&1 || (cd /root/freeRadio && git pull origin master)" {
+	// Step 2: fetch the configured branch into the mounted directory
+	if !strings.Contains(calls[1].Command, "git fetch --depth 1 origin dev") {
 		t.Errorf("step 2: unexpected command: %s", calls[1].Command)
 	}
 
@@ -1606,14 +1606,19 @@ func TestProvision_AutoDeploy_HappyPath(t *testing.T) {
 		t.Errorf("step 3: .env should contain DASHBOARD_TOKEN, got: %s", calls[2].Command)
 	}
 
-	// Step 4: docker compose up
-	if calls[3].Command != "cd /root/freeRadio && docker compose up -d" {
+	// Step 4: bootstrap the proxy's certificates
+	if !strings.Contains(calls[3].Command, "bootstrap-certs.sh") {
 		t.Errorf("step 4: unexpected command: %s", calls[3].Command)
 	}
 
-	// Step 5: health check
-	if !strings.Contains(calls[4].Command, "curl -s http://127.0.0.1:9090/api/status") {
+	// Step 5: docker compose up
+	if calls[4].Command != "cd /root/freeRadio && docker compose up -d" {
 		t.Errorf("step 5: unexpected command: %s", calls[4].Command)
+	}
+
+	// Step 6: health check through the proxy, the only published port
+	if !strings.Contains(calls[5].Command, "http://127.0.0.1/api/health") {
+		t.Errorf("step 6: unexpected command: %s", calls[5].Command)
 	}
 
 	// All commands must target the correct LXC
@@ -1806,5 +1811,239 @@ func TestProvision_DeployPathWhenRepoSet(t *testing.T) {
 	}
 	if sawLegacyTokenWrite {
 		t.Error("the legacy token write must not run when the deploy writes the whole .env")
+	}
+}
+
+// --- deployFreeRadio against post-refactor freeRadio ---
+
+// deployCommands runs a deploy against the ssh mock and returns the commands it
+// issued inside the container, in order.
+func deployCommands(t *testing.T, branch string) []string {
+	t.Helper()
+
+	p := New(newMockNodeStore(), newMockTenantStore(), newMockProjectStore(), "test-key")
+	ssh := &mockSSHExecWithDeployCalls{}
+	p.WithSSHClient(ssh)
+	p.WithFreeRadioRepo("https://github.com/example/freeRadio.git", branch)
+
+	if err := p.deployFreeRadio(context.Background(), "10.0.0.1", 105, "tenant-1", "dash-token"); err != nil {
+		t.Fatalf("deployFreeRadio: %v", err)
+	}
+
+	ssh.mu.Lock()
+	defer ssh.mu.Unlock()
+	commands := make([]string, 0, len(ssh.execInCtrCalls))
+	for _, call := range ssh.execInCtrCalls {
+		commands = append(commands, call.Command)
+	}
+	return commands
+}
+
+// findCommand returns the first command containing substr.
+func findCommand(commands []string, substr string) (string, bool) {
+	for _, c := range commands {
+		if strings.Contains(c, substr) {
+			return c, true
+		}
+	}
+	return "", false
+}
+
+// indexOfCommand returns the position of the first command containing substr.
+func indexOfCommand(commands []string, substr string) int {
+	for i, c := range commands {
+		if strings.Contains(c, substr) {
+			return i
+		}
+	}
+	return -1
+}
+
+// TestDeploy_PullsTheConfiguredBranch covers breaks 1 and 2: the old fallback
+// pulled origin master, a branch that does not exist, and an unqualified clone
+// takes the remote's default branch, which trails the one tenants run.
+func TestDeploy_PullsTheConfiguredBranch(t *testing.T) {
+	commands := deployCommands(t, "dev")
+
+	fetch, ok := findCommand(commands, "git fetch")
+	if !ok {
+		t.Fatalf("no fetch command issued: %v", commands)
+	}
+	if !strings.Contains(fetch, "git fetch --depth 1 origin dev") {
+		t.Errorf("fetch = %q, want it to name the configured branch", fetch)
+	}
+	if !strings.Contains(fetch, "git checkout -f -B dev FETCH_HEAD") {
+		t.Errorf("fetch = %q, want a checkout of the fetched branch", fetch)
+	}
+	for _, c := range commands {
+		if strings.Contains(c, "master") {
+			t.Errorf("command references the non-existent master branch: %q", c)
+		}
+	}
+}
+
+func TestDeploy_UsesConfiguredBranchNotADefault(t *testing.T) {
+	commands := deployCommands(t, "release-1.2")
+
+	fetch, _ := findCommand(commands, "git fetch")
+	if !strings.Contains(fetch, "origin release-1.2") {
+		t.Errorf("fetch = %q, want the configured branch", fetch)
+	}
+	if strings.Contains(fetch, "origin dev") {
+		t.Errorf("fetch = %q, want no fallback to the default branch", fetch)
+	}
+}
+
+// TestDeploy_FetchesIntoNonEmptyDirectory covers break 3: the content mount
+// points are attached under the deploy directory before the container starts,
+// so a plain git clone into it fails.
+func TestDeploy_FetchesIntoNonEmptyDirectory(t *testing.T) {
+	commands := deployCommands(t, "dev")
+
+	for _, c := range commands {
+		if strings.Contains(c, "git clone") {
+			t.Errorf("git clone cannot succeed into the mounted directory: %q", c)
+		}
+	}
+	fetch, ok := findCommand(commands, "git init")
+	if !ok {
+		t.Fatalf("expected the repo to be initialized in place: %v", commands)
+	}
+	if !strings.Contains(fetch, "git init -q") || !strings.Contains(fetch, "git fetch") {
+		t.Errorf("fetch = %q, want init in place followed by a fetch", fetch)
+	}
+	if !strings.Contains(fetch, "remote add origin") || !strings.Contains(fetch, "remote set-url origin") {
+		t.Errorf("fetch = %q, want the remote set whether or not it already exists", fetch)
+	}
+}
+
+// TestDeploy_EnvCarriesEverySecretTheStackNeeds covers break 4. The dashboard
+// throws on boot without STREAM_KEYS_SECRET, and the four ICECAST_* variables
+// are interpolated by compose with no default.
+func TestDeploy_EnvCarriesEverySecretTheStackNeeds(t *testing.T) {
+	commands := deployCommands(t, "dev")
+
+	env, ok := findCommand(commands, "ENVEOF")
+	if !ok {
+		t.Fatalf("no .env written: %v", commands)
+	}
+
+	for _, required := range []string{
+		"TENANT_ID=tenant-1",
+		"DASHBOARD_TOKEN=dash-token",
+		"STREAM_KEYS_SECRET=",
+		"ICECAST_SOURCE_PASSWORD=",
+		"ICECAST_ADMIN_PASSWORD=",
+		"ICECAST_PASSWORD=",
+		"ICECAST_RELAY_PASSWORD=",
+	} {
+		if !strings.Contains(env, required) {
+			t.Errorf(".env is missing %q", required)
+		}
+	}
+
+	// The secrets must be generated, not placeholders shared between tenants.
+	for _, line := range strings.Split(env, "\n") {
+		name, value, found := strings.Cut(line, "=")
+		if !found || !strings.HasSuffix(name, "SECRET") && !strings.HasSuffix(name, "PASSWORD") {
+			continue
+		}
+		if len(value) != 64 {
+			t.Errorf("%s = %q, want a generated 64 character secret", name, value)
+		}
+		if strings.Contains(value, "change-me") {
+			t.Errorf("%s still carries the example placeholder", name)
+		}
+	}
+}
+
+// TestDeploy_SecretsDifferPerVariableAndPerTenant pins that the generated
+// secrets are independent, so one leaking does not hand over the rest.
+func TestDeploy_SecretsDifferPerVariableAndPerTenant(t *testing.T) {
+	first, _ := findCommand(deployCommands(t, "dev"), "ENVEOF")
+	second, _ := findCommand(deployCommands(t, "dev"), "ENVEOF")
+
+	seen := map[string]string{}
+	for _, line := range strings.Split(first, "\n") {
+		name, value, found := strings.Cut(line, "=")
+		if !found || (!strings.HasSuffix(name, "SECRET") && !strings.HasSuffix(name, "PASSWORD")) {
+			continue
+		}
+		if name == "DASHBOARD_TOKEN" {
+			continue
+		}
+		if prev, dup := seen[value]; dup {
+			t.Errorf("%s reuses the secret already given to %s", name, prev)
+		}
+		seen[value] = name
+	}
+	if len(seen) != 5 {
+		t.Fatalf("found %d generated secrets, want 5", len(seen))
+	}
+
+	for value := range seen {
+		if strings.Contains(second, value) {
+			t.Error("a second deploy reused a secret from the first")
+		}
+	}
+}
+
+// TestDeploy_HealthChecksThroughThePublishedPort covers break 5: the dashboard
+// listens on 9090 inside its container and publishes no port, so the old probe
+// could never connect. The proxy is what reaches the host.
+func TestDeploy_HealthChecksThroughThePublishedPort(t *testing.T) {
+	commands := deployCommands(t, "dev")
+
+	health, ok := findCommand(commands, "/api/health")
+	if !ok {
+		t.Fatalf("no health check issued: %v", commands)
+	}
+	if strings.Contains(health, "9090") {
+		t.Errorf("health check targets an unpublished port: %q", health)
+	}
+	if !strings.Contains(health, "http://127.0.0.1/api/health") {
+		t.Errorf("health = %q, want the proxy's public health endpoint", health)
+	}
+}
+
+// TestDeploy_BootstrapsCertsBeforeComposeUp covers break 6: certs/ is
+// gitignored, the proxy's config hard-requires the pair, and it exits at
+// startup without it. Ordering is the point.
+func TestDeploy_BootstrapsCertsBeforeComposeUp(t *testing.T) {
+	commands := deployCommands(t, "dev")
+
+	certs := indexOfCommand(commands, "bootstrap-certs.sh")
+	compose := indexOfCommand(commands, "docker compose up")
+
+	if certs < 0 {
+		t.Fatalf("certificates are never bootstrapped: %v", commands)
+	}
+	if compose < 0 {
+		t.Fatalf("the stack is never started: %v", commands)
+	}
+	if certs > compose {
+		t.Errorf("certificates bootstrapped after compose up (positions %d and %d): the proxy would exit at startup", certs, compose)
+	}
+}
+
+// TestDeploy_StepOrder pins the whole sequence, since several steps only work
+// where they are.
+func TestDeploy_StepOrder(t *testing.T) {
+	commands := deployCommands(t, "dev")
+
+	want := []string{"which docker", "git fetch", "ENVEOF", "bootstrap-certs.sh", "docker compose up", "/api/health"}
+	last := -1
+	for _, step := range want {
+		at := indexOfCommand(commands, step)
+		if at < 0 {
+			t.Fatalf("step %q never ran: %v", step, commands)
+		}
+		if at <= last {
+			t.Errorf("step %q ran out of order (position %d, previous %d)", step, at, last)
+		}
+		last = at
+	}
+	if len(commands) != len(want) {
+		t.Errorf("issued %d commands, want %d: %v", len(commands), len(want), commands)
 	}
 }
