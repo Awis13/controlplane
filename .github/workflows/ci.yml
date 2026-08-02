@@ -41,11 +41,21 @@ jobs:
       # the same command locally: a file created and not yet staged is invisible
       # to it. Locally, pair it with a plain recursive grep.
       #
-      # git grep exits 1 when it finds nothing, which is the success case, so
-      # the test is inverted through an if rather than run bare under bash -e.
+      # git grep exits 0 when it finds matches, 1 when it finds none, and
+      # something higher when it could not run at all. Only 1 is success. An
+      # earlier version treated any non-zero as success, so a build image
+      # without -P support would have printed a fatal error and passed.
       - name: English-only check
         run: |
-          if git grep -nP '[\x{0400}-\x{04FF}]' -- ':!*.md'; then
+          set +e
+          git grep -nP '[\x{0400}-\x{04FF}]' -- ':!*.md'
+          rc=$?
+          set -e
+          if [ "$rc" -gt 1 ]; then
+            echo "::error::the English-only check could not run (git grep exited $rc); -P may be unavailable on this image"
+            exit 1
+          fi
+          if [ "$rc" -eq 0 ]; then
             echo "::error::Cyrillic characters found outside markdown; the matches are listed above"
             exit 1
           fi
