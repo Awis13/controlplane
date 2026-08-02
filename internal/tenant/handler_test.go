@@ -36,14 +36,6 @@ func newMockTenantStore() *mockTenantStore {
 	return &mockTenantStore{tenants: make(map[string]*Tenant)}
 }
 
-func (m *mockTenantStore) List(_ context.Context) ([]Tenant, error) {
-	var result []Tenant
-	for _, t := range m.tenants {
-		result = append(result, *t)
-	}
-	return result, nil
-}
-
 func (m *mockTenantStore) ListPaginated(_ context.Context, limit, offset int, status, nodeID, projectID string) ([]Tenant, int, error) {
 	var result []Tenant
 	for _, t := range m.tenants {
@@ -116,14 +108,6 @@ func (m *mockTenantStore) Create(_ context.Context, req CreateTenantRequest) (*T
 	}
 	m.tenants[t.ID] = t
 	return t, nil
-}
-
-func (m *mockTenantStore) Delete(_ context.Context, id string) error {
-	if m.deleteErr != nil {
-		return m.deleteErr
-	}
-	delete(m.tenants, id)
-	return nil
 }
 
 func (m *mockTenantStore) SetActive(_ context.Context, id string, lxcID int) error {
