@@ -71,11 +71,13 @@ func New(pool *pgxpool.Pool, cfg *config.Config) (http.Handler, *provisioner.Pro
 		if _, err := os.Stat(cfg.SSHKeyPath); err != nil {
 			slog.Warn("SSH key not found, dashboard token provisioning disabled", "path", cfg.SSHKeyPath, "error", err)
 		} else {
-			sshClient := sshexec.NewClient(cfg.SSHKeyPath)
+			sshClient := sshexec.NewClient(cfg.SSHKeyPath).WithUser(cfg.SSHUser).WithPort(cfg.SSHPort)
 			prov.WithSSHClient(sshClient)
 			slog.Info("sshexec: enabled", "key_path", cfg.SSHKeyPath)
 		}
 	}
+
+	prov.WithTopology(cfg.LXCBridge, cfg.TenantMountRoot, cfg.TenantAppDir)
 
 	// freeRadio auto-deploy. Without a repo URL the provisioner keeps the
 	// legacy behaviour of writing only the dashboard token into a container
@@ -91,7 +93,7 @@ func New(pool *pgxpool.Pool, cfg *config.Config) (http.Handler, *provisioner.Pro
 
 	// Caddy dynamic routing (optional)
 	if cfg.CaddyAdminURL != "" {
-		caddyClient := caddy.NewClient(cfg.CaddyAdminURL, cfg.CaddyServerName, cfg.CaddyDomain)
+		caddyClient := caddy.NewClient(cfg.CaddyAdminURL, cfg.CaddyServerName, cfg.CaddyDomain).WithUpstreamPort(cfg.CaddyUpstreamPort)
 		prov.WithCaddyClient(caddyClient)
 
 		// Reconcile routes on startup (background goroutine)
@@ -145,7 +147,8 @@ func New(pool *pgxpool.Pool, cfg *config.Config) (http.Handler, *provisioner.Pro
 	// WireGuard peer management (optional — requires WG_HUB_PUBLIC_KEY)
 	wgStore := wireguard.NewStore(pool)
 	if cfg.WGHubPublicKey != "" {
-		wgService := wireguard.NewService(wgStore, cfg.EncryptionKey, cfg.WGHubPublicKey, cfg.WGHubEndpoint, cfg.WGNetworkCIDR)
+		wgService := wireguard.NewService(wgStore, cfg.EncryptionKey, cfg.WGHubPublicKey, cfg.WGHubEndpoint, cfg.WGNetworkCIDR).
+			WithInterface(cfg.WGInterface).WithDNSAddr(cfg.WGDNSAddr).WithKeepalive(cfg.WGKeepalive)
 		adminHandler.SetWireGuard(wgService, wgStore)
 
 		// Register WireGuard API handlers

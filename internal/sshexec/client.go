@@ -12,17 +12,41 @@ import (
 )
 
 // Client executes commands on remote hosts via SSH.
+// Defaults are the values this client used before they became configurable.
+const (
+	defaultSSHUser = "root"
+	defaultSSHPort = "22"
+)
+
 type Client struct {
 	keyPath string
 	user    string
+	port    string
 }
 
 // NewClient creates a new SSH exec client.
 func NewClient(keyPath string) *Client {
 	return &Client{
 		keyPath: keyPath,
-		user:    "root",
+		user:    defaultSSHUser,
+		port:    defaultSSHPort,
 	}
+}
+
+// WithUser overrides the login user. Empty keeps the default.
+func (c *Client) WithUser(user string) *Client {
+	if user != "" {
+		c.user = user
+	}
+	return c
+}
+
+// WithPort overrides the SSH port. Empty keeps the default.
+func (c *Client) WithPort(port string) *Client {
+	if port != "" {
+		c.port = port
+	}
+	return c
 }
 
 // shellEscape escapes a string for safe use inside single-quoted bash arguments.
@@ -73,7 +97,7 @@ func (c *Client) execCommand(ctx context.Context, sshHost string, fullCommand st
 		HostKeyCallback: ssh.InsecureIgnoreHostKey(),
 	}
 
-	addr := net.JoinHostPort(sshHost, "22")
+	addr := net.JoinHostPort(sshHost, c.port)
 
 	// Use context for connection timeout
 	var conn net.Conn

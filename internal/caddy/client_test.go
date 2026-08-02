@@ -383,3 +383,33 @@ func TestUpsertRoute_PostFails(t *testing.T) {
 		t.Errorf("expected error to mention add, got: %v", err)
 	}
 }
+
+// --- Upstream port ---
+
+// TestUpstreamPort_DefaultAndOverride pins that routes proxy to port 80 unless
+// configured otherwise, which is what they did before the port was a setting.
+func TestUpstreamPort_DefaultAndOverride(t *testing.T) {
+	tests := []struct {
+		name string
+		port string
+		want string
+	}{
+		{name: "default", port: "", want: "10.0.0.5:80"},
+		{name: "explicit default", port: "80", want: "10.0.0.5:80"},
+		{name: "configured", port: "8080", want: "10.0.0.5:8080"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			c := NewClient("http://localhost:2019", "srv1", "example.com").WithUpstreamPort(tt.port)
+
+			body, err := c.buildRouteJSON("tenant", "10.0.0.5")
+			if err != nil {
+				t.Fatalf("buildRoute: %v", err)
+			}
+			if !strings.Contains(string(body), tt.want) {
+				t.Errorf("route = %s, want a dial of %q", body, tt.want)
+			}
+		})
+	}
+}

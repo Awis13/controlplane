@@ -24,14 +24,27 @@ type Route struct {
 
 // Client is an HTTP client for the Caddy Admin API.
 type Client struct {
-	baseURL    string
-	serverName string
-	domain     string
-	http       *http.Client
+	baseURL      string
+	serverName   string
+	upstreamPort string
+	domain       string
+	http         *http.Client
 }
 
 // NewClient creates a new Caddy Admin API client.
 // serverName defaults to "srv1", domain defaults to "example.com".
+// defaultUpstreamPort is the tenant port Caddy proxied to before it became
+// configurable.
+const defaultUpstreamPort = "80"
+
+// WithUpstreamPort overrides the port routes proxy to. Empty keeps the default.
+func (c *Client) WithUpstreamPort(port string) *Client {
+	if port != "" {
+		c.upstreamPort = port
+	}
+	return c
+}
+
 func NewClient(baseURL, serverName, domain string) *Client {
 	if serverName == "" {
 		serverName = "srv1"
@@ -40,9 +53,10 @@ func NewClient(baseURL, serverName, domain string) *Client {
 		domain = "example.com"
 	}
 	return &Client{
-		baseURL:    strings.TrimRight(baseURL, "/"),
-		serverName: serverName,
-		domain:     domain,
+		baseURL:      strings.TrimRight(baseURL, "/"),
+		serverName:   serverName,
+		upstreamPort: defaultUpstreamPort,
+		domain:       domain,
 		http: &http.Client{
 			Timeout: 10 * time.Second,
 		},
@@ -85,7 +99,7 @@ func (c *Client) buildRouteJSON(subdomain, targetIP string) ([]byte, error) {
 		Handle: []caddyHandler{
 			{
 				Handler:   "reverse_proxy",
-				Upstreams: []caddyUpstream{{Dial: targetIP + ":80"}},
+				Upstreams: []caddyUpstream{{Dial: targetIP + ":" + c.upstreamPort}},
 			},
 		},
 		Terminal: true,
