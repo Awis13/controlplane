@@ -6,7 +6,6 @@ import (
 	"fmt"
 	"log/slog"
 	"net/http"
-	"os"
 	"strings"
 	"time"
 
@@ -66,13 +65,15 @@ func New(pool *pgxpool.Pool, cfg *config.Config) (http.Handler, *provisioner.Pro
 	stationCreator := station.NewCreator(stationStore)
 	prov.WithStationCreator(stationCreator, cfg.CaddyDomain)
 
-	// SSH exec for writing dashboard token into container
+	// SSH exec for writing dashboard token into container. NewClient reads and
+	// parses the key, so a missing or malformed one is reported here rather
+	// than on the first provision.
 	if cfg.SSHKeyPath != "" {
-		if _, err := os.Stat(cfg.SSHKeyPath); err != nil {
-			slog.Warn("SSH key not found, dashboard token provisioning disabled", "path", cfg.SSHKeyPath, "error", err)
+		sshClient, err := sshexec.NewClient(cfg.SSHKeyPath)
+		if err != nil {
+			slog.Warn("SSH key unusable, dashboard token provisioning disabled", "path", cfg.SSHKeyPath, "error", err)
 		} else {
-			sshClient := sshexec.NewClient(cfg.SSHKeyPath).WithUser(cfg.SSHUser).WithPort(cfg.SSHPort)
-			prov.WithSSHClient(sshClient)
+			prov.WithSSHClient(sshClient.WithUser(cfg.SSHUser).WithPort(cfg.SSHPort))
 			slog.Info("sshexec: enabled", "key_path", cfg.SSHKeyPath)
 		}
 	}
