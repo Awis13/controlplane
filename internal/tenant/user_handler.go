@@ -13,7 +13,6 @@ import (
 	"time"
 
 	"github.com/go-chi/chi/v5"
-	"github.com/jackc/pgx/v5/pgconn"
 
 	"controlplane/internal/audit"
 	"controlplane/internal/auth"
@@ -50,8 +49,28 @@ type UserHandler struct {
 	projectStore UserProjectStore
 	provisioner  Provisioner
 	auditStore   *audit.Store
+	lifecycle    *LifecycleService
 	ssoDomain    string
 	ssoScheme    string
+}
+
+// respondLifecycle turns a lifecycle failure into an HTTP response, logging the
+// underlying cause for anything the client is not shown.
+func (h *UserHandler) respondLifecycle(w http.ResponseWriter, lerr *LifecycleError) {
+	response.Error(w, lifecycleStatus(lerr), lerr.Message)
+}
+
+// lifecycleStatus maps a failure kind to the status code every entry point uses.
+func lifecycleStatus(lerr *LifecycleError) int {
+	switch lerr.Kind {
+	case FailureInvalid:
+		return http.StatusBadRequest
+	case FailureConflict:
+		return http.StatusConflict
+	default:
+		slog.Error("tenant lifecycle", "error", lerr)
+		return http.StatusInternalServerError
+	}
 }
 
 // UserCreateRequest is the simplified tenant creation request for users.
@@ -74,6 +93,7 @@ func NewUserHandler(store UserTenantStore, nodeStore UserNodeStore, projectStore
 		projectStore: projectStore,
 		provisioner:  provisioner,
 		auditStore:   auditStore,
+		lifecycle:    NewLifecycleService(store, nodeStore, projectStore, provisioner, auditStore),
 		ssoDomain:    ssoDomain,
 		ssoScheme:    ssoScheme,
 	}
@@ -152,12 +172,8 @@ func (h *UserHandler) Create(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Validate subdomain
-	if len(req.Subdomain) > 63 || !subdomainRegexp.MatchString(req.Subdomain) {
-		response.Error(w, http.StatusBadRequest, "invalid subdomain: must be lowercase alphanumeric with hyphens, 2-63 chars")
-		return
-	}
-	if reservedSubdomains[req.Subdomain] {
-		response.Error(w, http.StatusBadRequest, "subdomain is reserved")
+	if lerr := ValidateSubdomain(req.Subdomain); lerr != nil {
+		h.respondLifecycle(w, lerr)
 		return
 	}
 
@@ -215,43 +231,17 @@ func (h *UserHandler) Create(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Reserve RAM atomically
-	if err := h.nodeStore.ReserveRAM(r.Context(), n.ID, proj.RAMMB); err != nil {
-		if errors.Is(err, node.ErrInsufficientCapacity) {
-			response.Error(w, http.StatusConflict, "insufficient capacity on node")
-			return
-		}
-		slog.Error("reserve ram for user tenant", "error", err)
-		response.Error(w, http.StatusInternalServerError, "failed to reserve resources")
-		return
-	}
-
-	// Create tenant with owner
-	createReq := CreateTenantRequest{
+	t, lerr := h.lifecycle.Create(r.Context(), CreateParams{
 		Name:      req.Name,
-		ProjectID: proj.ID,
-		NodeID:    n.ID,
 		Subdomain: req.Subdomain,
-	}
-	t, err := h.store.CreateWithOwner(r.Context(), createReq, u.ID.String())
-	if err != nil {
-		// Release RAM on failure
-		if releaseErr := h.nodeStore.ReleaseRAM(r.Context(), n.ID, proj.RAMMB); releaseErr != nil {
-			slog.Error("release ram after tenant creation failure", "error", releaseErr)
-		}
-
-		var pgErr *pgconn.PgError
-		if errors.As(err, &pgErr) && pgErr.Code == "23505" {
-			response.Error(w, http.StatusConflict, "name or subdomain already exists")
-			return
-		}
-		slog.Error("create user tenant", "error", err)
-		response.Error(w, http.StatusInternalServerError, "failed to create tenant")
+		Project:   proj,
+		Node:      n,
+		OwnerID:   u.ID.String(),
+	}, Actor{UserID: u.ID.String()})
+	if lerr != nil {
+		h.respondLifecycle(w, lerr)
 		return
 	}
-
-	// Launch async provisioning
-	h.provisioner.Provision(t.ID, n.ID, proj.ID, req.Subdomain, proj.RAMMB)
 
 	slog.Info("user created tenant", "user_id", u.ID, "tenant_id", t.ID, "subdomain", req.Subdomain)
 	response.JSON(w, http.StatusAccepted, t)
@@ -345,67 +335,9 @@ func (h *UserHandler) Delete(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Only active, error, or suspended tenants can be deleted
-	if t.Status != "active" && t.Status != "error" && t.Status != "suspended" {
-		response.Error(w, http.StatusConflict, "tenant cannot be deleted in current status: "+t.Status)
-		return
-	}
-
-	// Get project for RAM amount
-	proj, err := h.projectStore.GetByID(r.Context(), t.ProjectID)
-	if err != nil {
-		slog.Error("get project for user tenant deletion", "error", err)
-		response.Error(w, http.StatusInternalServerError, "failed to get project")
-		return
-	}
-	ramMB := 0
-	if proj != nil {
-		ramMB = proj.RAMMB
-	}
-
-	// If tenant has an LXC ID, deprovision the container
-	if t.LXCID != nil {
-		if err := h.provisioner.Deprovision(r.Context(), t.ID, t.NodeID, t.Subdomain, *t.LXCID, ramMB); err != nil {
-			if errors.Is(err, ErrStateConflict) {
-				response.Error(w, http.StatusConflict, "tenant is already being deleted")
-				return
-			}
-			slog.Error("deprovision user tenant", "error", err, "tenant_id", t.ID)
-			response.Error(w, http.StatusInternalServerError, "failed to deprovision tenant")
-			return
-		}
-	} else {
-		// No LXC container — atomically transition to deleting, then deleted + release RAM
-		if err := h.store.SetDeleting(r.Context(), t.ID); err != nil {
-			if errors.Is(err, ErrStateConflict) {
-				response.Error(w, http.StatusConflict, "tenant is already being deleted")
-				return
-			}
-			slog.Error("set tenant deleting", "error", err)
-			response.Error(w, http.StatusInternalServerError, "failed to delete tenant")
-			return
-		}
-		if ramMB > 0 {
-			if err := h.nodeStore.ReleaseRAM(r.Context(), t.NodeID, ramMB); err != nil {
-				slog.Error("release ram on user tenant deletion", "error", err)
-			}
-		}
-		if err := h.store.SetDeleted(r.Context(), t.ID); err != nil {
-			slog.Error("set tenant deleted", "error", err)
-			response.Error(w, http.StatusInternalServerError, "failed to delete tenant")
-			return
-		}
-	}
-
-	if h.auditStore != nil {
-		h.auditStore.Log(r.Context(), "delete", "tenant", id, map[string]string{"user_id": u.ID.String()})
-	}
-
-	// Re-read tenant to return updated state
-	t, err = h.store.GetByID(r.Context(), id)
-	if err != nil {
-		slog.Error("get tenant after user deletion", "error", err)
-		response.Error(w, http.StatusInternalServerError, "failed to get tenant")
+	t, lerr := h.lifecycle.Delete(r.Context(), t, Actor{UserID: u.ID.String()})
+	if lerr != nil {
+		h.respondLifecycle(w, lerr)
 		return
 	}
 	response.JSON(w, http.StatusOK, t)

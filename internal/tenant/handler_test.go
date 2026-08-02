@@ -220,6 +220,7 @@ func (m *mockNodeStore) ReleaseRAM(_ context.Context, _ string, _ int) error {
 
 type mockProjectStore struct {
 	projects map[string]*project.Project
+	getErr   error
 }
 
 func newMockProjectStore() *mockProjectStore {
@@ -227,6 +228,9 @@ func newMockProjectStore() *mockProjectStore {
 }
 
 func (m *mockProjectStore) GetByID(_ context.Context, id string) (*project.Project, error) {
+	if m.getErr != nil {
+		return nil, m.getErr
+	}
 	p, ok := m.projects[id]
 	if !ok {
 		return nil, nil
