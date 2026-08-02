@@ -1,7 +1,7 @@
 # Controlplane
 
 [![CI](https://github.com/Awis13/controlplane/actions/workflows/ci.yml/badge.svg)](https://github.com/Awis13/controlplane/actions/workflows/ci.yml)
-![Go](https://img.shields.io/badge/Go-1.24-00ADD8?logo=go&logoColor=white)
+![Go](https://img.shields.io/badge/Go-1.25-00ADD8?logo=go&logoColor=white)
 ![PostgreSQL](https://img.shields.io/badge/PostgreSQL-17-4169E1?logo=postgresql&logoColor=white)
 ![Proxmox](https://img.shields.io/badge/Proxmox-VE-E57000?logo=proxmox&logoColor=white)
 ![WireGuard](https://img.shields.io/badge/WireGuard-mesh-88171A?logo=wireguard&logoColor=white)
@@ -105,7 +105,7 @@ flowchart TD
 
 | Component | Technology |
 |-----------|------------|
-| Language | Go 1.24 |
+| Language | Go 1.25 |
 | HTTP Router | [chi/v5](https://github.com/go-chi/chi) |
 | Database | PostgreSQL 17 (pgx, raw SQL, no ORM) |
 | Migrations | [golang-migrate](https://github.com/golang-migrate/migrate) (embedded SQL) |
@@ -281,7 +281,7 @@ controlplane/
     billing/                      Stripe integration
     caddy/                        Dynamic reverse proxy routing
   docker-compose.yml              PostgreSQL + controlplane
-  Dockerfile                      Multi-stage build (Go 1.24 -> Alpine 3.21)
+  Dockerfile                      Multi-stage build (Go 1.25 -> Alpine 3.21)
 ```
 
 ## Key Design Decisions
