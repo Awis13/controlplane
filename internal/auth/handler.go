@@ -126,8 +126,18 @@ func (l *loginLimiter) reset(email string) {
 	delete(l.entries, email)
 }
 
+// userStore is the user store surface these handlers need. *user.Store
+// satisfies it; the interface exists so the login and registration paths can be
+// driven in tests without a database.
+type userStore interface {
+	GetByID(ctx context.Context, id uuid.UUID) (*user.User, error)
+	GetByEmail(ctx context.Context, email string) (*user.User, error)
+	Create(ctx context.Context, u *user.User) error
+	UpdatePassword(ctx context.Context, id uuid.UUID, passwordHash string) error
+}
+
 type Handler struct {
-	userStore         *user.Store
+	userStore         userStore
 	tokenStore        *TokenStore
 	jwtSecret         []byte
 	registrationToken string

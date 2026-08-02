@@ -56,6 +56,11 @@ func (j *Janitor) Run(ctx context.Context) {
 
 	slog.Info("auth janitor started", "interval", j.interval)
 
+	// Clean immediately, then on the interval. With an hourly default a
+	// service that restarts more often than that would otherwise never clean
+	// at all, which is the accumulation this exists to prevent.
+	j.CleanOnce(ctx)
+
 	ticker := time.NewTicker(j.interval)
 	defer ticker.Stop()
 
