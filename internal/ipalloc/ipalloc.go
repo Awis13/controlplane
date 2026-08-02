@@ -52,8 +52,13 @@ func Next(cidr string, used map[string]bool) (string, error) {
 	broadcast := lastAddr(prefix)
 
 	// network, then the gateway, then the first usable host.
+	//
+	// The validity check matters at the very top of the address space: Next on
+	// 255.255.255.255 returns the zero Addr, which compares Less than
+	// everything and formats as "invalid IP", so without it a subnet up there
+	// would hand out that string as though it were an address.
 	candidate := network.Next().Next()
-	for candidate.Less(broadcast) {
+	for candidate.IsValid() && candidate.Less(broadcast) {
 		if s := candidate.String(); !used[s] {
 			return s, nil
 		}
@@ -77,13 +82,18 @@ func lastAddr(prefix netip.Prefix) netip.Addr {
 // allocating at the same time cannot choose the same one. listUsed supplies
 // the addresses already taken, queried inside the same transaction.
 func Allocate(ctx context.Context, pool *pgxpool.Pool, cidr string, listUsed UsedLister) (string, error) {
-	// Fail before opening a transaction if the subnet is unusable.
-	if _, err := netip.ParsePrefix(cidr); err != nil {
+	// Fail before opening a transaction if the subnet is unusable, so an
+	// unusable configuration never takes the global lock.
+	prefix, err := netip.ParsePrefix(cidr)
+	if err != nil {
 		return "", fmt.Errorf("parse cidr %q: %w", cidr, err)
+	}
+	if !prefix.Addr().Is4() {
+		return "", fmt.Errorf("cidr %q is not IPv4", cidr)
 	}
 
 	var result string
-	err := pgx.BeginTxFunc(ctx, pool, pgx.TxOptions{}, func(tx pgx.Tx) error {
+	err = pgx.BeginTxFunc(ctx, pool, pgx.TxOptions{}, func(tx pgx.Tx) error {
 		if _, err := tx.Exec(ctx, `SELECT pg_advisory_xact_lock($1)`, AdvisoryLockKey); err != nil {
 			return fmt.Errorf("advisory lock: %w", err)
 		}

@@ -484,6 +484,8 @@ func (p *Provisioner) doProvision(tenantID, nodeID, projectID, subdomain string,
 		if sshHost, err := sshexec.ExtractHost(nodeInfo.ProxmoxURL); err != nil {
 			log.Warn("provision: extract ssh host from proxmox url", "error", err)
 		} else {
+			// dashToken is not quoted: it is already inside single quotes here,
+			// and generateToken produces hex, which carries no shell meaning.
 			cmd := fmt.Sprintf("sed -i '/^DASHBOARD_TOKEN=/d' %[1]s/.env && echo 'DASHBOARD_TOKEN=%[2]s' >> %[1]s/.env", sshexec.Quote(p.appDir), dashToken)
 			if err := p.sshClient.ExecInContainer(ctx, sshHost, newID, cmd); err != nil {
 				log.Warn("provision: write dashboard token to container", "error", err)
@@ -798,6 +800,9 @@ func (p *Provisioner) deployFreeRadio(ctx context.Context, sshHost string, lxcID
 			"NODE_ENV=production\n",
 		tenantID, dashboardToken, secrets.StreamKeys,
 		secrets.IcecastSource, secrets.IcecastAdmin, secrets.IcecastListen, secrets.IcecastRelay)
+	// envContent is not quoted: it is the body of a single-quoted heredoc, so
+	// the shell expands nothing inside it, and the only way out would be a line
+	// reading exactly ENVEOF, which none of these values can produce.
 	writeEnvCmd := fmt.Sprintf("cat > %s/.env << 'ENVEOF'\n%sENVEOF", sshexec.Quote(p.appDir), envContent)
 	if err := p.sshClient.ExecInContainer(ctx, sshHost, lxcID, writeEnvCmd); err != nil {
 		return fmt.Errorf("write .env: %w", err)

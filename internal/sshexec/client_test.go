@@ -298,18 +298,26 @@ func TestQuote_ContainsValuesThatWouldChangeTheCommand(t *testing.T) {
 		input string
 		want  string
 	}{
+		// Every row below the first is deliberately free of spaces. A space
+		// alone forces quoting, so a row containing one proves nothing about
+		// the character it is named for: the whole set would still pass if
+		// that character were treated as safe.
 		{name: "space splits an argument", input: "/mnt/my tenants", want: `'/mnt/my tenants'`},
-		{name: "semicolon starts a command", input: "/mnt/t; rm -rf /", want: `'/mnt/t; rm -rf /'`},
-		{name: "ampersand backgrounds", input: "/mnt/t && reboot", want: `'/mnt/t && reboot'`},
-		{name: "pipe redirects", input: "/mnt/t | tee /x", want: `'/mnt/t | tee /x'`},
+		{name: "semicolon starts a command", input: "/mnt/t;reboot", want: `'/mnt/t;reboot'`},
+		{name: "ampersand backgrounds", input: "/mnt/t&reboot", want: `'/mnt/t&reboot'`},
+		{name: "pipe redirects", input: "/mnt/t|tee", want: `'/mnt/t|tee'`},
 		{name: "command substitution", input: "/mnt/$(id)", want: `'/mnt/$(id)'`},
 		{name: "backtick substitution", input: "/mnt/`id`", want: "'/mnt/`id`'"},
 		{name: "variable expansion", input: "/mnt/$HOME", want: `'/mnt/$HOME'`},
+		{name: "redirect", input: "/mnt/t>/etc/x", want: `'/mnt/t>/etc/x'`},
+		{name: "glob", input: "/mnt/*", want: `'/mnt/*'`},
+		{name: "brace expansion", input: "/mnt/{a,b}", want: `'/mnt/{a,b}'`},
+		{name: "subshell", input: "/mnt/(x)", want: `'/mnt/(x)'`},
 		{name: "newline", input: "/mnt/t\nreboot", want: "'/mnt/t\nreboot'"},
 		{name: "double quote", input: `/mnt/"t"`, want: `'/mnt/"t"'`},
-		{name: "empty string", input: "", want: `''`},
-		{name: "glob", input: "/mnt/*", want: `'/mnt/*'`},
+		{name: "backslash", input: `/mnt/t\x`, want: `'/mnt/t\x'`},
 		{name: "tilde", input: "~/tenants", want: `'~/tenants'`},
+		{name: "empty string", input: "", want: `''`},
 	}
 
 	for _, tt := range tests {
@@ -336,5 +344,32 @@ func TestQuote_SingleQuoteCannotEscapeTheQuoting(t *testing.T) {
 	// '\'' sequence, so nothing in the value is ever read as shell syntax.
 	if strings.Contains(strings.ReplaceAll(got[1:len(got)-1], `'\''`, ""), "'") {
 		t.Errorf("Quote = %s, leaves an unescaped quote in the body", got)
+	}
+}
+
+// TestQuote_SafeSetIsExactlyTheseCharacters asserts the pass-through set
+// directly, character by character. The table above proves that particular
+// metacharacters are quoted; this proves nothing else has been let in, which is
+// the failure mode where a later edit widens the regex and every existing row
+// still passes.
+func TestQuote_SafeSetIsExactlyTheseCharacters(t *testing.T) {
+	const safe = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789_@%+=:,./-"
+
+	for _, r := range safe {
+		s := string(r)
+		if got := Quote(s); got != s {
+			t.Errorf("Quote(%q) = %q, want it to pass through", s, got)
+		}
+	}
+
+	// Every other printable ASCII character must be quoted.
+	for r := rune(33); r < 127; r++ {
+		if strings.ContainsRune(safe, r) {
+			continue
+		}
+		s := string(r)
+		if got := Quote(s); got == s {
+			t.Errorf("Quote(%q) passed through, but it is not in the safe set", s)
+		}
 	}
 }
