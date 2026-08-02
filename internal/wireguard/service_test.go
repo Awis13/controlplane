@@ -343,3 +343,70 @@ func TestServiceTopology_InterfaceIsConfigured(t *testing.T) {
 		t.Errorf("iface = %q, want the configured interface", svc.iface)
 	}
 }
+
+// --- Interface mask ---
+
+// TestPeerConfig_AddressMaskFollowsTheAllocation pins that the mask a peer puts
+// on its interface comes from the network it was allocated in. A peer on a /25
+// advertising /24 claims half a network that is not its own.
+func TestPeerConfig_AddressMaskFollowsTheAllocation(t *testing.T) {
+	tests := []struct {
+		name    string
+		cidr    string
+		wgIP    string
+		want    string
+		wantDNS string
+	}{
+		{
+			name: "a /24 is unchanged from before", cidr: "10.10.0.0/24", wgIP: "10.10.0.5",
+			want: "Address = 10.10.0.5/24", wantDNS: "DNS = 10.10.0.1",
+		},
+		{
+			name: "a /25 follows the allocation", cidr: "10.10.0.0/25", wgIP: "10.10.0.5",
+			want: "Address = 10.10.0.5/25", wantDNS: "DNS = 10.10.0.1",
+		},
+		{
+			name: "a /28 follows the allocation", cidr: "10.10.0.0/28", wgIP: "10.10.0.5",
+			want: "Address = 10.10.0.5/28", wantDNS: "DNS = 10.10.0.1",
+		},
+		{
+			name: "a /16 follows the allocation", cidr: "10.10.0.0/16", wgIP: "10.10.0.5",
+			want: "Address = 10.10.0.5/16", wantDNS: "DNS = 10.10.0.1",
+		},
+		{
+			name: "a network outside 10.10 follows too", cidr: "192.168.50.0/26", wgIP: "192.168.50.5",
+			want: "Address = 192.168.50.5/26", wantDNS: "DNS = 192.168.50.1",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			svc := NewService(nil, testEncryptionKey, "hub-pub-key", "1.2.3.4:51820", tt.cidr)
+
+			config := svc.BuildPeerConfig(&Peer{Name: "p", WgIP: tt.wgIP, PublicKey: "peer-key"}, "private-key")
+
+			if !strings.Contains(config, tt.want) {
+				t.Errorf("config = %q, want %q", config, tt.want)
+			}
+			if !strings.Contains(config, tt.wantDNS) {
+				t.Errorf("config = %q, want %q", config, tt.wantDNS)
+			}
+			if !strings.Contains(config, "AllowedIPs = "+tt.cidr) {
+				t.Errorf("config = %q, want AllowedIPs to be the whole network %q", config, tt.cidr)
+			}
+		})
+	}
+}
+
+// TestPeerConfig_MalformedNetworkKeepsTheOldMask pins the fallback: a network
+// that cannot be parsed still produces the mask this used to hardcode, rather
+// than an empty or zero one.
+func TestPeerConfig_MalformedNetworkKeepsTheOldMask(t *testing.T) {
+	svc := NewService(nil, testEncryptionKey, "hub-pub-key", "1.2.3.4:51820", "not-a-cidr")
+
+	config := svc.BuildPeerConfig(&Peer{Name: "p", WgIP: "10.10.0.5", PublicKey: "peer-key"}, "private-key")
+
+	if !strings.Contains(config, "Address = 10.10.0.5/24") {
+		t.Errorf("config = %q, want the previous /24 fallback", config)
+	}
+}

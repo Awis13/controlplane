@@ -49,6 +49,10 @@ const (
 	defaultInterface = "wg0"
 	defaultDNSAddr   = "10.10.0.1"
 	defaultKeepalive = 25
+
+	// defaultAddrBits is the interface mask used when the configured network
+	// cannot be parsed; it matches what the peer config used to hardcode.
+	defaultAddrBits = 24
 )
 
 // WithInterface overrides the hub interface peers are applied to.
@@ -165,18 +169,24 @@ func (s *Service) CreatePeer(ctx context.Context, req CreatePeerRequest) (*Peer,
 func (s *Service) BuildPeerConfig(peer *Peer, privateKey string) string {
 	var sb strings.Builder
 
-	// Derive DNS and AllowedIPs from networkCIDR
+	// Derive DNS, AllowedIPs and the interface mask from networkCIDR.
 	dnsAddr := s.dnsAddr
 	peerAllowedIPs := s.networkCIDR
+	// Falls back to the value this used to hardcode, reached only if the
+	// configured network is malformed, since an empty one is defaulted.
+	addrBits := defaultAddrBits
 	if prefix, err := netip.ParsePrefix(s.networkCIDR); err == nil {
 		// DNS = first address in subnet + 1 (gateway)
 		base := prefix.Addr()
 		dnsAddr = base.Next().String()
 		peerAllowedIPs = prefix.String()
+		// The interface mask follows the allocation: a peer on a /25 that
+		// advertises /24 claims addresses outside its own network.
+		addrBits = prefix.Bits()
 	}
 
 	sb.WriteString("[Interface]\n")
-	sb.WriteString(fmt.Sprintf("Address = %s/24\n", peer.WgIP))
+	sb.WriteString(fmt.Sprintf("Address = %s/%d\n", peer.WgIP, addrBits))
 	sb.WriteString(fmt.Sprintf("PrivateKey = %s\n", privateKey))
 	sb.WriteString(fmt.Sprintf("DNS = %s\n", dnsAddr))
 	sb.WriteString("\n")
