@@ -316,8 +316,26 @@ func (h *Handler) handleCheckoutCompleted(ctx context.Context, data []byte) erro
 	return nil
 }
 
+// Subscription statuses that end a subscription for good. Stripe will never
+// bill these again, so the tenant drops to free and the subscription reference
+// is cleared, reaching the same state a deletion produces.
+var terminalSubscriptionStatuses = map[string]bool{
+	"canceled":           true,
+	"unpaid":             true,
+	"incomplete_expired": true,
+}
+
+// Subscription statuses where the subscription is live and paid for, so the
+// price on the subscription decides the tier.
+var liveSubscriptionStatuses = map[string]bool{
+	"active":   true,
+	"trialing": true,
+}
+
 // handleSubscriptionUpdated processes customer.subscription.updated events.
-// Updates the tenant tier based on the new price ID.
+// The tier follows the subscription status, not just its price: a canceled or
+// unpaid subscription drops the tenant to free even if it still carries a paid
+// price, which is what a late-arriving update after a deletion looks like.
 // Returns an error only when a retry could still succeed.
 func (h *Handler) handleSubscriptionUpdated(ctx context.Context, data []byte) error {
 	sub, err := ParseSubscription(data)
@@ -327,7 +345,21 @@ func (h *Handler) handleSubscriptionUpdated(ctx context.Context, data []byte) er
 		return nil
 	}
 
-	tier := h.service.GetTierFromPriceID(sub.PriceID)
+	var tier, subscriptionRef string
+	switch {
+	case terminalSubscriptionStatuses[sub.Status]:
+		tier, subscriptionRef = TierFree, ""
+	case liveSubscriptionStatuses[sub.Status]:
+		tier, subscriptionRef = h.service.GetTierFromPriceID(sub.PriceID), sub.ID
+	default:
+		// past_due, incomplete, paused, and any status Stripe adds later. The
+		// payment outcome is still unresolved, so hold the current tier and
+		// wait for the event that resolves it. Writing nothing here avoids
+		// both a premature downgrade and an upgrade we are not yet paid for.
+		slog.Info("billing: subscription status unresolved, leaving tier unchanged",
+			"status", sub.Status, "customer", sub.CustomerID, "subscription", sub.ID)
+		return nil
+	}
 
 	tenant, err := h.tenantStore.GetByStripeCustomerID(ctx, sub.CustomerID)
 	if err != nil {
@@ -340,13 +372,13 @@ func (h *Handler) handleSubscriptionUpdated(ctx context.Context, data []byte) er
 		return nil
 	}
 
-	if err := h.tenantStore.UpdateBilling(ctx, tenant.ID, sub.CustomerID, sub.ID, tier); err != nil {
+	if err := h.tenantStore.UpdateBilling(ctx, tenant.ID, sub.CustomerID, subscriptionRef, tier); err != nil {
 		// Transient: the tier change is lost unless Stripe redelivers.
 		return fmt.Errorf("update tier for tenant %s: %w", tenant.ID, err)
 	}
 
 	slog.Info("billing: subscription updated",
-		"tenant_id", tenant.ID, "tier", tier, "subscription", sub.ID)
+		"tenant_id", tenant.ID, "tier", tier, "status", sub.Status, "subscription", sub.ID)
 	return nil
 }
 

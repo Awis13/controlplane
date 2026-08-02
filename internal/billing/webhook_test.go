@@ -148,10 +148,14 @@ func checkoutSessionObject() map[string]any {
 }
 
 func subscriptionObject(priceID string) map[string]any {
+	return subscriptionObjectWithStatus(priceID, "active")
+}
+
+func subscriptionObjectWithStatus(priceID, status string) map[string]any {
 	return map[string]any{
 		"id":       "sub_123",
 		"customer": "cus_123",
-		"status":   "active",
+		"status":   status,
 		"items": map[string]any{
 			"data": []map[string]any{
 				{"price": map[string]any{"id": priceID}},
@@ -640,6 +644,46 @@ func TestWebhook_RetryConvergesOnSameState(t *testing.T) {
 	for i, got := range store.updateBillingCalls {
 		if got != want {
 			t.Errorf("delivery %d wrote %+v, want %+v", i+1, got, want)
+		}
+	}
+}
+
+// TestWebhook_LateUpdateAfterDeletionKeepsTenantFree covers out-of-order
+// delivery, which Stripe does not guarantee against: the deletion lands first
+// and downgrades the tenant, then a stale update for the same subscription
+// arrives carrying its paid price. Because that update reports a canceled
+// status, the tenant stays free instead of having its paid tier resurrected.
+func TestWebhook_LateUpdateAfterDeletionKeepsTenantFree(t *testing.T) {
+	h, store := newTestHandler()
+	store.tenantByCustomer = &TenantBilling{ID: "tenant-1", Tier: TierPro}
+
+	// 1. customer.subscription.deleted arrives and downgrades the tenant.
+	deleted := eventPayload(t, EventSubscriptionDeleted, subscriptionObject("price_pro"))
+	first := httptest.NewRecorder()
+	h.Webhook(first, signedRequest(deleted, testWebhookSecret, time.Now()))
+	if first.Code != http.StatusOK {
+		t.Fatalf("deletion status = %d, want %d", first.Code, http.StatusOK)
+	}
+
+	// The tenant is now on the free tier, as the store would report from here on.
+	store.tenantByCustomer = &TenantBilling{ID: "tenant-1", Tier: TierFree}
+
+	// 2. A stale customer.subscription.updated for the same subscription arrives
+	// late, still carrying price_pro but reporting the canceled status.
+	late := eventPayload(t, EventSubscriptionUpdated, subscriptionObjectWithStatus("price_pro", "canceled"))
+	second := httptest.NewRecorder()
+	h.Webhook(second, signedRequest(late, testWebhookSecret, time.Now()))
+	if second.Code != http.StatusOK {
+		t.Fatalf("late update status = %d, want %d", second.Code, http.StatusOK)
+	}
+
+	if len(store.updateBillingCalls) != 2 {
+		t.Fatalf("UpdateBilling calls = %d, want 2", len(store.updateBillingCalls))
+	}
+	want := updateBillingCall{TenantID: "tenant-1", CustomerID: "cus_123", SubscriptionID: "", Tier: TierFree}
+	for i, got := range store.updateBillingCalls {
+		if got != want {
+			t.Errorf("write %d = %+v, want %+v: the paid tier must not come back", i+1, got, want)
 		}
 	}
 }
