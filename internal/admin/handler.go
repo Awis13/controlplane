@@ -6,6 +6,7 @@ import (
 	"log/slog"
 	"net/http"
 	"regexp"
+	"strings"
 	"time"
 
 	"github.com/go-chi/chi/v5"
@@ -233,6 +234,43 @@ func (h *Handler) renderFlash(w http.ResponseWriter, name string, msg string) {
 	}
 }
 
+// deleteStatusRefusalPrefix is the one lifecycle message carrying a value, so
+// it is matched by prefix rather than looked up whole.
+const deleteStatusRefusalPrefix = "tenant cannot be deleted in current status: "
+
+// adminFlashMessages restores this UI's own wording for lifecycle failures.
+// The service speaks lowercase API style because two of its three callers are
+// JSON APIs; every other flash in the admin is Sentence case, and these are the
+// exact strings operators saw before the lifecycle cutover.
+var adminFlashMessages = map[string]string{
+	"invalid subdomain: must be lowercase alphanumeric with hyphens, 2-63 chars": "Invalid subdomain: lowercase alphanumeric with hyphens, 2-63 chars",
+	"subdomain is reserved":            "Subdomain is reserved",
+	"insufficient capacity on node":    "Insufficient RAM capacity on node",
+	"failed to reserve resources":      "Failed to reserve resources",
+	"name or subdomain already exists": "Name or subdomain already exists",
+	"failed to create tenant":          "Failed to create tenant",
+	"tenant is already being deleted":  "Tenant is already being deleted",
+	"failed to deprovision tenant":     "Failed to deprovision tenant",
+	"failed to delete tenant":          "Failed to delete tenant",
+	// These two reached the operator as a bare "internal error" page before the
+	// cutover, so there is no prior wording to restore; they follow the same
+	// Sentence case convention as the rest.
+	"failed to get project": "Failed to get project",
+	"failed to get tenant":  "Failed to get tenant",
+}
+
+// adminFlashMessage translates a lifecycle message into admin wording, falling
+// back to the service's own text for anything not in the table.
+func adminFlashMessage(lerr *tenant.LifecycleError) string {
+	if status, ok := strings.CutPrefix(lerr.Message, deleteStatusRefusalPrefix); ok {
+		return "Cannot delete tenant in status: " + status
+	}
+	if msg, ok := adminFlashMessages[lerr.Message]; ok {
+		return msg
+	}
+	return lerr.Message
+}
+
 // flashLifecycle renders a lifecycle failure as a flash message.
 //
 // A state conflict answers 409 rather than 200, so the response is honest to
@@ -245,16 +283,19 @@ func (h *Handler) flashLifecycle(w http.ResponseWriter, lerr *tenant.LifecycleEr
 	if lerr.Kind == tenant.FailureInternal {
 		slog.Error("admin: tenant lifecycle", "error", lerr)
 	}
+
+	msg := adminFlashMessage(lerr)
+
 	if lerr.Kind == tenant.FailureConflict {
 		w.Header().Set("HX-Retarget", "#flash")
 		w.Header().Set("HX-Reswap", "innerHTML")
 		w.WriteHeader(http.StatusConflict)
-		if err := h.tmpl.RenderPartial(w, "flash_error", lerr.Message); err != nil {
+		if err := h.tmpl.RenderPartial(w, "flash_error", msg); err != nil {
 			slog.Error("admin: render flash", "error", err)
 		}
 		return
 	}
-	h.renderFlash(w, "flash_error", lerr.Message)
+	h.renderFlash(w, "flash_error", msg)
 }
 
 // triggerToast sets an HX-Trigger header to display a toast notification via Alpine.js.

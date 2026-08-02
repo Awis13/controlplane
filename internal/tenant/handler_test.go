@@ -190,10 +190,19 @@ func (m *mockTenantStore) SetResumed(_ context.Context, id string) error {
 
 // --- Mock node store ---
 
+// ramCall records a RAM reservation or release, so tests can assert that
+// capacity was actually returned rather than merely that an error came back.
+type ramCall struct {
+	NodeID string
+	RAMMB  int
+}
+
 type mockNodeStore struct {
-	nodes      map[string]*node.Node
-	reserveErr error
-	releaseErr error
+	nodes        map[string]*node.Node
+	reserveErr   error
+	releaseErr   error
+	reserveCalls []ramCall
+	releaseCalls []ramCall
 }
 
 func newMockNodeStore() *mockNodeStore {
@@ -208,11 +217,13 @@ func (m *mockNodeStore) GetByID(_ context.Context, id string) (*node.Node, error
 	return n, nil
 }
 
-func (m *mockNodeStore) ReserveRAM(_ context.Context, _ string, _ int) error {
+func (m *mockNodeStore) ReserveRAM(_ context.Context, nodeID string, ramMB int) error {
+	m.reserveCalls = append(m.reserveCalls, ramCall{NodeID: nodeID, RAMMB: ramMB})
 	return m.reserveErr
 }
 
-func (m *mockNodeStore) ReleaseRAM(_ context.Context, _ string, _ int) error {
+func (m *mockNodeStore) ReleaseRAM(_ context.Context, nodeID string, ramMB int) error {
+	m.releaseCalls = append(m.releaseCalls, ramCall{NodeID: nodeID, RAMMB: ramMB})
 	return m.releaseErr
 }
 
