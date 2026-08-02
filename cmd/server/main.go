@@ -53,7 +53,7 @@ func main() {
 	}
 
 	// Create HTTP server
-	handler, prov, poller, err := server.New(pool, cfg)
+	handler, prov, poller, janitor, err := server.New(pool, cfg)
 	if err != nil {
 		slog.Error("failed to create server", "error", err)
 		os.Exit(1)
@@ -70,6 +70,10 @@ func main() {
 	// Start station status poller
 	pollerCtx, pollerCancel := context.WithCancel(context.Background())
 	go poller.Run(pollerCtx)
+
+	// Start the auth janitor
+	janitorCtx, janitorCancel := context.WithCancel(context.Background())
+	go janitor.Run(janitorCtx)
 
 	// Use error channel instead of os.Exit in goroutine
 	errCh := make(chan error, 1)
@@ -92,9 +96,11 @@ func main() {
 		os.Exit(1)
 	}
 
-	// Stop poller and wait for goroutine to exit
+	// Stop the background loops and wait for their goroutines to exit
 	pollerCancel()
 	poller.Wait()
+	janitorCancel()
+	janitor.Wait()
 
 	shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), 15*time.Second)
 	defer shutdownCancel()

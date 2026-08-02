@@ -38,7 +38,7 @@ import (
 // New creates and configures the HTTP server with all routes.
 // The returned Provisioner should be shut down via Shutdown() during graceful shutdown.
 // The returned Poller should be started in a goroutine and stopped via context cancellation.
-func New(pool *pgxpool.Pool, cfg *config.Config) (http.Handler, *provisioner.Provisioner, *station.Poller, error) {
+func New(pool *pgxpool.Pool, cfg *config.Config) (http.Handler, *provisioner.Provisioner, *station.Poller, *auth.Janitor, error) {
 	r := chi.NewRouter()
 
 	r.Use(middleware.RequestID)
@@ -125,14 +125,14 @@ func New(pool *pgxpool.Pool, cfg *config.Config) (http.Handler, *provisioner.Pro
 		RPOrigins:     []string{rpOrigin},
 	})
 	if err != nil {
-		return nil, nil, nil, fmt.Errorf("webauthn: %w", err)
+		return nil, nil, nil, nil, fmt.Errorf("webauthn: %w", err)
 	}
 	waStore := admin.NewWebAuthnStore(pool)
 
 	// Admin UI (auth via WebAuthn)
 	adminHandler, err := admin.NewHandler(nodeStore, projectStore, tenantStore, auditStore, prov, cfg.EncryptionKey, cfg.SetupToken, wa, waStore)
 	if err != nil {
-		return nil, nil, nil, fmt.Errorf("admin handler: %w", err)
+		return nil, nil, nil, nil, fmt.Errorf("admin handler: %w", err)
 	}
 	// WireGuard peer management (optional — requires WG_HUB_PUBLIC_KEY)
 	wgStore := wireguard.NewStore(pool)
@@ -195,6 +195,7 @@ func New(pool *pgxpool.Pool, cfg *config.Config) (http.Handler, *provisioner.Pro
 	// User auth (JWT-based, separate from admin WebAuthn and API Bearer token)
 	tokenStore := auth.NewTokenStore(pool)
 	authHandler := auth.NewHandler(userStore, tokenStore, cfg.JWTSecret, cfg.RegistrationToken, cfg.CookieSecure)
+	janitor := authHandler.NewJanitor(cfg.JanitorInterval)
 	r.Route("/api/v1/auth", func(r chi.Router) {
 		r.Use(httprate.LimitByIP(10, time.Minute))
 		r.Post("/register", authHandler.Register)
@@ -285,7 +286,7 @@ func New(pool *pgxpool.Pool, cfg *config.Config) (http.Handler, *provisioner.Pro
 	})
 
 	slog.Info("routes registered", "cors_origins", cfg.CORSOrigins)
-	return r, prov, poller, nil
+	return r, prov, poller, janitor, nil
 }
 
 // securityHeaders adds standard security headers to all responses.

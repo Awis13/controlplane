@@ -27,6 +27,11 @@ const (
 	minPasswordLen        = 12
 	maxLoginAttempts      = 5
 	loginLimitWindow      = 15 * time.Minute
+
+	// maxLimiterEntries caps the login limiter map. Generous enough that a real
+	// deployment never reaches it, small enough that a flood of failed logins
+	// against invented addresses cannot grow the map without limit.
+	maxLimiterEntries = 10000
 )
 
 // loginLimiter tracks failed login attempts per email.
@@ -64,11 +69,55 @@ func (l *loginLimiter) recordFailure(email string) {
 	}
 	e := l.entries[email]
 	if e == nil {
+		l.makeRoomLocked()
 		e = &limitEntry{}
 		l.entries[email] = e
 	}
 	e.failures++
 	e.lastFail = time.Now()
+}
+
+// makeRoomLocked keeps the map bounded between janitor sweeps, where a caller
+// guessing a fresh address each time would otherwise add an entry per attempt.
+// Expired entries go first; if the map is still full, the least recently failed
+// entry is dropped. Dropping beats refusing to record, which would let whoever
+// filled the map switch off rate limiting for everyone else.
+func (l *loginLimiter) makeRoomLocked() {
+	if len(l.entries) < maxLimiterEntries {
+		return
+	}
+
+	l.sweepLocked(time.Now())
+	if len(l.entries) < maxLimiterEntries {
+		return
+	}
+
+	var oldestEmail string
+	var oldestAt time.Time
+	for email, e := range l.entries {
+		if oldestEmail == "" || e.lastFail.Before(oldestAt) {
+			oldestEmail, oldestAt = email, e.lastFail
+		}
+	}
+	delete(l.entries, oldestEmail)
+}
+
+// sweep removes entries whose window has closed and returns how many went.
+func (l *loginLimiter) sweep(now time.Time) int {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return l.sweepLocked(now)
+}
+
+func (l *loginLimiter) sweepLocked(now time.Time) int {
+	evicted := 0
+	for email, e := range l.entries {
+		if now.Sub(e.lastFail) > loginLimitWindow {
+			delete(l.entries, email)
+			evicted++
+		}
+	}
+	return evicted
 }
 
 func (l *loginLimiter) reset(email string) {
