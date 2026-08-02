@@ -38,12 +38,7 @@ func JWTAuth(userStore *user.Store, tokenStore *TokenStore, jwtSecret string) fu
 				return
 			}
 
-			token, err := jwt.Parse(tokenStr, func(t *jwt.Token) (any, error) {
-				if _, ok := t.Method.(*jwt.SigningMethodHMAC); !ok {
-					return nil, jwt.ErrSignatureInvalid
-				}
-				return secret, nil
-			})
+			token, err := jwt.Parse(tokenStr, hmacKeyfunc(secret))
 			if err != nil || !token.Valid {
 				response.Error(w, http.StatusUnauthorized, "invalid or expired token")
 				return
@@ -100,6 +95,20 @@ func JWTAuth(userStore *user.Store, tokenStore *TokenStore, jwtSecret string) fu
 
 // UserFromContext extracts the authenticated user from the request context.
 // Returns nil if no user is set (unauthenticated request).
+// hmacKeyfunc returns a jwt.Keyfunc that hands over the secret only for tokens
+// signed with HMAC. Without the check, a token declaring another algorithm
+// still reaches the key, which is the classic algorithm-confusion opening: a
+// token with alg "none", or one signed with the secret treated as an RSA public
+// key. Every place that parses a token uses this.
+func hmacKeyfunc(secret []byte) jwt.Keyfunc {
+	return func(t *jwt.Token) (any, error) {
+		if _, ok := t.Method.(*jwt.SigningMethodHMAC); !ok {
+			return nil, jwt.ErrSignatureInvalid
+		}
+		return secret, nil
+	}
+}
+
 func UserFromContext(ctx context.Context) *user.User {
 	u, _ := ctx.Value(userContextKey).(*user.User)
 	return u

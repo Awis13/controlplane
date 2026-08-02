@@ -203,11 +203,16 @@ func (h *Handler) Register(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	// Validate email
-	if _, err := mail.ParseAddress(req.Email); err != nil {
+	// Validate the address, then keep the address itself. ParseAddress also
+	// accepts the "Display Name <addr@example.com>" form, and storing that
+	// whole string as the email would make the account unreachable by a plain
+	// login. The parsed address is then normalized for storage.
+	addr, err := mail.ParseAddress(req.Email)
+	if err != nil {
 		response.Error(w, http.StatusBadRequest, "invalid email format")
 		return
 	}
+	email := user.NormalizeEmail(addr.Address)
 
 	// Validate password
 	if len(req.Password) < minPasswordLen {
@@ -224,7 +229,7 @@ func (h *Handler) Register(w http.ResponseWriter, r *http.Request) {
 	}
 
 	u := &user.User{
-		Email:        req.Email,
+		Email:        email,
 		PasswordHash: string(hash),
 		DisplayName:  req.DisplayName,
 	}
@@ -264,32 +269,37 @@ func (h *Handler) Login(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Normalized once, then used for both the lookup and the rate limit key.
+	// Keying the limiter on the raw address would let someone walk through
+	// case variants of one address to get a fresh allowance each time.
+	email := user.NormalizeEmail(req.Email)
+
 	// Rate limit per email
-	if !h.limiter.check(req.Email) {
+	if !h.limiter.check(email) {
 		response.Error(w, http.StatusTooManyRequests, "too many login attempts, try again later")
 		return
 	}
 
-	u, err := h.userStore.GetByEmail(r.Context(), req.Email)
+	u, err := h.userStore.GetByEmail(r.Context(), email)
 	if err != nil {
 		slog.Error("get user by email", "error", err)
 		response.Error(w, http.StatusInternalServerError, "failed to process login")
 		return
 	}
 	if u == nil {
-		h.limiter.recordFailure(req.Email)
+		h.limiter.recordFailure(email)
 		response.Error(w, http.StatusUnauthorized, "invalid email or password")
 		return
 	}
 
 	if err := bcrypt.CompareHashAndPassword([]byte(u.PasswordHash), []byte(req.Password)); err != nil {
-		h.limiter.recordFailure(req.Email)
+		h.limiter.recordFailure(email)
 		response.Error(w, http.StatusUnauthorized, "invalid email or password")
 		return
 	}
 
 	// Successful login — reset counter
-	h.limiter.reset(req.Email)
+	h.limiter.reset(email)
 
 	resp, err := h.issueTokenPair(r.Context(), u)
 	if err != nil {
@@ -370,9 +380,7 @@ func (h *Handler) Logout(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	token, err := jwt.Parse(tokenStr, func(t *jwt.Token) (any, error) {
-		return h.jwtSecret, nil
-	})
+	token, err := jwt.Parse(tokenStr, hmacKeyfunc(h.jwtSecret))
 	if err == nil {
 		if claims, ok := token.Claims.(jwt.MapClaims); ok {
 			if jti, _ := claims["jti"].(string); jti != "" {
