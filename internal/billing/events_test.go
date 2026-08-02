@@ -202,6 +202,118 @@ func TestHandleSubscriptionUpdated_TierMapping(t *testing.T) {
 	}
 }
 
+// TestHandleSubscriptionUpdated_StatusDecidesTier covers the tier decision for
+// every subscription status: terminal statuses drop to free and clear the
+// subscription reference, live statuses follow the price, and anything with an
+// unresolved payment leaves the tenant alone.
+func TestHandleSubscriptionUpdated_StatusDecidesTier(t *testing.T) {
+	tests := []struct {
+		name      string
+		status    string
+		priceID   string
+		wantWrite bool
+		want      updateBillingCall
+	}{
+		{
+			name: "active follows the price", status: "active", priceID: "price_pro", wantWrite: true,
+			want: updateBillingCall{TenantID: "tenant-1", CustomerID: "cus_123", SubscriptionID: "sub_123", Tier: TierPro},
+		},
+		{
+			name: "trialing follows the price", status: "trialing", priceID: "price_studio", wantWrite: true,
+			want: updateBillingCall{TenantID: "tenant-1", CustomerID: "cus_123", SubscriptionID: "sub_123", Tier: TierStudio},
+		},
+		{
+			name: "canceled drops to free and clears the reference", status: "canceled", priceID: "price_pro", wantWrite: true,
+			want: updateBillingCall{TenantID: "tenant-1", CustomerID: "cus_123", SubscriptionID: "", Tier: TierFree},
+		},
+		{
+			name: "unpaid drops to free", status: "unpaid", priceID: "price_pro", wantWrite: true,
+			want: updateBillingCall{TenantID: "tenant-1", CustomerID: "cus_123", SubscriptionID: "", Tier: TierFree},
+		},
+		{
+			name: "incomplete_expired drops to free", status: "incomplete_expired", priceID: "price_studio", wantWrite: true,
+			want: updateBillingCall{TenantID: "tenant-1", CustomerID: "cus_123", SubscriptionID: "", Tier: TierFree},
+		},
+		{name: "past_due leaves the tier alone", status: "past_due", priceID: "price_pro"},
+		{name: "incomplete leaves the tier alone", status: "incomplete", priceID: "price_pro"},
+		{name: "paused leaves the tier alone", status: "paused", priceID: "price_pro"},
+		{name: "an unknown future status leaves the tier alone", status: "quantum_superposition", priceID: "price_pro"},
+		{name: "a missing status leaves the tier alone", status: "", priceID: "price_pro"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			h, store := newTestHandler()
+			store.tenantByCustomer = &TenantBilling{ID: "tenant-1", Tier: TierPro}
+
+			mustHandle(t, h.handleSubscriptionUpdated(context.Background(),
+				objectJSON(t, subscriptionObjectWithStatus(tt.priceID, tt.status))))
+
+			if !tt.wantWrite {
+				if store.callCount() != 0 {
+					t.Fatalf("expected no store calls at all, got %d", store.callCount())
+				}
+				return
+			}
+			if len(store.updateBillingCalls) != 1 {
+				t.Fatalf("UpdateBilling calls = %d, want 1", len(store.updateBillingCalls))
+			}
+			if got := store.updateBillingCalls[0]; got != tt.want {
+				t.Errorf("UpdateBilling = %+v, want %+v", got, tt.want)
+			}
+		})
+	}
+}
+
+// TestHandleSubscriptionUpdated_TerminalStatusIgnoresPrice pins that a
+// terminal status wins over the price, so a canceled subscription still
+// carrying a paid price does not keep the tenant on that tier.
+func TestHandleSubscriptionUpdated_TerminalStatusIgnoresPrice(t *testing.T) {
+	for _, priceID := range []string{"price_starter", "price_pro", "price_studio", "price_unknown", ""} {
+		t.Run("price="+priceID, func(t *testing.T) {
+			h, store := newTestHandler()
+			store.tenantByCustomer = &TenantBilling{ID: "tenant-1", Tier: TierStudio}
+
+			mustHandle(t, h.handleSubscriptionUpdated(context.Background(),
+				objectJSON(t, subscriptionObjectWithStatus(priceID, "canceled"))))
+
+			if len(store.updateBillingCalls) != 1 {
+				t.Fatalf("UpdateBilling calls = %d, want 1", len(store.updateBillingCalls))
+			}
+			if got := store.updateBillingCalls[0].Tier; got != TierFree {
+				t.Errorf("tier = %q, want %q", got, TierFree)
+			}
+		})
+	}
+}
+
+// TestHandleSubscriptionUpdated_UnresolvedStatusSkipsLookup pins that an
+// unresolved status costs nothing: the handler returns before even looking the
+// tenant up, so a store outage cannot turn it into a retry.
+func TestHandleSubscriptionUpdated_UnresolvedStatusSkipsLookup(t *testing.T) {
+	h, store := newTestHandler()
+	store.byCustomerErr = errStore
+
+	mustHandle(t, h.handleSubscriptionUpdated(context.Background(),
+		objectJSON(t, subscriptionObjectWithStatus("price_pro", "past_due"))))
+
+	if store.callCount() != 0 {
+		t.Errorf("expected no store calls, got %d", store.callCount())
+	}
+}
+
+// TestHandleSubscriptionUpdated_TerminalStatusStoreErrorIsTransient checks the
+// interaction with the retry semantics: a status-driven downgrade that fails to
+// write is still worth retrying.
+func TestHandleSubscriptionUpdated_TerminalStatusStoreErrorIsTransient(t *testing.T) {
+	h, store := newTestHandler()
+	store.tenantByCustomer = &TenantBilling{ID: "tenant-1", Tier: TierPro}
+	store.updateBillingErr = errStore
+
+	wantRetry(t, h.handleSubscriptionUpdated(context.Background(),
+		objectJSON(t, subscriptionObjectWithStatus("price_pro", "canceled"))))
+}
+
 // TestHandleSubscriptionUpdated_NoItems pins that a subscription carrying no
 // line items maps to the free tier, since ParseSubscription yields an empty
 // price ID and GetTierFromPriceID defaults to free.
