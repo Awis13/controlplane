@@ -104,12 +104,10 @@ func (h *Handler) createTenant(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if len(subdomain) > 63 || !subdomainRegexp.MatchString(subdomain) {
-		h.renderFlash(w, "flash_error", "Invalid subdomain: lowercase alphanumeric with hyphens, 2-63 chars")
-		return
-	}
-	if reservedSubdomains[subdomain] {
-		h.renderFlash(w, "flash_error", "Subdomain is reserved")
+	// Validated ahead of the node and project lookups, so a bad subdomain is
+	// still reported before a missing node as it always has been.
+	if lerr := tenant.ValidateSubdomain(subdomain); lerr != nil {
+		h.flashLifecycle(w, lerr)
 		return
 	}
 
@@ -141,44 +139,15 @@ func (h *Handler) createTenant(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Reserve RAM
-	if err := h.nodes.ReserveRAM(r.Context(), nodeID, proj.RAMMB); err != nil {
-		if errors.Is(err, node.ErrInsufficientCapacity) {
-			h.renderFlash(w, "flash_error", "Insufficient RAM capacity on node")
-			return
-		}
-		slog.Error("admin: reserve ram", "error", err)
-		h.renderFlash(w, "flash_error", "Failed to reserve resources")
-		return
-	}
-
-	// Create tenant
-	t, err := h.tenants.Create(r.Context(), tenant.CreateTenantRequest{
+	t, lerr := h.lifecycle.Create(r.Context(), tenant.CreateParams{
 		Name:      name,
-		ProjectID: projectID,
-		NodeID:    nodeID,
 		Subdomain: subdomain,
-	})
-	if err != nil {
-		// Release RAM on failure
-		if releaseErr := h.nodes.ReleaseRAM(r.Context(), nodeID, proj.RAMMB); releaseErr != nil {
-			slog.Error("admin: release ram after failure", "error", releaseErr)
-		}
-		var pgErr *pgconn.PgError
-		if errors.As(err, &pgErr) && pgErr.Code == "23505" {
-			h.renderFlash(w, "flash_error", "Name or subdomain already exists")
-			return
-		}
-		slog.Error("admin: create tenant", "error", err)
-		h.renderFlash(w, "flash_error", "Failed to create tenant")
+		Project:   proj,
+		Node:      n,
+	}, tenant.Actor{})
+	if lerr != nil {
+		h.flashLifecycle(w, lerr)
 		return
-	}
-
-	// Fire async provisioning
-	h.provisioner.Provision(t.ID, nodeID, projectID, subdomain, proj.RAMMB)
-
-	if h.auditStore != nil {
-		h.auditStore.Log(r.Context(), "create", "tenant", t.ID, map[string]string{"name": name, "subdomain": subdomain})
 	}
 
 	enriched := enrichedTenant{
@@ -210,64 +179,9 @@ func (h *Handler) deleteTenant(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if t.Status != "active" && t.Status != "error" {
-		h.renderFlash(w, "flash_error", "Cannot delete tenant in status: "+t.Status)
-		return
-	}
-
-	// Get project for RAM
-	proj, err := h.projects.GetByID(r.Context(), t.ProjectID)
-	if err != nil {
-		slog.Error("admin: get project for delete", "error", err)
-		http.Error(w, "internal error", 500)
-		return
-	}
-	ramMB := 0
-	if proj != nil {
-		ramMB = proj.RAMMB
-	}
-
-	if t.LXCID != nil {
-		if err := h.provisioner.Deprovision(r.Context(), t.ID, t.NodeID, t.Subdomain, *t.LXCID, ramMB); err != nil {
-			if errors.Is(err, tenant.ErrStateConflict) {
-				h.renderFlash(w, "flash_error", "Tenant is already being deleted")
-				return
-			}
-			slog.Error("admin: deprovision", "error", err, "tenant_id", t.ID)
-			h.renderFlash(w, "flash_error", "Failed to deprovision tenant")
-			return
-		}
-	} else {
-		if err := h.tenants.SetDeleting(r.Context(), t.ID); err != nil {
-			if errors.Is(err, tenant.ErrStateConflict) {
-				h.renderFlash(w, "flash_error", "Tenant is already being deleted")
-				return
-			}
-			slog.Error("admin: set deleting", "error", err)
-			h.renderFlash(w, "flash_error", "Failed to delete tenant")
-			return
-		}
-		if ramMB > 0 {
-			if err := h.nodes.ReleaseRAM(r.Context(), t.NodeID, ramMB); err != nil {
-				slog.Error("admin: release ram", "error", err)
-			}
-		}
-		if err := h.tenants.SetDeleted(r.Context(), t.ID); err != nil {
-			slog.Error("admin: set deleted", "error", err)
-			h.renderFlash(w, "flash_error", "Failed to delete tenant")
-			return
-		}
-	}
-
-	if h.auditStore != nil {
-		h.auditStore.Log(r.Context(), "delete", "tenant", id, nil)
-	}
-
-	// Re-read and render updated row
-	t, err = h.tenants.GetByID(r.Context(), id)
-	if err != nil {
-		slog.Error("admin: get tenant after delete", "error", err)
-		http.Error(w, "internal error", 500)
+	t, lerr := h.lifecycle.Delete(r.Context(), t, tenant.Actor{})
+	if lerr != nil {
+		h.flashLifecycle(w, lerr)
 		return
 	}
 

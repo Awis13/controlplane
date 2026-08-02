@@ -68,6 +68,7 @@ type Handler struct {
 	projectStore ProjectStore
 	provisioner  Provisioner
 	auditStore   *audit.Store
+	lifecycle    *LifecycleService
 }
 
 func NewHandler(store TenantStore, nodeStore NodeStore, projectStore ProjectStore, provisioner Provisioner, auditStore *audit.Store) *Handler {
@@ -77,7 +78,13 @@ func NewHandler(store TenantStore, nodeStore NodeStore, projectStore ProjectStor
 		projectStore: projectStore,
 		provisioner:  provisioner,
 		auditStore:   auditStore,
+		lifecycle:    NewLifecycleService(store, nodeStore, projectStore, provisioner, auditStore),
 	}
+}
+
+// respondLifecycle turns a lifecycle failure into an HTTP response.
+func (h *Handler) respondLifecycle(w http.ResponseWriter, lerr *LifecycleError) {
+	response.Error(w, lifecycleStatus(lerr), lerr.Message)
 }
 
 func (h *Handler) List(w http.ResponseWriter, r *http.Request) {
@@ -145,15 +152,10 @@ func (h *Handler) Create(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Validate subdomain
-	if len(req.Subdomain) > 63 || !subdomainRegexp.MatchString(req.Subdomain) {
-		response.Error(w, http.StatusBadRequest, "invalid subdomain: must be lowercase alphanumeric with hyphens, 2-63 chars")
-		return
-	}
-
-	// Check reserved subdomains
-	if reservedSubdomains[req.Subdomain] {
-		response.Error(w, http.StatusBadRequest, "subdomain is reserved")
+	// Validate the subdomain before the node and project lookups, so a bad
+	// subdomain is reported ahead of a missing node as it always has been.
+	if lerr := ValidateSubdomain(req.Subdomain); lerr != nil {
+		h.respondLifecycle(w, lerr)
 		return
 	}
 
@@ -185,41 +187,17 @@ func (h *Handler) Create(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Reserve RAM atomically
-	if err := h.nodeStore.ReserveRAM(r.Context(), req.NodeID, proj.RAMMB); err != nil {
-		if errors.Is(err, node.ErrInsufficientCapacity) {
-			response.Error(w, http.StatusConflict, "insufficient capacity on node")
-			return
-		}
-		slog.Error("reserve ram for tenant", "error", err)
-		response.Error(w, http.StatusInternalServerError, "failed to reserve resources")
+	t, lerr := h.lifecycle.Create(r.Context(), CreateParams{
+		Name:      req.Name,
+		Subdomain: req.Subdomain,
+		Project:   proj,
+		Node:      n,
+	}, Actor{})
+	if lerr != nil {
+		h.respondLifecycle(w, lerr)
 		return
 	}
 
-	// Create tenant record (status=provisioning)
-	t, err := h.store.Create(r.Context(), req)
-	if err != nil {
-		// Release RAM on failure
-		if releaseErr := h.nodeStore.ReleaseRAM(r.Context(), req.NodeID, proj.RAMMB); releaseErr != nil {
-			slog.Error("release ram after tenant creation failure", "error", releaseErr)
-		}
-
-		var pgErr *pgconn.PgError
-		if errors.As(err, &pgErr) && pgErr.Code == "23505" {
-			response.Error(w, http.StatusConflict, "name or subdomain already exists")
-			return
-		}
-		slog.Error("create tenant", "error", err)
-		response.Error(w, http.StatusInternalServerError, "failed to create tenant")
-		return
-	}
-
-	// Launch async provisioning (fire-and-forget goroutine managed by Provisioner)
-	h.provisioner.Provision(t.ID, req.NodeID, req.ProjectID, req.Subdomain, proj.RAMMB)
-
-	if h.auditStore != nil {
-		h.auditStore.Log(r.Context(), "create", "tenant", t.ID, map[string]string{"name": req.Name, "subdomain": req.Subdomain})
-	}
 	response.JSON(w, http.StatusAccepted, t)
 }
 
@@ -399,67 +377,9 @@ func (h *Handler) Delete(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Only active or error tenants can be deleted
-	if t.Status != "active" && t.Status != "error" {
-		response.Error(w, http.StatusBadRequest, "tenant cannot be deleted in current status: "+t.Status)
-		return
-	}
-
-	// Get project for RAM amount
-	proj, err := h.projectStore.GetByID(r.Context(), t.ProjectID)
-	if err != nil {
-		slog.Error("get project for tenant deletion", "error", err)
-		response.Error(w, http.StatusInternalServerError, "failed to get project")
-		return
-	}
-	ramMB := 0
-	if proj != nil {
-		ramMB = proj.RAMMB
-	}
-
-	// If tenant has an LXC ID, deprovision the container
-	if t.LXCID != nil {
-		if err := h.provisioner.Deprovision(r.Context(), t.ID, t.NodeID, t.Subdomain, *t.LXCID, ramMB); err != nil {
-			if errors.Is(err, ErrStateConflict) {
-				response.Error(w, http.StatusConflict, "tenant is already being deleted")
-				return
-			}
-			slog.Error("deprovision tenant", "error", err, "tenant_id", t.ID)
-			response.Error(w, http.StatusInternalServerError, "failed to deprovision tenant")
-			return
-		}
-	} else {
-		// No LXC container — atomically transition to deleting, then deleted + release RAM
-		if err := h.store.SetDeleting(r.Context(), t.ID); err != nil {
-			if errors.Is(err, ErrStateConflict) {
-				response.Error(w, http.StatusConflict, "tenant is already being deleted")
-				return
-			}
-			slog.Error("set tenant deleting", "error", err)
-			response.Error(w, http.StatusInternalServerError, "failed to delete tenant")
-			return
-		}
-		if ramMB > 0 {
-			if err := h.nodeStore.ReleaseRAM(r.Context(), t.NodeID, ramMB); err != nil {
-				slog.Error("release ram on tenant deletion", "error", err)
-			}
-		}
-		if err := h.store.SetDeleted(r.Context(), t.ID); err != nil {
-			slog.Error("set tenant deleted", "error", err)
-			response.Error(w, http.StatusInternalServerError, "failed to delete tenant")
-			return
-		}
-	}
-
-	if h.auditStore != nil {
-		h.auditStore.Log(r.Context(), "delete", "tenant", id, nil)
-	}
-
-	// Re-read tenant to return updated state
-	t, err = h.store.GetByID(r.Context(), id)
-	if err != nil {
-		slog.Error("get tenant after deletion", "error", err)
-		response.Error(w, http.StatusInternalServerError, "failed to get tenant")
+	t, lerr := h.lifecycle.Delete(r.Context(), t, Actor{})
+	if lerr != nil {
+		h.respondLifecycle(w, lerr)
 		return
 	}
 	response.JSON(w, http.StatusOK, t)

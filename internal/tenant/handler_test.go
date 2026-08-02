@@ -677,8 +677,44 @@ func TestDelete_CannotDeleteProvisioningTenant(t *testing.T) {
 	w := httptest.NewRecorder()
 	r.ServeHTTP(w, req)
 
-	if w.Code != http.StatusBadRequest {
-		t.Errorf("expected 400, got %d: %s", w.Code, w.Body.String())
+	// A state conflict, not a malformed request: 409 across every entry point.
+	if w.Code != http.StatusConflict {
+		t.Errorf("expected 409, got %d: %s", w.Code, w.Body.String())
+	}
+}
+
+// TestDelete_SuspendedTenantIsDeletable covers the drift this cutover
+// resolves: the API used to refuse a suspended tenant with 400 even though the
+// store has accepted that transition since 96c2cf0.
+func TestDelete_SuspendedTenantIsDeletable(t *testing.T) {
+	ts := newMockTenantStore()
+	ns := newMockNodeStore()
+	ps := newMockProjectStore()
+	prov := newMockProvisioner()
+
+	ts.tenants[validTenantID] = &Tenant{
+		ID:        validTenantID,
+		Name:      "test",
+		ProjectID: validProjectID,
+		NodeID:    validNodeID,
+		Subdomain: "myapp",
+		Status:    "suspended",
+		CreatedAt: time.Now(),
+		UpdatedAt: time.Now(),
+	}
+
+	h := NewHandler(ts, ns, ps, prov, nil)
+	r := testRouter(h)
+
+	req := httptest.NewRequest("DELETE", "/tenants/"+validTenantID, nil)
+	w := httptest.NewRecorder()
+	r.ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", w.Code, w.Body.String())
+	}
+	if got := ts.tenants[validTenantID].Status; got != "deleted" {
+		t.Errorf("status = %q, want deleted", got)
 	}
 }
 
@@ -706,8 +742,9 @@ func TestDelete_CannotDeleteDeletedTenant(t *testing.T) {
 	w := httptest.NewRecorder()
 	r.ServeHTTP(w, req)
 
-	if w.Code != http.StatusBadRequest {
-		t.Errorf("expected 400, got %d: %s", w.Code, w.Body.String())
+	// A state conflict, not a malformed request: 409 across every entry point.
+	if w.Code != http.StatusConflict {
+		t.Errorf("expected 409, got %d: %s", w.Code, w.Body.String())
 	}
 }
 

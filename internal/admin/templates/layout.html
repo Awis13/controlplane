@@ -7,6 +7,9 @@
   <title>{{.Title}} — Control Plane</title>
   <link rel="stylesheet" href="/admin/static/style.css">
   <meta name="csrf-token" content="{{.CSRFToken}}">
+  <!-- Conflicts answer 409 and still render their flash message. htmx drops 4xx
+       bodies by default, so 409 is listed as swappable ahead of the 4xx rule. -->
+  <meta name="htmx-config" content='{"responseHandling":[{"code":"204","swap":false},{"code":"[23]..","swap":true},{"code":"409","swap":true},{"code":"[45]..","swap":false,"error":true}]}'>
   <script src="/admin/static/alpine.min.js" defer></script>
   <script src="/admin/static/app.js"></script>
   <script src="/admin/static/htmx.min.js"></script>
