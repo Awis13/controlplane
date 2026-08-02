@@ -30,6 +30,8 @@ type Config struct {
 	PollerInterval      time.Duration     // optional: station status poll interval (default: 10s)
 	JanitorInterval     time.Duration     // optional: expired-auth-state cleanup interval (default: 1h)
 	SSHKeyPath          string            // optional: path to SSH key for pct exec (default: /root/.ssh/id_ed25519)
+	FreeRadioRepoURL    string            // optional: freeRadio repo to auto-deploy into new tenants (empty disables auto-deploy)
+	FreeRadioRepoBranch string            // optional: branch to deploy (default: dev)
 	SSODomain           string            // optional: domain for SSO token URLs (default: example.com)
 	SSOScheme           string            // optional: http or https for SSO URLs (default: https)
 	StripeSecretKey     string            // optional: Stripe API secret key
@@ -81,6 +83,8 @@ func Load() (*Config, error) {
 		PollerInterval:      parseDuration("POLLER_INTERVAL", 10*time.Second),
 		JanitorInterval:     parseDuration("AUTH_JANITOR_INTERVAL", time.Hour),
 		SSHKeyPath:          getEnv("SSH_KEY_PATH", "/root/.ssh/id_ed25519"),
+		FreeRadioRepoURL:    os.Getenv("FREERADIO_REPO_URL"),
+		FreeRadioRepoBranch: getEnv("FREERADIO_REPO_BRANCH", "dev"),
 		SSODomain:           getEnv("SSO_DOMAIN", "example.com"),
 		SSOScheme:           getEnv("SSO_SCHEME", "https"),
 		StripeSecretKey:     os.Getenv("STRIPE_SECRET_KEY"),

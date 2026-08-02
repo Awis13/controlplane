@@ -77,6 +77,14 @@ func New(pool *pgxpool.Pool, cfg *config.Config) (http.Handler, *provisioner.Pro
 		}
 	}
 
+	// freeRadio auto-deploy. Without a repo URL the provisioner keeps the
+	// legacy behaviour of writing only the dashboard token into a container
+	// that already holds a checkout.
+	if cfg.FreeRadioRepoURL != "" {
+		prov.WithFreeRadioRepo(cfg.FreeRadioRepoURL, cfg.FreeRadioRepoBranch)
+		slog.Info("freeRadio auto-deploy: enabled", "repo", cfg.FreeRadioRepoURL, "branch", cfg.FreeRadioRepoBranch)
+	}
+
 	// Station status poller
 	pollerTenantAdapter := &pollerTenantStoreAdapter{store: tenantStore}
 	poller := station.NewPoller(pollerTenantAdapter, stationStore, cfg.PollerInterval)
