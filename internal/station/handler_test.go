@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"sort"
+	"strings"
 	"testing"
 	"time"
 
@@ -358,7 +359,7 @@ func listenerFixture() (*mockStationStore, *mockStatusProvider) {
 	return store, poller
 }
 
-func listNames(t *testing.T, h *Handler, target string) response.ListResult[Station] {
+func listRaw(t *testing.T, h *Handler, target string) *httptest.ResponseRecorder {
 	t.Helper()
 	r := stationRouter(h)
 	req := httptest.NewRequest("GET", target, nil)
@@ -368,8 +369,13 @@ func listNames(t *testing.T, h *Handler, target string) response.ListResult[Stat
 	if w.Code != http.StatusOK {
 		t.Fatalf("GET %s: expected 200, got %d: %s", target, w.Code, w.Body.String())
 	}
+	return w
+}
+
+func listNames(t *testing.T, h *Handler, target string) response.ListResult[Station] {
+	t.Helper()
 	var result response.ListResult[Station]
-	if err := json.NewDecoder(w.Body).Decode(&result); err != nil {
+	if err := json.Unmarshal(listRaw(t, h, target).Body.Bytes(), &result); err != nil {
 		t.Fatalf("decode: %v", err)
 	}
 	return result
@@ -429,10 +435,85 @@ func TestList_SortByListeners_OffsetPastEndReturnsEmptyArray(t *testing.T) {
 	h := NewHandler(store, nil)
 	h.WithPoller(poller)
 
-	result := listNames(t, h, "/stations?sort=listeners&limit=2&offset=99")
+	w := listRaw(t, h, "/stations?sort=listeners&limit=2&offset=99")
 
-	if len(result.Items) != 0 {
-		t.Errorf("items = %v, want empty", namesOf(result.Items))
+	// Asserted on the raw body, not the decoded length: null decodes to a
+	// zero-length slice too, and this path re-slices after the nil is normalised
+	// away, so only the wire form distinguishes [] from null.
+	if !strings.Contains(w.Body.String(), `"items":[]`) {
+		t.Errorf("body = %s, want an empty items array", w.Body.String())
+	}
+
+	var result response.ListResult[Station]
+	if err := json.Unmarshal(w.Body.Bytes(), &result); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if result.Total != 5 {
+		t.Errorf("total = %d, want 5", result.Total)
+	}
+	if result.HasMore {
+		t.Error("has_more = true past the end of the list")
+	}
+}
+
+// TestList_SortByListeners_HasMoreStopsAtTheScanCap covers the edge the scan cap
+// introduces: past listenersScanLimit the match count exceeds what this endpoint
+// can page through, so has_more has to follow the scanned set instead. Otherwise
+// a client paging on has_more is handed empty pages that claim more is coming.
+func TestList_SortByListeners_HasMoreStopsAtTheScanCap(t *testing.T) {
+	// The match count has to exceed offset+limit at the cap, or has_more comes
+	// out false from the match count too and the assertion proves nothing.
+	const n = listenersScanLimit + 200
+	store := newMockStationStore()
+	poller := &mockStatusProvider{statuses: map[string]*StationStatus{}}
+	for i := range n {
+		name := fmt.Sprintf("station-%05d", i)
+		tenantID := "tenant-" + name
+		store.addStation(&Station{ID: name, Name: name, Slug: name, TenantID: &tenantID, IsPublic: true})
+		poller.statuses[tenantID] = &StationStatus{ListenersCount: i}
+	}
+
+	h := NewHandler(store, nil)
+	h.WithPoller(poller)
+
+	// Inside the scanned window there is genuinely more to come.
+	first := listNames(t, h, "/stations?sort=listeners&limit=50&offset=0")
+	if !first.HasMore {
+		t.Error("has_more = false on the first page of a list longer than one page")
+	}
+	if first.Total != n {
+		t.Errorf("total = %d, want %d", first.Total, n)
+	}
+
+	// At the cap the scan is exhausted even though more stations match.
+	last := listRaw(t, h, fmt.Sprintf("/stations?sort=listeners&limit=50&offset=%d", listenersScanLimit))
+	if !strings.Contains(last.Body.String(), `"items":[]`) {
+		t.Error("page past the scan cap should be an empty array")
+	}
+	var result response.ListResult[Station]
+	if err := json.Unmarshal(last.Body.Bytes(), &result); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if result.HasMore {
+		t.Error("has_more = true on an empty page past the scan cap")
+	}
+	if result.Total != n {
+		t.Errorf("total = %d, want the true match count %d", result.Total, n)
+	}
+}
+
+// TestList_OtherSortsReportHasMoreFromTheMatchCount pins that the pageable
+// ceiling only narrows on the listeners branch: every other sort pages in the
+// store, so has_more must still follow the total rather than the page length.
+func TestList_OtherSortsReportHasMoreFromTheMatchCount(t *testing.T) {
+	store, poller := listenerFixture()
+	h := NewHandler(store, nil)
+	h.WithPoller(poller)
+
+	result := listNames(t, h, "/stations?sort=name&limit=2&offset=0")
+
+	if !result.HasMore {
+		t.Error("has_more = false with 5 matches and a page of 2")
 	}
 	if result.Total != 5 {
 		t.Errorf("total = %d, want 5", result.Total)
@@ -494,10 +575,10 @@ func TestList_SortByListeners_MissingStatsSortLast(t *testing.T) {
 }
 
 // TestList_SortByListeners_NoPollerKeepsStoreOrder covers the degenerate case:
-// with no poller every count is zero, so the sort must leave the store's name
-// order untouched rather than shuffling it. The fixture is deliberately larger
-// than Go's insertion-sort threshold (12) — below it an unstable sort happens to
-// preserve order anyway and the assertion would prove nothing.
+// with no poller every count is zero and the page must still come back in the
+// store's name order. Note that this does not pin the sort's stability — an
+// all-equal sequence is detected as already sorted and left alone even by an
+// unstable sort. TestList_SortByListeners_TiesKeepStoreOrder is what pins that.
 func TestList_SortByListeners_NoPollerKeepsStoreOrder(t *testing.T) {
 	const n = 30
 	store := newMockStationStore()

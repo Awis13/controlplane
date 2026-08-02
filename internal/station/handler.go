@@ -141,10 +141,18 @@ func (h *Handler) List(w http.ResponseWriter, r *http.Request) {
 	// Sort by listeners, then page. Stations the poller has no data for keep the
 	// zero count and land at the bottom; the sort is stable so equal counts keep
 	// the store's ORDER BY name.
+	//
+	// pageable is how far this response can actually be paged. It is the match
+	// count for every other sort, but ranking by listeners can only page through
+	// what it scanned, and past listenersScanLimit that is fewer rows than match.
+	// Reporting has_more against the match count there would promise pages this
+	// endpoint will only ever answer empty.
+	pageable := total
 	if byListeners {
 		sort.SliceStable(stations, func(i, j int) bool {
 			return stations[i].ListenersCount > stations[j].ListenersCount
 		})
+		pageable = len(stations)
 		stations = pageOf(stations, params.Offset, params.Limit)
 	}
 
@@ -153,7 +161,7 @@ func (h *Handler) List(w http.ResponseWriter, r *http.Request) {
 		Total:   total,
 		Limit:   params.Limit,
 		Offset:  params.Offset,
-		HasMore: params.Offset+params.Limit < total,
+		HasMore: params.Offset+params.Limit < pageable,
 	})
 }
 

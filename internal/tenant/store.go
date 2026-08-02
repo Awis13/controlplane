@@ -417,7 +417,7 @@ func toActiveTenants(rows []activeWithIP) []ActiveTenant {
 func (s *Store) ListActiveWithIP(ctx context.Context) ([]ActiveTenant, error) {
 	rows, err := s.listActiveWithIP(ctx)
 	if err != nil {
-		return nil, fmt.Errorf("list active tenants with ip: %w", err)
+		return nil, err
 	}
 	return toActiveTenants(rows), nil
 }
