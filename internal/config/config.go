@@ -28,6 +28,7 @@ type Config struct {
 	CaddyServerName     string            // optional: Caddy server name (default: srv1)
 	CaddyDomain         string            // optional: domain for tenant routes (default: example.com)
 	PollerInterval      time.Duration     // optional: station status poll interval (default: 10s)
+	JanitorInterval     time.Duration     // optional: expired-auth-state cleanup interval (default: 1h)
 	SSHKeyPath          string            // optional: path to SSH key for pct exec (default: /root/.ssh/id_ed25519)
 	SSODomain           string            // optional: domain for SSO token URLs (default: example.com)
 	SSOScheme           string            // optional: http or https for SSO URLs (default: https)
@@ -78,6 +79,7 @@ func Load() (*Config, error) {
 		CaddyServerName:     getEnv("CADDY_SERVER_NAME", "srv1"),
 		CaddyDomain:         getEnv("CADDY_DOMAIN", "example.com"),
 		PollerInterval:      parseDuration("POLLER_INTERVAL", 10*time.Second),
+		JanitorInterval:     parseDuration("AUTH_JANITOR_INTERVAL", time.Hour),
 		SSHKeyPath:          getEnv("SSH_KEY_PATH", "/root/.ssh/id_ed25519"),
 		SSODomain:           getEnv("SSO_DOMAIN", "example.com"),
 		SSOScheme:           getEnv("SSO_SCHEME", "https"),
