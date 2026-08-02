@@ -3,11 +3,12 @@ package wireguard
 import (
 	"context"
 	"fmt"
-	"net"
 	"strings"
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
+
+	"controlplane/internal/ipalloc"
 )
 
 // Store handles DB operations for WireGuard peers.
@@ -180,48 +181,17 @@ func (s *Store) SetEnabled(ctx context.Context, id string, enabled bool) error {
 }
 
 // GetNextAvailableIP finds the next free IP in the given subnet.
-// Subnet format: "10.10.0.0/24". Skips .0 (network) and .1 (gateway/hub).
+//
+// Every peer row holds an allocated address, so there is no state filter here:
+// deleting a peer is what returns its address to the pool.
 func (s *Store) GetNextAvailableIP(ctx context.Context, subnet string) (string, error) {
-	_, ipNet, err := net.ParseCIDR(subnet)
-	if err != nil {
-		return "", fmt.Errorf("parse subnet: %w", err)
-	}
-
-	// Get all occupied IPs
-	rows, err := s.pool.Query(ctx, `SELECT wg_ip FROM wireguard_peers`)
-	if err != nil {
-		return "", fmt.Errorf("query existing IPs: %w", err)
-	}
-	defer rows.Close()
-
-	usedIPs := make(map[string]bool)
-	for rows.Next() {
-		var ip string
-		if err := rows.Scan(&ip); err != nil {
-			return "", fmt.Errorf("scan IP: %w", err)
+	return ipalloc.Allocate(ctx, s.pool, subnet, func(ctx context.Context, tx pgx.Tx) (map[string]bool, error) {
+		rows, err := tx.Query(ctx, `SELECT wg_ip FROM wireguard_peers`)
+		if err != nil {
+			return nil, fmt.Errorf("query existing IPs: %w", err)
 		}
-		usedIPs[ip] = true
-	}
-	if err := rows.Err(); err != nil {
-		return "", fmt.Errorf("iterate IPs: %w", err)
-	}
-
-	// Iterate IPs in subnet starting from .2 (0=network, 1=gateway)
-	ip := make(net.IP, len(ipNet.IP))
-	copy(ip, ipNet.IP)
-
-	for i := 2; i < 255; i++ {
-		ip[len(ip)-1] = byte(i)
-		candidate := ip.String()
-		if !ipNet.Contains(ip) {
-			break
-		}
-		if !usedIPs[candidate] {
-			return candidate, nil
-		}
-	}
-
-	return "", fmt.Errorf("no available IPs in subnet %s", subnet)
+		return ipalloc.CollectIPs(rows)
+	})
 }
 
 // GetByTenantID returns the peer linked to a tenant. Nil if not found.

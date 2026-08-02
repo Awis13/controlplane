@@ -3,11 +3,12 @@ package tenant
 import (
 	"context"
 	"fmt"
-	"net"
 	"strings"
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
+
+	"controlplane/internal/ipalloc"
 )
 
 // Store handles tenant database operations.
@@ -390,61 +391,19 @@ func (s *Store) ListActiveWithIP(ctx context.Context) ([]ActiveTenant, error) {
 	return tenants, nil
 }
 
-// GetNextAvailableIP finds the next free IP in the given CIDR.
-// Skips .0 (network) and .1 (gateway). Checks occupied IPs from active/provisioning tenants.
-// Uses pg_advisory_xact_lock to prevent race conditions between concurrent provisioners.
+// GetNextAvailableIP finds the next free IP in the given CIDR, under the
+// advisory lock that keeps concurrent provisioners from picking the same one.
 func (s *Store) GetNextAvailableIP(ctx context.Context, cidr string) (string, error) {
-	_, ipNet, err := net.ParseCIDR(cidr)
-	if err != nil {
-		return "", fmt.Errorf("parse cidr: %w", err)
-	}
-
-	var result string
-	err = pgx.BeginTxFunc(ctx, s.pool, pgx.TxOptions{}, func(tx pgx.Tx) error {
-		// Advisory lock prevents concurrent IP allocation races.
-		// Key 0x4C584349 = "LXCI" — unique to IP allocation.
-		if _, err := tx.Exec(ctx, `SELECT pg_advisory_xact_lock($1)`, int64(0x4C584349)); err != nil {
-			return fmt.Errorf("advisory lock: %w", err)
-		}
-
+	// Deleted tenants are excluded, so their addresses return to the pool.
+	// Rows with a null or empty address have not been allocated one yet.
+	return ipalloc.Allocate(ctx, s.pool, cidr, func(ctx context.Context, tx pgx.Tx) (map[string]bool, error) {
 		rows, err := tx.Query(ctx,
 			`SELECT lxc_ip FROM tenants WHERE lxc_ip IS NOT NULL AND lxc_ip != '' AND status NOT IN ('deleted')`)
 		if err != nil {
-			return fmt.Errorf("query used ips: %w", err)
+			return nil, fmt.Errorf("query used ips: %w", err)
 		}
-		defer rows.Close()
-
-		usedIPs := make(map[string]bool)
-		for rows.Next() {
-			var ip string
-			if err := rows.Scan(&ip); err != nil {
-				return fmt.Errorf("scan ip: %w", err)
-			}
-			usedIPs[ip] = true
-		}
-		if err := rows.Err(); err != nil {
-			return fmt.Errorf("iterate ips: %w", err)
-		}
-
-		ip := make(net.IP, len(ipNet.IP))
-		copy(ip, ipNet.IP)
-		for i := 2; i < 255; i++ {
-			ip[len(ip)-1] = byte(i)
-			candidate := ip.String()
-			if !ipNet.Contains(ip) {
-				break
-			}
-			if !usedIPs[candidate] {
-				result = candidate
-				return nil
-			}
-		}
-		return fmt.Errorf("no available IPs in %s", cidr)
+		return ipalloc.CollectIPs(rows)
 	})
-	if err != nil {
-		return "", err
-	}
-	return result, nil
 }
 
 // SetHealthStatus sets the health status of a tenant.

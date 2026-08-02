@@ -1,7 +1,6 @@
 package wireguard
 
 import (
-	"net"
 	"testing"
 	"time"
 )
@@ -138,29 +137,5 @@ func TestUpdatePeerRequestNilFields(t *testing.T) {
 	}
 	if req.Enabled != nil {
 		t.Error("Enabled should be nil")
-	}
-}
-
-func TestGetNextAvailableIPSubnetParsing(t *testing.T) {
-	// Check subnet parsing logic (no DB)
-	tests := []struct {
-		subnet string
-		valid  bool
-	}{
-		{"10.10.0.0/24", true},
-		{"192.168.1.0/24", true},
-		{"172.16.0.0/16", true},
-		{"not-a-subnet", false},
-		{"", false},
-	}
-
-	for _, tt := range tests {
-		_, _, err := net.ParseCIDR(tt.subnet)
-		if tt.valid && err != nil {
-			t.Errorf("subnet %q should be valid, got error: %v", tt.subnet, err)
-		}
-		if !tt.valid && err == nil {
-			t.Errorf("subnet %q should be invalid", tt.subnet)
-		}
 	}
 }
