@@ -32,8 +32,43 @@ jobs:
             exit 1
           fi
 
+      # Code and configuration are English-only. This runs before the tests
+      # because it costs milliseconds and catches a class of mistake that has
+      # nothing to do with whether the code works.
+      #
+      # git grep searches tracked files only. That is complete here, because a
+      # CI checkout has everything tracked, but it is NOT equivalent to running
+      # the same command locally: a file created and not yet staged is invisible
+      # to it. Locally, pair it with a plain recursive grep.
+      #
+      # git grep exits 1 when it finds nothing, which is the success case, so
+      # the test is inverted through an if rather than run bare under bash -e.
+      - name: English-only check
+        run: |
+          if git grep -nP '[\x{0400}-\x{04FF}]' -- ':!*.md'; then
+            echo "::error::Cyrillic characters found outside markdown; the matches are listed above"
+            exit 1
+          fi
+          echo "No Cyrillic characters outside markdown."
+
+      # -race is as much the point of this step as the assertions are: the
+      # provisioner, the janitor and the poller all run goroutines, and a data
+      # race in them is invisible to a plain test run.
       - name: Test
-        run: go test ./...
+        run: go test -race -covermode=atomic -coverprofile=coverage.out ./...
+
+      # Reported, not gated. A threshold needs a baseline everyone has agreed
+      # to; until then this keeps the number visible on every run so a drop is
+      # at least noticeable.
+      - name: Coverage
+        run: |
+          go tool cover -func=coverage.out | tail -1
+          {
+            echo '## Coverage'
+            echo '```'
+            go tool cover -func=coverage.out | tail -1
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
 
       # Fails the job on vulnerabilities reachable from our code. Findings in
       # dependencies we never call are reported but do not fail the scan.
@@ -41,3 +76,11 @@ jobs:
         run: |
           go install golang.org/x/vuln/cmd/govulncheck@v1.6.0
           "$(go env GOPATH)/bin/govulncheck" ./...
+
+      # Nothing built the image before this, so a broken Dockerfile, a base
+      # digest that stops resolving, or a .dockerignore that excludes something
+      # the build needs would all have reached main green. Both stages are
+      # built; nothing is pushed. The runner's cache is cold, so the pinned
+      # digests are genuinely fetched rather than assumed.
+      - name: Docker image build
+        run: docker build --tag controlplane:ci .
