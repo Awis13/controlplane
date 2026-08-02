@@ -289,32 +289,10 @@ func (m *mockProxmoxClient) ConfigureMountPoints(_ context.Context, _ int, mount
 
 // --- Mock SSH client (implements SSHExec) ---
 
-type mockSSHExec struct {
-	mu              sync.Mutex
-	execOnHostCalls []sshExecCall
-	execInCtrCalls  []sshExecCall
-	execOnHostErr   error
-	execInCtrErr    error
-}
-
 type sshExecCall struct {
 	SSHHost string
 	VMID    int // only for ExecInContainer
 	Command string
-}
-
-func (m *mockSSHExec) ExecOnHost(_ context.Context, sshHost string, command string) error {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	m.execOnHostCalls = append(m.execOnHostCalls, sshExecCall{SSHHost: sshHost, Command: command})
-	return m.execOnHostErr
-}
-
-func (m *mockSSHExec) ExecInContainer(_ context.Context, sshHost string, vmid int, command string) error {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	m.execInCtrCalls = append(m.execInCtrCalls, sshExecCall{SSHHost: sshHost, VMID: vmid, Command: command})
-	return m.execInCtrErr
 }
 
 // --- Helpers ---
@@ -350,6 +328,12 @@ func testNode() *node.Node {
 // setupProvisioner creates a provisioner with a pre-cached mock client.
 func setupProvisioner(nodeStore *mockNodeStore, tenantStore *mockTenantStore, projectStore *mockProjectStore, mockClient *mockProxmoxClient, nodeID string) *Provisioner {
 	p := New(nodeStore, tenantStore, projectStore, "test-key")
+	// Production timings scaled down by 1000: the health check still runs its
+	// full poll loop against an unreachable container, it just costs
+	// milliseconds instead of a minute per test.
+	p.healthTimeout = 60 * time.Millisecond
+	p.healthInterval = 5 * time.Millisecond
+	p.healthClientTimeout = 5 * time.Millisecond
 	p.mu.Lock()
 	p.clients[nodeID] = mockClient
 	p.mu.Unlock()
@@ -1396,7 +1380,7 @@ func TestProvision_MountPointsViaSSH_HappyPath(t *testing.T) {
 	mockClient := &mockProxmoxClient{nextID: 105}
 	p := setupProvisioner(nodeStore, tenantStore, projectStore, mockClient, n.ID)
 
-	sshMock := &mockSSHExec{}
+	sshMock := &mockSSHExecWithDeployCalls{}
 	p.WithSSHClient(sshMock)
 
 	waitForProvision(p, "tenant-1", n.ID, proj.ID, "myapp", proj.RAMMB)
@@ -1453,7 +1437,7 @@ func TestProvision_MountPointsViaSSH_MkdirError(t *testing.T) {
 	mockClient := &mockProxmoxClient{nextID: 105}
 	p := setupProvisioner(nodeStore, tenantStore, projectStore, mockClient, n.ID)
 
-	sshMock := &mockSSHExec{execOnHostErr: fmt.Errorf("ssh: permission denied")}
+	sshMock := &mockSSHExecWithDeployCalls{execOnHostErr: fmt.Errorf("ssh: permission denied")}
 	p.WithSSHClient(sshMock)
 
 	waitForProvision(p, "tenant-1", n.ID, proj.ID, "myapp", proj.RAMMB)
@@ -1525,7 +1509,9 @@ func TestProvision_MountPointsViaSSH_PctSetError(t *testing.T) {
 
 // --- Auto-deploy freeRadio tests ---
 
-// mockSSHExecWithDeployCalls tracks ExecInContainer calls and can fail on N-th call.
+// mockSSHExecWithDeployCalls is the SSHExec mock for every test: it records
+// ExecOnHost and ExecInContainer calls, can fail all ExecOnHost calls, and can
+// fail on the N-th ExecInContainer call.
 type mockSSHExecWithDeployCalls struct {
 	mu              sync.Mutex
 	execInCtrCalls  []sshExecCall
