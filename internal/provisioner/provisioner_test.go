@@ -2239,3 +2239,52 @@ func TestTopology_ConfiguredValuesReachTheAPIMountFallback(t *testing.T) {
 		t.Errorf("mp1 = %q, want the configured mount root and app dir", got)
 	}
 }
+
+// TestTopology_HostileValuesCannotReshapeCommands covers the path from
+// configuration to command line. A mount root or app directory carrying shell
+// syntax must end up as one argument, not as a second command. These values
+// come from the environment, so this is about a typo or a bad deployment
+// template as much as about an attacker.
+func TestTopology_HostileValuesCannotReshapeCommands(t *testing.T) {
+	nodeStore := newMockNodeStore()
+	tenantStore := newMockTenantStore()
+	projectStore := newMockProjectStore()
+
+	proj := testProject()
+	n := testNode()
+	projectStore.projects[proj.ID] = proj
+	nodeStore.nodes[n.ID] = n
+
+	mockClient := &mockProxmoxClient{nextID: 105}
+	p := setupProvisioner(nodeStore, tenantStore, projectStore, mockClient, n.ID)
+	p.WithTopology("vmbr0", "/mnt/t; touch /pwned", "/opt/a b")
+
+	ssh := &mockSSHExecWithDeployCalls{}
+	p.WithSSHClient(ssh)
+
+	waitForProvision(p, "tenant-1", n.ID, proj.ID, "myapp", proj.RAMMB)
+
+	ssh.mu.Lock()
+	defer ssh.mu.Unlock()
+
+	for _, call := range ssh.execOnHostCalls {
+		// The injected command must appear only inside quotes, never as a
+		// command of its own.
+		if strings.Contains(call.Command, "; touch /pwned") && !strings.Contains(call.Command, `'/mnt/t; touch /pwned'`) {
+			t.Errorf("mount root escaped its quoting: %q", call.Command)
+		}
+		if strings.Contains(call.Command, "/opt/a b") && !strings.Contains(call.Command, `'/opt/a b'`) {
+			t.Errorf("app dir with a space was not quoted: %q", call.Command)
+		}
+	}
+
+	var sawQuotedMount bool
+	for _, call := range ssh.execOnHostCalls {
+		if strings.Contains(call.Command, `'/mnt/t; touch /pwned'`) {
+			sawQuotedMount = true
+		}
+	}
+	if !sawQuotedMount {
+		t.Errorf("expected the mount root to appear quoted, got %+v", ssh.execOnHostCalls)
+	}
+}
