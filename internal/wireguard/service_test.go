@@ -286,3 +286,60 @@ func TestValidPeerTypes(t *testing.T) {
 		}
 	}
 }
+
+// --- Topology ---
+
+// TestPeerConfig_TopologyDefaults pins the values the generated peer config
+// carried before DNS and keepalive became settings.
+func TestPeerConfig_TopologyDefaults(t *testing.T) {
+	svc := NewService(nil, testEncryptionKey, "hub-pub-key", "1.2.3.4:51820", "10.10.0.0/24")
+
+	config := svc.BuildPeerConfig(&Peer{Name: "p", WgIP: "10.10.0.5", PublicKey: "peer-key"}, "private-key")
+
+	if !strings.Contains(config, "DNS = 10.10.0.1") {
+		t.Errorf("config = %q, want the previous DNS literal", config)
+	}
+	if !strings.Contains(config, "PersistentKeepalive = 25") {
+		t.Errorf("config = %q, want the previous keepalive literal", config)
+	}
+}
+
+// TestPeerConfig_TopologyOverrides pins that configured values reach the file
+// handed to the peer.
+func TestPeerConfig_TopologyOverrides(t *testing.T) {
+	svc := NewService(nil, testEncryptionKey, "hub-pub-key", "1.2.3.4:51820", "10.20.0.0/24").
+		WithDNSAddr("10.20.0.1").WithKeepalive(45)
+
+	config := svc.BuildPeerConfig(&Peer{Name: "p", WgIP: "10.20.0.5", PublicKey: "peer-key"}, "private-key")
+
+	if !strings.Contains(config, "DNS = 10.20.0.1") {
+		t.Errorf("config = %q, want the configured DNS", config)
+	}
+	if strings.Contains(config, "DNS = 10.10.0.1") {
+		t.Errorf("config = %q, still carries the default DNS", config)
+	}
+	if !strings.Contains(config, "PersistentKeepalive = 45") {
+		t.Errorf("config = %q, want the configured keepalive", config)
+	}
+}
+
+// TestServiceTopology_EmptyOverridesKeepDefaults pins that a partially
+// configured deployment keeps the previous values for anything left unset.
+func TestServiceTopology_EmptyOverridesKeepDefaults(t *testing.T) {
+	svc := NewService(nil, testEncryptionKey, "hub-pub-key", "1.2.3.4:51820", "10.10.0.0/24").
+		WithInterface("").WithDNSAddr("").WithKeepalive(0)
+
+	if svc.iface != "wg0" || svc.dnsAddr != "10.10.0.1" || svc.keepalive != 25 {
+		t.Errorf("empty overrides changed the defaults: %q %q %d", svc.iface, svc.dnsAddr, svc.keepalive)
+	}
+}
+
+// TestServiceTopology_InterfaceIsConfigured pins the hub interface the peer
+// commands are applied to.
+func TestServiceTopology_InterfaceIsConfigured(t *testing.T) {
+	svc := NewService(nil, testEncryptionKey, "hub-pub-key", "1.2.3.4:51820", "10.10.0.0/24").WithInterface("wg1")
+
+	if svc.iface != "wg1" {
+		t.Errorf("iface = %q, want the configured interface", svc.iface)
+	}
+}

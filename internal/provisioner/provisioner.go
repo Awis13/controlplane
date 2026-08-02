@@ -30,9 +30,10 @@ const (
 	provisionTimeout  = 10 * time.Minute
 	maxConcurrentJobs = 10
 
-	// freeRadioDir is where the tenant's checkout lives inside the container.
-	// The content mount points are attached beneath it.
-	freeRadioDir = "/root/freeRadio"
+	// Defaults are the values that used to be hardcoded here.
+	defaultLXCBridge    = "vmbr0"
+	defaultMountRoot    = "/mnt/tenants"
+	defaultFreeRadioDir = "/root/freeRadio"
 
 	// defaultFreeRadioBranch is used when no branch is configured. The remote's
 	// default branch is not a safe fallback: it trails this one.
@@ -152,6 +153,9 @@ type Provisioner struct {
 	sshClient           SSHExec                  // optional: SSH exec for writing tokens and mount points
 	freeRadioRepoURL    string                   // freeRadio repository URL for auto-deploy
 	freeRadioRepoBranch string                   // branch to deploy; empty falls back to the default branch
+	lxcBridge           string                   // Proxmox bridge for tenant NICs
+	mountRoot           string                   // host directory holding tenant content mounts
+	appDir              string                   // application directory inside the container
 
 	// Health check timings. Fields rather than constants so tests can poll in
 	// milliseconds instead of waiting out the production budget.
@@ -170,6 +174,10 @@ func New(nodeStore NodeStore, tenantStore TenantStore, projectStore ProjectStore
 		clientFactory: defaultClientFactory,
 		clients:       make(map[string]ProxmoxClient),
 		sem:           make(chan struct{}, maxConcurrentJobs),
+
+		lxcBridge: defaultLXCBridge,
+		mountRoot: defaultMountRoot,
+		appDir:    defaultFreeRadioDir,
 
 		healthTimeout:       60 * time.Second,
 		healthInterval:      5 * time.Second,
@@ -196,6 +204,21 @@ func (p *Provisioner) WithStationCreator(sc StationCreator, caddyDomain string) 
 // WithSSHClient sets the SSH client for executing commands on Proxmox hosts and in LXC containers.
 func (p *Provisioner) WithSSHClient(c SSHExec) {
 	p.sshClient = c
+}
+
+// WithTopology overrides the infrastructure layout the provisioner builds
+// commands against. Empty values keep the defaults, so a partially configured
+// deployment still behaves as before.
+func (p *Provisioner) WithTopology(bridge, mountRoot, appDir string) {
+	if bridge != "" {
+		p.lxcBridge = bridge
+	}
+	if mountRoot != "" {
+		p.mountRoot = mountRoot
+	}
+	if appDir != "" {
+		p.appDir = appDir
+	}
 }
 
 // AutoDeployEnabled reports whether a freeRadio repo is configured. With one,
@@ -377,7 +400,7 @@ func (p *Provisioner) doProvision(tenantID, nodeID, projectID, subdomain string,
 		if parts := strings.SplitN(proj.NetworkCIDR, "/", 2); len(parts) == 2 {
 			prefixLen = parts[1]
 		}
-		net0 := fmt.Sprintf("name=eth0,bridge=vmbr0,ip=%s/%s,gw=%s,firewall=1,type=veth", lxcIP, prefixLen, proj.Gateway)
+		net0 := fmt.Sprintf("name=eth0,bridge=%s,ip=%s/%s,gw=%s,firewall=1,type=veth", p.lxcBridge, lxcIP, prefixLen, proj.Gateway)
 		log.Info("provision: configuring network", "net0", net0)
 		if err := client.ConfigureNetwork(ctx, newID, net0); err != nil {
 			log.Error("provision: configure network", "error", err)
@@ -404,7 +427,7 @@ func (p *Provisioner) doProvision(tenantID, nodeID, projectID, subdomain string,
 		}
 
 		// Create directories on host
-		mkdirCmd := fmt.Sprintf("mkdir -p /mnt/tenants/%d/visuals /mnt/tenants/%d/music && chmod 777 /mnt/tenants/%d/visuals /mnt/tenants/%d/music", newID, newID, newID, newID)
+		mkdirCmd := fmt.Sprintf("mkdir -p %[1]s/%[2]d/visuals %[1]s/%[2]d/music && chmod 777 %[1]s/%[2]d/visuals %[1]s/%[2]d/music", p.mountRoot, newID)
 		log.Info("provision: creating host directories for mount points", "cmd", mkdirCmd)
 		if err := p.sshClient.ExecOnHost(ctx, sshHost, mkdirCmd); err != nil {
 			log.Error("provision: create host directories", "error", err)
@@ -413,7 +436,7 @@ func (p *Provisioner) doProvision(tenantID, nodeID, projectID, subdomain string,
 		}
 
 		// Configure mount points via pct set
-		pctCmd := fmt.Sprintf("pct set %d -mp0 /mnt/tenants/%d/visuals,mp=/root/freeRadio/content/visuals -mp1 /mnt/tenants/%d/music,mp=/root/freeRadio/content/music", newID, newID, newID)
+		pctCmd := fmt.Sprintf("pct set %[1]d -mp0 %[2]s/%[1]d/visuals,mp=%[3]s/content/visuals -mp1 %[2]s/%[1]d/music,mp=%[3]s/content/music", newID, p.mountRoot, p.appDir)
 		log.Info("provision: configuring mount points via SSH", "cmd", pctCmd)
 		if err := p.sshClient.ExecOnHost(ctx, sshHost, pctCmd); err != nil {
 			log.Error("provision: configure mount points via ssh", "error", err)
@@ -423,8 +446,8 @@ func (p *Provisioner) doProvision(tenantID, nodeID, projectID, subdomain string,
 	} else {
 		// Fallback to API (works with root@pam password auth, but not with API tokens)
 		mounts := map[string]string{
-			"mp0": fmt.Sprintf("/mnt/tenants/%d/visuals,mp=/root/freeRadio/content/visuals", newID),
-			"mp1": fmt.Sprintf("/mnt/tenants/%d/music,mp=/root/freeRadio/content/music", newID),
+			"mp0": fmt.Sprintf("%[1]s/%[2]d/visuals,mp=%[3]s/content/visuals", p.mountRoot, newID, p.appDir),
+			"mp1": fmt.Sprintf("%[1]s/%[2]d/music,mp=%[3]s/content/music", p.mountRoot, newID, p.appDir),
 		}
 		log.Info("provision: configuring mount points via API", "mounts", mounts)
 		if err := client.ConfigureMountPoints(ctx, newID, mounts); err != nil {
@@ -461,7 +484,7 @@ func (p *Provisioner) doProvision(tenantID, nodeID, projectID, subdomain string,
 		if sshHost, err := sshexec.ExtractHost(nodeInfo.ProxmoxURL); err != nil {
 			log.Warn("provision: extract ssh host from proxmox url", "error", err)
 		} else {
-			cmd := fmt.Sprintf("sed -i '/^DASHBOARD_TOKEN=/d' /root/freeRadio/.env && echo 'DASHBOARD_TOKEN=%s' >> /root/freeRadio/.env", dashToken)
+			cmd := fmt.Sprintf("sed -i '/^DASHBOARD_TOKEN=/d' %[1]s/.env && echo 'DASHBOARD_TOKEN=%[2]s' >> %[1]s/.env", p.appDir, dashToken)
 			if err := p.sshClient.ExecInContainer(ctx, sshHost, newID, cmd); err != nil {
 				log.Warn("provision: write dashboard token to container", "error", err)
 			} else {
@@ -747,7 +770,7 @@ func (p *Provisioner) deployFreeRadio(ctx context.Context, sshHost string, lxcID
 		"mkdir -p %[1]s && cd %[1]s && git init -q && "+
 			"(git remote add origin %[2]s 2>/dev/null || git remote set-url origin %[2]s) && "+
 			"git fetch --depth 1 origin %[3]s && git checkout -f -B %[3]s FETCH_HEAD",
-		freeRadioDir, repoURL, branch)
+		p.appDir, repoURL, branch)
 	if err := p.sshClient.ExecInContainer(ctx, sshHost, lxcID, fetchCmd); err != nil {
 		return fmt.Errorf("fetch repo: %w", err)
 	}
@@ -775,7 +798,7 @@ func (p *Provisioner) deployFreeRadio(ctx context.Context, sshHost string, lxcID
 			"NODE_ENV=production\n",
 		tenantID, dashboardToken, secrets.StreamKeys,
 		secrets.IcecastSource, secrets.IcecastAdmin, secrets.IcecastListen, secrets.IcecastRelay)
-	writeEnvCmd := fmt.Sprintf("cat > %s/.env << 'ENVEOF'\n%sENVEOF", freeRadioDir, envContent)
+	writeEnvCmd := fmt.Sprintf("cat > %s/.env << 'ENVEOF'\n%sENVEOF", p.appDir, envContent)
 	if err := p.sshClient.ExecInContainer(ctx, sshHost, lxcID, writeEnvCmd); err != nil {
 		return fmt.Errorf("write .env: %w", err)
 	}
@@ -786,14 +809,14 @@ func (p *Provisioner) deployFreeRadio(ctx context.Context, sshHost string, lxcID
 	// config hard-requires the pair. Without this the proxy exits at startup
 	// and nothing is reachable. Must happen before the stack comes up.
 	log.Info("provision: deploy — bootstrapping certificates")
-	certsCmd := fmt.Sprintf("cd %[1]s && chmod +x scripts/bootstrap-certs.sh && scripts/bootstrap-certs.sh", freeRadioDir)
+	certsCmd := fmt.Sprintf("cd %[1]s && chmod +x scripts/bootstrap-certs.sh && scripts/bootstrap-certs.sh", p.appDir)
 	if err := p.sshClient.ExecInContainer(ctx, sshHost, lxcID, certsCmd); err != nil {
 		return fmt.Errorf("bootstrap certs: %w", err)
 	}
 
 	// Step 5: Start the Docker services
 	log.Info("provision: deploy — starting docker compose")
-	composeCmd := fmt.Sprintf("cd %s && docker compose up -d", freeRadioDir)
+	composeCmd := fmt.Sprintf("cd %s && docker compose up -d", p.appDir)
 	if err := p.sshClient.ExecInContainer(ctx, sshHost, lxcID, composeCmd); err != nil {
 		return fmt.Errorf("docker compose up: %w", err)
 	}

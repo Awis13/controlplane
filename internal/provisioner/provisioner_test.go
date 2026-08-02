@@ -223,6 +223,7 @@ type mockProxmoxClient struct {
 	mountPointsCalled   bool
 	deletedIDs          []int
 	mountPointsReceived map[string]string
+	net0Received        string
 }
 
 func (m *mockProxmoxClient) GetNextID(_ context.Context) (int, error) {
@@ -275,7 +276,10 @@ func (m *mockProxmoxClient) DeleteContainer(_ context.Context, vmid int, _ bool)
 	return &mockWaiter{err: m.deleteWaitErr}, nil
 }
 
-func (m *mockProxmoxClient) ConfigureNetwork(_ context.Context, _ int, _ string) error {
+func (m *mockProxmoxClient) ConfigureNetwork(_ context.Context, _ int, net0 string) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.net0Received = net0
 	return nil
 }
 
@@ -2046,4 +2050,157 @@ func TestDeploy_StepOrder(t *testing.T) {
 	if len(commands) != len(want) {
 		t.Errorf("issued %d commands, want %d: %v", len(commands), len(want), commands)
 	}
+}
+
+// --- Topology ---
+
+// TestTopology_DefaultsMatchTheOldLiterals pins that a provisioner nobody
+// configured builds exactly the commands it built before topology moved into
+// config.
+func TestTopology_DefaultsMatchTheOldLiterals(t *testing.T) {
+	nodeStore := newMockNodeStore()
+	tenantStore := newMockTenantStore()
+	projectStore := newMockProjectStore()
+
+	proj := testProject()
+	n := testNode()
+	projectStore.projects[proj.ID] = proj
+	nodeStore.nodes[n.ID] = n
+
+	mockClient := &mockProxmoxClient{nextID: 105}
+	p := setupProvisioner(nodeStore, tenantStore, projectStore, mockClient, n.ID)
+
+	waitForProvision(p, "tenant-1", n.ID, proj.ID, "myapp", proj.RAMMB)
+
+	mockClient.mu.Lock()
+	defer mockClient.mu.Unlock()
+
+	if got := mockClient.mountPointsReceived["mp0"]; got != "/mnt/tenants/105/visuals,mp=/root/freeRadio/content/visuals" {
+		t.Errorf("mp0 = %q, want the previous literal", got)
+	}
+	if got := mockClient.mountPointsReceived["mp1"]; got != "/mnt/tenants/105/music,mp=/root/freeRadio/content/music" {
+		t.Errorf("mp1 = %q, want the previous literal", got)
+	}
+	if !strings.Contains(mockClient.net0Received, "bridge=vmbr0") {
+		t.Errorf("net0 = %q, want the previous bridge", mockClient.net0Received)
+	}
+}
+
+// TestTopology_ConfiguredValuesReachEveryCommand drives a fully non-default
+// topology through provisioning and the deploy.
+func TestTopology_ConfiguredValuesReachEveryCommand(t *testing.T) {
+	nodeStore := newMockNodeStore()
+	tenantStore := newMockTenantStore()
+	projectStore := newMockProjectStore()
+
+	proj := testProject()
+	n := testNode()
+	projectStore.projects[proj.ID] = proj
+	nodeStore.nodes[n.ID] = n
+
+	mockClient := &mockProxmoxClient{nextID: 105}
+	p := setupProvisioner(nodeStore, tenantStore, projectStore, mockClient, n.ID)
+	p.WithTopology("vmbr1", "/srv/tenants", "/opt/app")
+
+	ssh := &mockSSHExecWithDeployCalls{}
+	p.WithSSHClient(ssh)
+
+	waitForProvision(p, "tenant-1", n.ID, proj.ID, "myapp", proj.RAMMB)
+
+	mockClient.mu.Lock()
+	net0 := mockClient.net0Received
+	mockClient.mu.Unlock()
+
+	if !strings.Contains(net0, "bridge=vmbr1") {
+		t.Errorf("net0 = %q, want the configured bridge", net0)
+	}
+	if strings.Contains(net0, "vmbr0") {
+		t.Errorf("net0 = %q, still carries the default bridge", net0)
+	}
+
+	ssh.mu.Lock()
+	defer ssh.mu.Unlock()
+
+	var sawMkdir, sawPctSet bool
+	for _, call := range ssh.execOnHostCalls {
+		if strings.HasPrefix(call.Command, "mkdir -p") {
+			sawMkdir = true
+			if !strings.Contains(call.Command, "/srv/tenants/105/visuals") {
+				t.Errorf("mkdir = %q, want the configured mount root", call.Command)
+			}
+			if strings.Contains(call.Command, "/mnt/tenants") {
+				t.Errorf("mkdir = %q, still carries the default mount root", call.Command)
+			}
+		}
+		if strings.HasPrefix(call.Command, "pct set") {
+			sawPctSet = true
+			if !strings.Contains(call.Command, "/srv/tenants/105/visuals,mp=/opt/app/content/visuals") {
+				t.Errorf("pct set = %q, want the configured mount root and app dir", call.Command)
+			}
+			if strings.Contains(call.Command, "/root/freeRadio") {
+				t.Errorf("pct set = %q, still carries the default app dir", call.Command)
+			}
+		}
+	}
+	if !sawMkdir || !sawPctSet {
+		t.Fatalf("expected mkdir and pct set over SSH, got %+v", ssh.execOnHostCalls)
+	}
+
+	// The legacy dashboard token write targets the configured app directory too.
+	var sawTokenWrite bool
+	for _, call := range ssh.execInCtrCalls {
+		if strings.Contains(call.Command, "DASHBOARD_TOKEN=") {
+			sawTokenWrite = true
+			if !strings.Contains(call.Command, "/opt/app/.env") {
+				t.Errorf("token write = %q, want the configured app dir", call.Command)
+			}
+		}
+	}
+	if !sawTokenWrite {
+		t.Error("expected the legacy dashboard token write")
+	}
+}
+
+// TestTopology_ConfiguredAppDirReachesTheDeploy covers the auto-deploy path,
+// which builds its own commands against the app directory.
+func TestTopology_ConfiguredAppDirReachesTheDeploy(t *testing.T) {
+	p := New(newMockNodeStore(), newMockTenantStore(), newMockProjectStore(), "test-key")
+	ssh := &mockSSHExecWithDeployCalls{}
+	p.WithSSHClient(ssh)
+	p.WithFreeRadioRepo("https://github.com/example/freeRadio.git", "dev")
+	p.WithTopology("", "", "/opt/app")
+
+	if err := p.deployFreeRadio(context.Background(), "10.0.0.1", 105, "tenant-1", "dash-token"); err != nil {
+		t.Fatalf("deployFreeRadio: %v", err)
+	}
+
+	ssh.mu.Lock()
+	defer ssh.mu.Unlock()
+	for _, call := range ssh.execInCtrCalls {
+		if strings.Contains(call.Command, "/root/freeRadio") {
+			t.Errorf("deploy command still carries the default app dir: %q", call.Command)
+		}
+	}
+	if _, ok := findCommand(commandsOf(ssh.execInCtrCalls), "cd /opt/app && docker compose up -d"); !ok {
+		t.Errorf("expected compose to run in the configured app dir, got %+v", ssh.execInCtrCalls)
+	}
+}
+
+// TestTopology_EmptyValuesKeepDefaults pins that a partially configured
+// deployment keeps the previous behaviour for anything left unset.
+func TestTopology_EmptyValuesKeepDefaults(t *testing.T) {
+	p := New(newMockNodeStore(), newMockTenantStore(), newMockProjectStore(), "test-key")
+	p.WithTopology("", "", "")
+
+	if p.lxcBridge != "vmbr0" || p.mountRoot != "/mnt/tenants" || p.appDir != "/root/freeRadio" {
+		t.Errorf("empty overrides changed the defaults: %q %q %q", p.lxcBridge, p.mountRoot, p.appDir)
+	}
+}
+
+func commandsOf(calls []sshExecCall) []string {
+	out := make([]string, 0, len(calls))
+	for _, c := range calls {
+		out = append(out, c.Command)
+	}
+	return out
 }

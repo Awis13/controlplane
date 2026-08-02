@@ -9,27 +9,40 @@ import (
 )
 
 type Config struct {
-	DatabaseURL         string
-	ListenAddr          string
-	LogLevel            string
-	APIToken            string
-	EncryptionKey       string
-	WebAuthnRPID        string
-	WebAuthnOrigin      string
-	SetupToken          string            // optional: required for first WebAuthn registration
-	JWTSecret           string            // required: HMAC-SHA256 secret for user JWT tokens
-	RegistrationToken   string            // optional: if set, registration requires X-Registration-Token header
-	CookieSecure        bool              // optional: Secure flag on auth cookies (default: true, false for local dev)
-	CORSOrigins         []string          // optional: allowed CORS origins (default: localhost dev ports)
-	WGHubPublicKey      string            // optional: WireGuard hub public key
-	WGHubEndpoint       string            // optional: WireGuard hub endpoint (host:port)
-	WGNetworkCIDR       string            // optional: WireGuard network CIDR (default: 10.10.0.0/24)
-	CaddyAdminURL       string            // optional: Caddy Admin API URL (e.g. http://172.17.0.1:2019)
-	CaddyServerName     string            // optional: Caddy server name (default: srv1)
-	CaddyDomain         string            // optional: domain for tenant routes (default: example.com)
-	PollerInterval      time.Duration     // optional: station status poll interval (default: 10s)
-	JanitorInterval     time.Duration     // optional: expired-auth-state cleanup interval (default: 1h)
-	SSHKeyPath          string            // optional: path to SSH key for pct exec (default: /root/.ssh/id_ed25519)
+	DatabaseURL       string
+	ListenAddr        string
+	LogLevel          string
+	APIToken          string
+	EncryptionKey     string
+	WebAuthnRPID      string
+	WebAuthnOrigin    string
+	SetupToken        string        // optional: required for first WebAuthn registration
+	JWTSecret         string        // required: HMAC-SHA256 secret for user JWT tokens
+	RegistrationToken string        // optional: if set, registration requires X-Registration-Token header
+	CookieSecure      bool          // optional: Secure flag on auth cookies (default: true, false for local dev)
+	CORSOrigins       []string      // optional: allowed CORS origins (default: localhost dev ports)
+	WGHubPublicKey    string        // optional: WireGuard hub public key
+	WGHubEndpoint     string        // optional: WireGuard hub endpoint (host:port)
+	WGNetworkCIDR     string        // optional: WireGuard network CIDR (default: 10.10.0.0/24)
+	CaddyAdminURL     string        // optional: Caddy Admin API URL (e.g. http://172.17.0.1:2019)
+	CaddyServerName   string        // optional: Caddy server name (default: srv1)
+	CaddyDomain       string        // optional: domain for tenant routes (default: example.com)
+	PollerInterval    time.Duration // optional: station status poll interval (default: 10s)
+	JanitorInterval   time.Duration // optional: expired-auth-state cleanup interval (default: 1h)
+	SSHKeyPath        string        // optional: path to SSH key for pct exec (default: /root/.ssh/id_ed25519)
+	// Topology. Every default is the value that used to be hardcoded, so an
+	// unset environment behaves exactly as before. They exist so a deployment
+	// on different infrastructure does not need code edits.
+	LXCBridge         string // optional: Proxmox bridge for tenant NICs (default: vmbr0)
+	TenantMountRoot   string // optional: host directory holding tenant content mounts (default: /mnt/tenants)
+	TenantAppDir      string // optional: application directory inside the container (default: /root/freeRadio)
+	CaddyUpstreamPort string // optional: port Caddy proxies to on the tenant (default: 80)
+	SSHUser           string // optional: user for pct exec over SSH (default: root)
+	SSHPort           string // optional: SSH port on Proxmox nodes (default: 22)
+	WGInterface       string // optional: WireGuard interface name on the hub (default: wg0)
+	WGDNSAddr         string // optional: DNS address handed to WireGuard peers (default: 10.10.0.1)
+	WGKeepalive       int    // optional: PersistentKeepalive seconds for peers (default: 25)
+
 	FreeRadioRepoURL    string            // optional: freeRadio repo to auto-deploy into new tenants (empty disables auto-deploy)
 	FreeRadioRepoBranch string            // optional: branch to deploy (default: dev)
 	SSODomain           string            // optional: domain for SSO token URLs (default: example.com)
@@ -62,27 +75,37 @@ func Load() (*Config, error) {
 	corsOrigins := parseCORSOrigins(os.Getenv("CORS_ORIGINS"))
 
 	return &Config{
-		DatabaseURL:         dbURL,
-		ListenAddr:          getEnv("LISTEN_ADDR", "127.0.0.1:8080"),
-		LogLevel:            getEnv("LOG_LEVEL", "info"),
-		APIToken:            apiToken,
-		EncryptionKey:       encKey,
-		WebAuthnRPID:        os.Getenv("WEBAUTHN_RPID"),
-		WebAuthnOrigin:      os.Getenv("WEBAUTHN_ORIGIN"),
-		SetupToken:          os.Getenv("SETUP_TOKEN"),
-		JWTSecret:           jwtSecret,
-		CORSOrigins:         corsOrigins,
-		RegistrationToken:   os.Getenv("REGISTRATION_TOKEN"),
-		CookieSecure:        parseBool("COOKIE_SECURE", true),
-		WGHubPublicKey:      os.Getenv("WG_HUB_PUBLIC_KEY"),
-		WGHubEndpoint:       os.Getenv("WG_HUB_ENDPOINT"),
-		WGNetworkCIDR:       getEnv("WG_NETWORK_CIDR", "10.10.0.0/24"),
-		CaddyAdminURL:       os.Getenv("CADDY_ADMIN_URL"),
-		CaddyServerName:     getEnv("CADDY_SERVER_NAME", "srv1"),
-		CaddyDomain:         getEnv("CADDY_DOMAIN", "example.com"),
-		PollerInterval:      parseDuration("POLLER_INTERVAL", 10*time.Second),
-		JanitorInterval:     parseDuration("AUTH_JANITOR_INTERVAL", time.Hour),
-		SSHKeyPath:          getEnv("SSH_KEY_PATH", "/root/.ssh/id_ed25519"),
+		DatabaseURL:       dbURL,
+		ListenAddr:        getEnv("LISTEN_ADDR", "127.0.0.1:8080"),
+		LogLevel:          getEnv("LOG_LEVEL", "info"),
+		APIToken:          apiToken,
+		EncryptionKey:     encKey,
+		WebAuthnRPID:      os.Getenv("WEBAUTHN_RPID"),
+		WebAuthnOrigin:    os.Getenv("WEBAUTHN_ORIGIN"),
+		SetupToken:        os.Getenv("SETUP_TOKEN"),
+		JWTSecret:         jwtSecret,
+		CORSOrigins:       corsOrigins,
+		RegistrationToken: os.Getenv("REGISTRATION_TOKEN"),
+		CookieSecure:      parseBool("COOKIE_SECURE", true),
+		WGHubPublicKey:    os.Getenv("WG_HUB_PUBLIC_KEY"),
+		WGHubEndpoint:     os.Getenv("WG_HUB_ENDPOINT"),
+		WGNetworkCIDR:     getEnv("WG_NETWORK_CIDR", "10.10.0.0/24"),
+		CaddyAdminURL:     os.Getenv("CADDY_ADMIN_URL"),
+		CaddyServerName:   getEnv("CADDY_SERVER_NAME", "srv1"),
+		CaddyDomain:       getEnv("CADDY_DOMAIN", "example.com"),
+		PollerInterval:    parseDuration("POLLER_INTERVAL", 10*time.Second),
+		JanitorInterval:   parseDuration("AUTH_JANITOR_INTERVAL", time.Hour),
+		SSHKeyPath:        getEnv("SSH_KEY_PATH", "/root/.ssh/id_ed25519"),
+		LXCBridge:         getEnv("LXC_BRIDGE", "vmbr0"),
+		TenantMountRoot:   getEnv("TENANT_MOUNT_ROOT", "/mnt/tenants"),
+		TenantAppDir:      getEnv("TENANT_APP_DIR", "/root/freeRadio"),
+		CaddyUpstreamPort: getEnv("CADDY_UPSTREAM_PORT", "80"),
+		SSHUser:           getEnv("SSH_USER", "root"),
+		SSHPort:           getEnv("SSH_PORT", "22"),
+		WGInterface:       getEnv("WG_INTERFACE", "wg0"),
+		WGDNSAddr:         getEnv("WG_DNS_ADDR", "10.10.0.1"),
+		WGKeepalive:       parseInt("WG_KEEPALIVE_SECONDS", 25),
+
 		FreeRadioRepoURL:    os.Getenv("FREERADIO_REPO_URL"),
 		FreeRadioRepoBranch: getEnv("FREERADIO_REPO_BRANCH", "dev"),
 		SSODomain:           getEnv("SSO_DOMAIN", "example.com"),
@@ -130,6 +153,19 @@ func parseCORSOrigins(raw string) []string {
 // parseDuration parses a duration from an env var.
 // Accepts both Go duration format ("30s", "1m") and plain seconds ("30").
 // Falls back to the default if not set or invalid.
+// parseInt reads a positive integer, falling back on anything unparseable or
+// non-positive so a typo cannot turn a tuning value into zero.
+func parseInt(key string, fallback int) int {
+	v := os.Getenv(key)
+	if v == "" {
+		return fallback
+	}
+	if n, err := strconv.Atoi(v); err == nil && n > 0 {
+		return n
+	}
+	return fallback
+}
+
 func parseDuration(key string, fallback time.Duration) time.Duration {
 	v := os.Getenv(key)
 	if v == "" {

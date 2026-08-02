@@ -260,3 +260,95 @@ func TestLoad_FreeRadioFromEnv(t *testing.T) {
 		t.Errorf("FreeRadioRepoBranch = %q, want the configured branch to override the default", cfg.FreeRadioRepoBranch)
 	}
 }
+
+// --- Topology ---
+
+// TestLoad_TopologyDefaultsMatchTheOldLiterals pins that an unset environment
+// reproduces exactly the values that used to be hardcoded. If one of these
+// drifts, a deployment that never set the variable changes behaviour silently.
+func TestLoad_TopologyDefaults(t *testing.T) {
+	t.Setenv("DATABASE_URL", "postgres://localhost/test")
+	t.Setenv("API_TOKEN", "test-token")
+	t.Setenv("ENCRYPTION_KEY", "test-key")
+	t.Setenv("JWT_SECRET", "test-jwt-secret")
+	for _, k := range []string{
+		"LXC_BRIDGE", "TENANT_MOUNT_ROOT", "TENANT_APP_DIR", "CADDY_UPSTREAM_PORT",
+		"SSH_USER", "SSH_PORT", "WG_INTERFACE", "WG_DNS_ADDR", "WG_KEEPALIVE_SECONDS",
+	} {
+		os.Unsetenv(k)
+	}
+
+	cfg, err := Load()
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	checks := []struct {
+		name string
+		got  string
+		want string
+	}{
+		{"LXCBridge", cfg.LXCBridge, "vmbr0"},
+		{"TenantMountRoot", cfg.TenantMountRoot, "/mnt/tenants"},
+		{"TenantAppDir", cfg.TenantAppDir, "/root/freeRadio"},
+		{"CaddyUpstreamPort", cfg.CaddyUpstreamPort, "80"},
+		{"SSHUser", cfg.SSHUser, "root"},
+		{"SSHPort", cfg.SSHPort, "22"},
+		{"WGInterface", cfg.WGInterface, "wg0"},
+		{"WGDNSAddr", cfg.WGDNSAddr, "10.10.0.1"},
+	}
+	for _, c := range checks {
+		if c.got != c.want {
+			t.Errorf("%s = %q, want the previous literal %q", c.name, c.got, c.want)
+		}
+	}
+	if cfg.WGKeepalive != 25 {
+		t.Errorf("WGKeepalive = %d, want 25", cfg.WGKeepalive)
+	}
+}
+
+func TestLoad_TopologyFromEnv(t *testing.T) {
+	t.Setenv("DATABASE_URL", "postgres://localhost/test")
+	t.Setenv("API_TOKEN", "test-token")
+	t.Setenv("ENCRYPTION_KEY", "test-key")
+	t.Setenv("JWT_SECRET", "test-jwt-secret")
+	t.Setenv("LXC_BRIDGE", "vmbr1")
+	t.Setenv("TENANT_MOUNT_ROOT", "/srv/tenants")
+	t.Setenv("TENANT_APP_DIR", "/opt/app")
+	t.Setenv("CADDY_UPSTREAM_PORT", "8080")
+	t.Setenv("SSH_USER", "operator")
+	t.Setenv("SSH_PORT", "2222")
+	t.Setenv("WG_INTERFACE", "wg1")
+	t.Setenv("WG_DNS_ADDR", "10.20.0.1")
+	t.Setenv("WG_KEEPALIVE_SECONDS", "45")
+
+	cfg, err := Load()
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	if cfg.LXCBridge != "vmbr1" || cfg.TenantMountRoot != "/srv/tenants" || cfg.TenantAppDir != "/opt/app" {
+		t.Errorf("provisioner topology not read: %+v", cfg)
+	}
+	if cfg.CaddyUpstreamPort != "8080" || cfg.SSHUser != "operator" || cfg.SSHPort != "2222" {
+		t.Errorf("caddy or ssh topology not read: %+v", cfg)
+	}
+	if cfg.WGInterface != "wg1" || cfg.WGDNSAddr != "10.20.0.1" || cfg.WGKeepalive != 45 {
+		t.Errorf("wireguard topology not read: %+v", cfg)
+	}
+}
+
+// TestParseInt_RejectsNonsense pins that a typo falls back rather than turning a
+// tuning value into zero.
+func TestParseInt_RejectsNonsense(t *testing.T) {
+	for _, v := range []string{"", "abc", "0", "-5"} {
+		t.Setenv("TEST_PARSE_INT", v)
+		if got := parseInt("TEST_PARSE_INT", 25); got != 25 {
+			t.Errorf("parseInt(%q) = %d, want the fallback 25", v, got)
+		}
+	}
+	t.Setenv("TEST_PARSE_INT", "45")
+	if got := parseInt("TEST_PARSE_INT", 25); got != 45 {
+		t.Errorf("parseInt(\"45\") = %d, want 45", got)
+	}
+}

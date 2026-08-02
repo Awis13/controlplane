@@ -22,6 +22,9 @@ type Service struct {
 	hubPublicKey  string
 	hubEndpoint   string // e.g. 203.0.113.1:51820
 	networkCIDR   string // e.g. 10.10.0.0/24
+	iface         string // hub interface the peers are applied to
+	dnsAddr       string // DNS address handed to peers
+	keepalive     int    // PersistentKeepalive seconds
 }
 
 // NewService creates a new WireGuard service.
@@ -35,7 +38,41 @@ func NewService(store *Store, encryptionKey, hubPublicKey, hubEndpoint, networkC
 		hubPublicKey:  hubPublicKey,
 		hubEndpoint:   hubEndpoint,
 		networkCIDR:   networkCIDR,
+		iface:         defaultInterface,
+		dnsAddr:       defaultDNSAddr,
+		keepalive:     defaultKeepalive,
 	}
+}
+
+// Defaults are the values this service used before they became configurable.
+const (
+	defaultInterface = "wg0"
+	defaultDNSAddr   = "10.10.0.1"
+	defaultKeepalive = 25
+)
+
+// WithInterface overrides the hub interface peers are applied to.
+func (s *Service) WithInterface(name string) *Service {
+	if name != "" {
+		s.iface = name
+	}
+	return s
+}
+
+// WithDNSAddr overrides the DNS address handed to peers.
+func (s *Service) WithDNSAddr(addr string) *Service {
+	if addr != "" {
+		s.dnsAddr = addr
+	}
+	return s
+}
+
+// WithKeepalive overrides PersistentKeepalive. Non-positive keeps the default.
+func (s *Service) WithKeepalive(seconds int) *Service {
+	if seconds > 0 {
+		s.keepalive = seconds
+	}
+	return s
 }
 
 // GenerateKeypair generates a WireGuard key pair (privateKey, publicKey).
@@ -129,7 +166,7 @@ func (s *Service) BuildPeerConfig(peer *Peer, privateKey string) string {
 	var sb strings.Builder
 
 	// Derive DNS and AllowedIPs from networkCIDR
-	dnsAddr := "10.10.0.1"
+	dnsAddr := s.dnsAddr
 	peerAllowedIPs := s.networkCIDR
 	if prefix, err := netip.ParsePrefix(s.networkCIDR); err == nil {
 		// DNS = first address in subnet + 1 (gateway)
@@ -156,7 +193,7 @@ func (s *Service) BuildPeerConfig(peer *Peer, privateKey string) string {
 
 	sb.WriteString(fmt.Sprintf("AllowedIPs = %s\n", peerAllowedIPs))
 	sb.WriteString(fmt.Sprintf("Endpoint = %s\n", s.hubEndpoint))
-	sb.WriteString("PersistentKeepalive = 25\n")
+	sb.WriteString(fmt.Sprintf("PersistentKeepalive = %d\n", s.keepalive))
 
 	return sb.String()
 }
@@ -172,7 +209,7 @@ func (s *Service) GenerateQRCode(config string) ([]byte, error) {
 
 // ApplyPeer adds/updates a peer on the host's wg0 interface.
 func (s *Service) ApplyPeer(peer *Peer) error {
-	args := []string{"set", "wg0", "peer", peer.PublicKey, "allowed-ips", peer.AllowedIPs}
+	args := []string{"set", s.iface, "peer", peer.PublicKey, "allowed-ips", peer.AllowedIPs}
 
 	if peer.Endpoint != nil && *peer.Endpoint != "" {
 		args = append(args, "endpoint", *peer.Endpoint)
@@ -205,7 +242,7 @@ func (s *Service) ApplyPeer(peer *Peer) error {
 
 // RemovePeer removes a peer from the wg0 interface.
 func (s *Service) RemovePeer(publicKey string) error {
-	cmd := exec.Command("wg", "set", "wg0", "peer", publicKey, "remove")
+	cmd := exec.Command("wg", "set", s.iface, "peer", publicKey, "remove")
 	if output, err := cmd.CombinedOutput(); err != nil {
 		return fmt.Errorf("wg remove peer: %w (output: %s)", err, string(output))
 	}
@@ -252,7 +289,7 @@ func (s *Service) SyncPeers(ctx context.Context) error {
 
 // getWGPeers gets the list of public keys of current wg0 peers.
 func (s *Service) getWGPeers() ([]string, error) {
-	cmd := exec.Command("wg", "show", "wg0", "peers")
+	cmd := exec.Command("wg", "show", s.iface, "peers")
 	output, err := cmd.CombinedOutput()
 	if err != nil {
 		return nil, fmt.Errorf("wg show peers: %w", err)
