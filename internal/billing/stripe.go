@@ -87,12 +87,6 @@ func (s *Service) CreateCustomerPortalSession(customerID, returnURL string) (str
 	return session.URL, nil
 }
 
-// WebhookEvent represents a parsed and verified Stripe webhook event.
-type WebhookEvent struct {
-	Type string
-	Data json.RawMessage
-}
-
 // VerifyWebhook verifies the webhook signature and returns the parsed event.
 func (s *Service) VerifyWebhook(payload []byte, signature string) (*stripe.Event, error) {
 	event, err := webhook.ConstructEvent(payload, signature, s.webhookSecret)

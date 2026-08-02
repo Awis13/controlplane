@@ -341,6 +341,31 @@ func TestHandleSubscriptionDeleted_StoreErrors(t *testing.T) {
 	})
 }
 
+// --- handleInvoicePaymentFailed ---
+
+// TestHandleInvoicePaymentFailed pins that a failed payment only logs: the
+// tenant is left alone whether or not the invoice parses.
+func TestHandleInvoicePaymentFailed(t *testing.T) {
+	t.Run("valid invoice", func(t *testing.T) {
+		h, store := newTestHandler()
+		h.handleInvoicePaymentFailed(objectJSON(t, map[string]any{
+			"customer": "cus_123", "customer_email": "user@example.com",
+			"amount_due": 1500, "currency": "usd",
+		}))
+		if store.callCount() != 0 {
+			t.Errorf("expected no store calls, got %d", store.callCount())
+		}
+	})
+
+	t.Run("unparseable invoice", func(t *testing.T) {
+		h, store := newTestHandler()
+		h.handleInvoicePaymentFailed([]byte(`{"amount_due": "not-a-number"}`))
+		if store.callCount() != 0 {
+			t.Errorf("expected no store calls, got %d", store.callCount())
+		}
+	})
+}
+
 func TestHandleSubscriptionDeleted_UnparseableData(t *testing.T) {
 	h, store := newTestHandler()
 

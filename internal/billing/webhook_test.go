@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"sync"
@@ -464,6 +465,28 @@ func TestWebhook_HandlerLevelParseFailure(t *testing.T) {
 	}
 	if store.callCount() != 0 {
 		t.Errorf("expected no store calls after a parse failure, got %d", store.callCount())
+	}
+}
+
+// failingReader stands in for a request body that fails mid-read.
+type failingReader struct{}
+
+func (failingReader) Read([]byte) (int, error) { return 0, errors.New("connection reset") }
+
+func TestWebhook_BodyReadError_Returns400(t *testing.T) {
+	h, store := newTestHandler()
+
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/stripe/webhook", nil)
+	req.Body = io.NopCloser(failingReader{})
+	req.Header.Set("Stripe-Signature", "t=1,v1=deadbeef")
+	rec := httptest.NewRecorder()
+	h.Webhook(rec, req)
+
+	if rec.Code != http.StatusBadRequest {
+		t.Errorf("status = %d, want %d", rec.Code, http.StatusBadRequest)
+	}
+	if store.callCount() != 0 {
+		t.Errorf("expected no store calls, got %d", store.callCount())
 	}
 }
 
