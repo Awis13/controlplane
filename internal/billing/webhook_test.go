@@ -13,8 +13,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/stripe/stripe-go/v82"
-	"github.com/stripe/stripe-go/v82/webhook"
+	"github.com/stripe/stripe-go/v86"
+	"github.com/stripe/stripe-go/v86/webhook"
 )
 
 // --- Mock tenant store ---
@@ -298,28 +298,49 @@ func TestWebhook_TimestampTolerance(t *testing.T) {
 // TestWebhook_IncompatibleAPIVersion pins a non-obvious rejection: a correctly
 // signed event is still refused when its api_version is from a different Stripe
 // release train than the SDK expects.
+//
+// The basil case is the one with operational teeth. It is the train this
+// service ran on before the SDK moved to v86, so an endpoint left pinned to it
+// has every delivery rejected after the upgrade. Re-pinning the Stripe endpoint
+// to a dahlia version is part of deploying this, not an afterthought.
 func TestWebhook_IncompatibleAPIVersion(t *testing.T) {
-	h, store := newTestHandler()
-
-	payload, err := json.Marshal(map[string]any{
-		"id":          "evt_test_1",
-		"object":      "event",
-		"api_version": "2019-12-03",
-		"type":        EventCheckoutCompleted,
-		"data":        map[string]any{"object": checkoutSessionObject()},
-	})
-	if err != nil {
-		t.Fatalf("marshal event: %v", err)
+	tests := []struct {
+		name       string
+		apiVersion string
+		wantStatus int
+	}{
+		{name: "the train this SDK pins", apiVersion: stripe.APIVersion, wantStatus: http.StatusOK},
+		{name: "another date on the same train", apiVersion: "2026-05-27.dahlia", wantStatus: http.StatusOK},
+		{name: "the previous train, basil", apiVersion: "2025-08-27.basil", wantStatus: http.StatusBadRequest},
+		{name: "a version with no train at all", apiVersion: "2019-12-03", wantStatus: http.StatusBadRequest},
 	}
 
-	rec := httptest.NewRecorder()
-	h.Webhook(rec, signedRequest(payload, testWebhookSecret, time.Now()))
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			h, store := newTestHandler()
+			store.tenantsByOwner = []TenantBilling{{ID: "tenant-1", Tier: TierFree}}
 
-	if rec.Code != http.StatusBadRequest {
-		t.Errorf("status = %d, want %d", rec.Code, http.StatusBadRequest)
-	}
-	if store.callCount() != 0 {
-		t.Errorf("expected no store calls, got %d", store.callCount())
+			payload, err := json.Marshal(map[string]any{
+				"id":          "evt_test_1",
+				"object":      "event",
+				"api_version": tt.apiVersion,
+				"type":        EventCheckoutCompleted,
+				"data":        map[string]any{"object": checkoutSessionObject()},
+			})
+			if err != nil {
+				t.Fatalf("marshal event: %v", err)
+			}
+
+			rec := httptest.NewRecorder()
+			h.Webhook(rec, signedRequest(payload, testWebhookSecret, time.Now()))
+
+			if rec.Code != tt.wantStatus {
+				t.Errorf("status = %d, want %d", rec.Code, tt.wantStatus)
+			}
+			if tt.wantStatus == http.StatusBadRequest && store.callCount() != 0 {
+				t.Errorf("expected no store calls, got %d", store.callCount())
+			}
+		})
 	}
 }
 

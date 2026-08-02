@@ -5,10 +5,10 @@ import (
 	"fmt"
 	"log/slog"
 
-	"github.com/stripe/stripe-go/v82"
-	billingSession "github.com/stripe/stripe-go/v82/billingportal/session"
-	checkoutSession "github.com/stripe/stripe-go/v82/checkout/session"
-	"github.com/stripe/stripe-go/v82/webhook"
+	"github.com/stripe/stripe-go/v86"
+	billingSession "github.com/stripe/stripe-go/v86/billingportal/session"
+	checkoutSession "github.com/stripe/stripe-go/v86/checkout/session"
+	"github.com/stripe/stripe-go/v86/webhook"
 )
 
 // Event types we handle from Stripe webhooks.
