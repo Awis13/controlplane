@@ -440,7 +440,7 @@ func TestDelete_RefusedWhileTenantsExist(t *testing.T) {
 	if rec.Code != http.StatusConflict {
 		t.Errorf("status = %d, want 409", rec.Code)
 	}
-	if _, gone := store.projects[validProjectID]; !gone {
+	if _, present := store.projects[validProjectID]; !present {
 		t.Error("the project must survive a refused delete")
 	}
 }
@@ -475,7 +475,7 @@ func TestDelete_StoreErrors(t *testing.T) {
 		if rec.Code != http.StatusInternalServerError {
 			t.Errorf("status = %d, want 500", rec.Code)
 		}
-		if _, gone := store.projects[validProjectID]; !gone {
+		if _, present := store.projects[validProjectID]; !present {
 			t.Error("nothing should be deleted when the dependency check failed")
 		}
 	})

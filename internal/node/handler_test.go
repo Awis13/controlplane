@@ -39,6 +39,9 @@ type mockStore struct {
 	tenants   int
 	total     int
 
+	listLimit  int
+	listOffset int
+
 	createdToken string // what Create was handed, to check it was encrypted
 	updatedToken string
 }
@@ -56,6 +59,7 @@ func (m *mockStore) List(context.Context) ([]Node, error) {
 }
 
 func (m *mockStore) ListPaginated(_ context.Context, limit, offset int) ([]Node, int, error) {
+	m.listLimit, m.listOffset = limit, offset
 	if m.listErr != nil {
 		return nil, 0, m.listErr
 	}
@@ -209,6 +213,15 @@ func TestList_ReturnsNodes(t *testing.T) {
 	}
 	if len(body.Items) != 1 || body.Items[0].Name != "node-1" {
 		t.Errorf("items = %+v", body.Items)
+	}
+}
+
+func TestList_PaginationParamsReachTheStore(t *testing.T) {
+	store := newMockStore()
+	do(t, newTestHandler(store), http.MethodGet, "/nodes?limit=5&offset=10", "")
+
+	if store.listLimit != 5 || store.listOffset != 10 {
+		t.Errorf("store saw limit=%d offset=%d, want 5 and 10", store.listLimit, store.listOffset)
 	}
 }
 
@@ -588,7 +601,7 @@ func TestDelete_RefusedWhileTenantsExist(t *testing.T) {
 	if rec.Code != http.StatusConflict {
 		t.Errorf("status = %d, want 409", rec.Code)
 	}
-	if _, gone := store.nodes[validNodeID]; !gone {
+	if _, present := store.nodes[validNodeID]; !present {
 		t.Error("the node must survive a refused delete")
 	}
 }
@@ -623,7 +636,7 @@ func TestDelete_StoreErrors(t *testing.T) {
 		if rec.Code != http.StatusInternalServerError {
 			t.Errorf("status = %d, want 500", rec.Code)
 		}
-		if _, gone := store.nodes[validNodeID]; !gone {
+		if _, present := store.nodes[validNodeID]; !present {
 			t.Error("nothing should be deleted when the dependency check failed")
 		}
 	})
