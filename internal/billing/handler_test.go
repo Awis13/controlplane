@@ -213,7 +213,7 @@ func TestCreatePortal_Validation(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			h, store := newTestHandler()
 			customerID := "cus_123"
-			store.tenantsByOwner = []TenantBilling{{ID: "tenant-1", StripeCustomerID: &customerID}}
+			store.tenantsByOwnerIncludingDeleted = []TenantBilling{{ID: "tenant-1", StripeCustomerID: &customerID}}
 
 			rec := httptest.NewRecorder()
 			h.CreatePortal(rec, authedRequest(http.MethodPost, "/api/v1/billing/portal", tt.body))
@@ -267,7 +267,7 @@ func TestCreatePortal_NoStripeCustomer(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			h, store := newTestHandler()
-			store.tenantsByOwner = tt.tenants
+			store.tenantsByOwnerIncludingDeleted = tt.tenants
 
 			rec := httptest.NewRecorder()
 			h.CreatePortal(rec, authedRequest(http.MethodPost, "/api/v1/billing/portal", `{"return_url":"https://back"}`))
@@ -281,7 +281,7 @@ func TestCreatePortal_NoStripeCustomer(t *testing.T) {
 
 func TestCreatePortal_StoreError_Returns500(t *testing.T) {
 	h, store := newTestHandler()
-	store.byOwnerErr = errStore
+	store.byOwnerIncludingDeletedErr = errStore
 
 	rec := httptest.NewRecorder()
 	h.CreatePortal(rec, authedRequest(http.MethodPost, "/api/v1/billing/portal", `{"return_url":"https://back"}`))
@@ -300,7 +300,7 @@ func TestCreatePortal_PicksFirstTenantWithCustomerID(t *testing.T) {
 	empty := ""
 	second := "cus_second"
 	third := "cus_third"
-	store.tenantsByOwner = []TenantBilling{
+	store.tenantsByOwnerIncludingDeleted = []TenantBilling{
 		{ID: "tenant-1", StripeCustomerID: &empty},
 		{ID: "tenant-2", StripeCustomerID: &second},
 		{ID: "tenant-3", StripeCustomerID: &third},
@@ -322,13 +322,108 @@ func TestCreatePortal_StripeError_Returns500(t *testing.T) {
 
 	h, store := newTestHandler()
 	customerID := "cus_123"
-	store.tenantsByOwner = []TenantBilling{{ID: "tenant-1", StripeCustomerID: &customerID}}
+	store.tenantsByOwnerIncludingDeleted = []TenantBilling{{ID: "tenant-1", StripeCustomerID: &customerID}}
 
 	rec := httptest.NewRecorder()
 	h.CreatePortal(rec, authedRequest(http.MethodPost, "/api/v1/billing/portal", `{"return_url":"https://back"}`))
 
 	if rec.Code != http.StatusInternalServerError {
 		t.Errorf("status = %d, want %d", rec.Code, http.StatusInternalServerError)
+	}
+}
+
+// TestCreatePortal_DeletedTenantStillFindsCustomer pins that a portal request
+// still works when the only tenant carrying a Stripe customer is soft-deleted:
+// the subscription outlived the studio, and the owner must be able to manage it.
+func TestCreatePortal_DeletedTenantStillFindsCustomer(t *testing.T) {
+	mockStripeBackend(t, http.StatusOK, `{"id":"bps_test_1","object":"billing_portal.session","url":"https://billing.stripe.com/session/bps_test_1"}`)
+
+	h, store := newTestHandler()
+	customerID := "cus_123"
+	store.tenantsByOwnerIncludingDeleted = []TenantBilling{
+		{ID: "tenant-1", Status: "deleted", StripeCustomerID: &customerID},
+	}
+
+	rec := httptest.NewRecorder()
+	h.CreatePortal(rec, authedRequest(http.MethodPost, "/api/v1/billing/portal", `{"return_url":"https://back"}`))
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d (body: %s)", rec.Code, http.StatusOK, rec.Body.String())
+	}
+	if got := decodeURLResponse(t, rec); got != "https://billing.stripe.com/session/bps_test_1" {
+		t.Errorf("url = %q, want the portal URL from Stripe", got)
+	}
+}
+
+// TestCreatePortal_ExplicitCustomerID_Owned pins that an explicit customer_id
+// belonging to one of the owner's tenants is honored.
+func TestCreatePortal_ExplicitCustomerID_Owned(t *testing.T) {
+	mockStripeBackend(t, http.StatusOK, `{"id":"bps_test_1","object":"billing_portal.session","url":"https://billing.stripe.com/session/bps_test_1"}`)
+
+	h, store := newTestHandler()
+	owned := "cus_owned"
+	other := "cus_other"
+	store.tenantsByOwnerIncludingDeleted = []TenantBilling{
+		{ID: "tenant-1", Status: "deleted", StripeCustomerID: &owned},
+		{ID: "tenant-2", StripeCustomerID: &other},
+	}
+
+	rec := httptest.NewRecorder()
+	h.CreatePortal(rec, authedRequest(http.MethodPost, "/api/v1/billing/portal",
+		`{"return_url":"https://back","customer_id":"cus_owned"}`))
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d (body: %s)", rec.Code, http.StatusOK, rec.Body.String())
+	}
+	if got := decodeURLResponse(t, rec); got != "https://billing.stripe.com/session/bps_test_1" {
+		t.Errorf("url = %q, want the portal URL from Stripe", got)
+	}
+}
+
+// TestCreatePortal_ExplicitCustomerID_NotOwned pins that a customer_id the
+// owner does not own is refused with 403, so one user cannot open a portal for
+// another user's subscription.
+func TestCreatePortal_ExplicitCustomerID_NotOwned(t *testing.T) {
+	h, store := newTestHandler()
+	owned := "cus_owned"
+	store.tenantsByOwnerIncludingDeleted = []TenantBilling{
+		{ID: "tenant-1", StripeCustomerID: &owned},
+	}
+
+	rec := httptest.NewRecorder()
+	h.CreatePortal(rec, authedRequest(http.MethodPost, "/api/v1/billing/portal",
+		`{"return_url":"https://back","customer_id":"cus_someone_elses"}`))
+
+	if rec.Code != http.StatusForbidden {
+		t.Errorf("status = %d, want %d (body: %s)", rec.Code, http.StatusForbidden, rec.Body.String())
+	}
+	if store.callCount() != 1 {
+		t.Errorf("expected exactly the owner lookup, got %d store calls", store.callCount())
+	}
+}
+
+// TestCreatePortal_DefaultPrefersNonDeleted pins that with no explicit
+// customer_id the default picks a non-deleted tenant with a customer ID before
+// falling back to a deleted one.
+func TestCreatePortal_DefaultPrefersNonDeleted(t *testing.T) {
+	mockStripeBackend(t, http.StatusOK, `{"id":"bps_test_1","object":"billing_portal.session","url":"https://billing.stripe.com/session/bps_test_1"}`)
+
+	h, store := newTestHandler()
+	deleted := "cus_deleted"
+	active := "cus_active"
+	store.tenantsByOwnerIncludingDeleted = []TenantBilling{
+		{ID: "tenant-1", Status: "deleted", StripeCustomerID: &deleted},
+		{ID: "tenant-2", Status: "active", StripeCustomerID: &active},
+	}
+
+	rec := httptest.NewRecorder()
+	h.CreatePortal(rec, authedRequest(http.MethodPost, "/api/v1/billing/portal", `{"return_url":"https://back"}`))
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d (body: %s)", rec.Code, http.StatusOK, rec.Body.String())
+	}
+	if got := decodeURLResponse(t, rec); got != "https://billing.stripe.com/session/bps_test_1" {
+		t.Errorf("url = %q, want the portal URL from Stripe", got)
 	}
 }
 
@@ -411,7 +506,7 @@ func TestServiceSessionErrorsAreWrapped(t *testing.T) {
 func TestStatus_ReportsTierLimits(t *testing.T) {
 	h, store := newTestHandler()
 	customerID := "cus_123"
-	store.tenantsByOwner = []TenantBilling{
+	store.tenantsByOwnerIncludingDeleted = []TenantBilling{
 		{ID: "tenant-1", Name: "one", Tier: TierPro, StripeCustomerID: &customerID},
 		{ID: "tenant-2", Name: "two", Tier: TierFree},
 	}
@@ -427,6 +522,7 @@ func TestStatus_ReportsTierLimits(t *testing.T) {
 		Tenants []struct {
 			TenantID  string     `json:"tenant_id"`
 			Tier      string     `json:"tier"`
+			Status    string     `json:"status"`
 			Limits    TierLimits `json:"limits"`
 			HasStripe bool       `json:"has_stripe"`
 		} `json:"tenants"`
@@ -445,9 +541,46 @@ func TestStatus_ReportsTierLimits(t *testing.T) {
 	}
 }
 
+// TestStatus_IncludesDeletedWithStatus pins that a soft-deleted tenant is still
+// reported, but marked with its status so WEB-3 does not treat it as available.
+func TestStatus_IncludesDeletedWithStatus(t *testing.T) {
+	h, store := newTestHandler()
+	customerID := "cus_123"
+	store.tenantsByOwnerIncludingDeleted = []TenantBilling{
+		{ID: "tenant-1", Name: "gone", Tier: TierPro, Status: "deleted", StripeCustomerID: &customerID},
+		{ID: "tenant-2", Name: "alive", Tier: TierFree, Status: "active"},
+	}
+
+	rec := httptest.NewRecorder()
+	h.Status(rec, authedRequest(http.MethodGet, "/api/v1/billing/status", ""))
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d (body: %s)", rec.Code, http.StatusOK, rec.Body.String())
+	}
+
+	var body struct {
+		Tenants []struct {
+			TenantID string `json:"tenant_id"`
+			Status   string `json:"status"`
+		} `json:"tenants"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if len(body.Tenants) != 2 {
+		t.Fatalf("tenants = %d, want 2 (deleted must still be listed)", len(body.Tenants))
+	}
+	if body.Tenants[0].Status != "deleted" {
+		t.Errorf("deleted tenant status = %q, want %q", body.Tenants[0].Status, "deleted")
+	}
+	if body.Tenants[1].Status != "active" {
+		t.Errorf("active tenant status = %q, want %q", body.Tenants[1].Status, "active")
+	}
+}
+
 func TestStatus_StoreError_Returns500(t *testing.T) {
 	h, store := newTestHandler()
-	store.byOwnerErr = errStore
+	store.byOwnerIncludingDeletedErr = errStore
 
 	rec := httptest.NewRecorder()
 	h.Status(rec, authedRequest(http.MethodGet, "/api/v1/billing/status", ""))
@@ -459,7 +592,7 @@ func TestStatus_StoreError_Returns500(t *testing.T) {
 
 func TestStatus_NoTenants_ReturnsEmptyList(t *testing.T) {
 	h, store := newTestHandler()
-	store.tenantsByOwner = nil
+	store.tenantsByOwnerIncludingDeleted = nil
 
 	rec := httptest.NewRecorder()
 	h.Status(rec, authedRequest(http.MethodGet, "/api/v1/billing/status", ""))

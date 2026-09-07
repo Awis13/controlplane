@@ -387,6 +387,7 @@ func (a *billingTenantStoreAdapter) GetByStripeCustomerID(ctx context.Context, c
 		ID:                   t.ID,
 		Name:                 t.Name,
 		Tier:                 t.Tier,
+		Status:               t.Status,
 		StripeCustomerID:     t.StripeCustomerID,
 		StripeSubscriptionID: t.StripeSubscriptionID,
 		OwnerID:              t.OwnerID,
@@ -404,6 +405,27 @@ func (a *billingTenantStoreAdapter) GetByOwnerID(ctx context.Context, ownerID st
 			ID:                   t.ID,
 			Name:                 t.Name,
 			Tier:                 t.Tier,
+			Status:               t.Status,
+			StripeCustomerID:     t.StripeCustomerID,
+			StripeSubscriptionID: t.StripeSubscriptionID,
+			OwnerID:              t.OwnerID,
+		}
+	}
+	return result, nil
+}
+
+func (a *billingTenantStoreAdapter) GetByOwnerIDIncludingDeleted(ctx context.Context, ownerID string) ([]billing.TenantBilling, error) {
+	tenants, err := a.store.GetBillingByOwnerIDIncludingDeleted(ctx, ownerID)
+	if err != nil {
+		return nil, err
+	}
+	result := make([]billing.TenantBilling, len(tenants))
+	for i, t := range tenants {
+		result[i] = billing.TenantBilling{
+			ID:                   t.ID,
+			Name:                 t.Name,
+			Tier:                 t.Tier,
+			Status:               t.Status,
 			StripeCustomerID:     t.StripeCustomerID,
 			StripeSubscriptionID: t.StripeSubscriptionID,
 			OwnerID:              t.OwnerID,

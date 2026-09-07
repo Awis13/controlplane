@@ -632,19 +632,23 @@ type BillingTenant struct {
 	ID                   string  `json:"id"`
 	Name                 string  `json:"name"`
 	Tier                 string  `json:"tier"`
+	Status               string  `json:"status"`
 	StripeCustomerID     *string `json:"stripe_customer_id,omitempty"`
 	StripeSubscriptionID *string `json:"stripe_subscription_id,omitempty"`
 	OwnerID              *string `json:"owner_id,omitempty"`
 }
 
-// GetByStripeCustomerID returns a tenant by its Stripe customer ID.
+// GetByStripeCustomerID returns a tenant by its Stripe customer ID. It includes
+// soft-deleted tenants: a webhook must still find the mapping by customer even
+// after the tenant was deleted, so a late subscription event can downgrade the
+// (already deleted) record instead of being dropped.
 func (s *Store) GetByStripeCustomerID(ctx context.Context, customerID string) (*BillingTenant, error) {
 	var t BillingTenant
 	err := s.pool.QueryRow(ctx,
-		`SELECT id, name, tier, stripe_customer_id, stripe_subscription_id, owner_id
-		 FROM tenants WHERE stripe_customer_id = $1 AND status NOT IN ('deleted')
+		`SELECT id, name, tier, status, stripe_customer_id, stripe_subscription_id, owner_id
+		 FROM tenants WHERE stripe_customer_id = $1
 		 LIMIT 1`, customerID).
-		Scan(&t.ID, &t.Name, &t.Tier, &t.StripeCustomerID, &t.StripeSubscriptionID, &t.OwnerID)
+		Scan(&t.ID, &t.Name, &t.Tier, &t.Status, &t.StripeCustomerID, &t.StripeSubscriptionID, &t.OwnerID)
 	if err != nil {
 		if err == pgx.ErrNoRows {
 			return nil, nil
@@ -657,7 +661,7 @@ func (s *Store) GetByStripeCustomerID(ctx context.Context, customerID string) (*
 // GetBillingByOwnerID returns billing info for all non-deleted tenants belonging to a user.
 func (s *Store) GetBillingByOwnerID(ctx context.Context, ownerID string) ([]BillingTenant, error) {
 	rows, err := s.pool.Query(ctx,
-		`SELECT id, name, tier, stripe_customer_id, stripe_subscription_id, owner_id
+		`SELECT id, name, tier, status, stripe_customer_id, stripe_subscription_id, owner_id
 		 FROM tenants
 		 WHERE owner_id = $1 AND status NOT IN ('deleted')
 		 ORDER BY created_at DESC`, ownerID)
@@ -669,7 +673,37 @@ func (s *Store) GetBillingByOwnerID(ctx context.Context, ownerID string) ([]Bill
 	var tenants []BillingTenant
 	for rows.Next() {
 		var t BillingTenant
-		if err := rows.Scan(&t.ID, &t.Name, &t.Tier, &t.StripeCustomerID, &t.StripeSubscriptionID, &t.OwnerID); err != nil {
+		if err := rows.Scan(&t.ID, &t.Name, &t.Tier, &t.Status, &t.StripeCustomerID, &t.StripeSubscriptionID, &t.OwnerID); err != nil {
+			return nil, fmt.Errorf("scan billing tenant: %w", err)
+		}
+		tenants = append(tenants, t)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("iterate billing tenants: %w", err)
+	}
+
+	return tenants, nil
+}
+
+// GetBillingByOwnerIDIncludingDeleted returns billing info for all tenants
+// belonging to a user, including soft-deleted ones. The billing portal and
+// status endpoints must find billing references even after a tenant was deleted,
+// so the owner can still manage the Stripe subscription that outlived the studio.
+func (s *Store) GetBillingByOwnerIDIncludingDeleted(ctx context.Context, ownerID string) ([]BillingTenant, error) {
+	rows, err := s.pool.Query(ctx,
+		`SELECT id, name, tier, status, stripe_customer_id, stripe_subscription_id, owner_id
+		 FROM tenants
+		 WHERE owner_id = $1
+		 ORDER BY created_at DESC`, ownerID)
+	if err != nil {
+		return nil, fmt.Errorf("query billing tenants by owner including deleted: %w", err)
+	}
+	defer rows.Close()
+
+	var tenants []BillingTenant
+	for rows.Next() {
+		var t BillingTenant
+		if err := rows.Scan(&t.ID, &t.Name, &t.Tier, &t.Status, &t.StripeCustomerID, &t.StripeSubscriptionID, &t.OwnerID); err != nil {
 			return nil, fmt.Errorf("scan billing tenant: %w", err)
 		}
 		tenants = append(tenants, t)

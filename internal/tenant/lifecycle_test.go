@@ -783,6 +783,41 @@ func TestLifecycleDelete_ReturnsRefreshedTenant(t *testing.T) {
 
 // --- Error plumbing ---
 
+// TestLifecycleDelete_DoesNotCancelStripe pins SEC-05: deleting a tenant is a
+// soft delete that must not cancel its Stripe subscription. The lifecycle has
+// no Stripe dependency at all, so the only external side effect is deprovisioning
+// the container; the tenant's Stripe customer and subscription references are
+// left untouched so the billing portal can still manage the subscription that
+// outlived the studio.
+func TestLifecycleDelete_DoesNotCancelStripe(t *testing.T) {
+	f := newLifecycleFixture()
+	customer := "cus_123"
+	sub := "sub_123"
+	tn := &Tenant{ID: "t-1", ProjectID: "proj-1", NodeID: "node-1", Subdomain: "myapp",
+		Status:           "active",
+		StripeCustomerID: &customer, StripeSubscriptionID: &sub, Tier: "studio"}
+	f.store.tenants[tn.ID] = tn
+
+	if _, err := f.service.Delete(context.Background(), tn, Actor{}); err != nil {
+		t.Fatalf("Delete: %v", err)
+	}
+
+	got := f.store.tenants["t-1"]
+	if got.Status != "deleted" {
+		t.Fatalf("status = %q, want deleted", got.Status)
+	}
+	// The Stripe references must survive the delete: no cancel, no clearing.
+	if got.StripeCustomerID == nil || *got.StripeCustomerID != customer {
+		t.Errorf("stripe customer = %v, want %q preserved", got.StripeCustomerID, customer)
+	}
+	if got.StripeSubscriptionID == nil || *got.StripeSubscriptionID != sub {
+		t.Errorf("stripe subscription = %v, want %q preserved", got.StripeSubscriptionID, sub)
+	}
+	if got.Tier != "studio" {
+		t.Errorf("tier = %q, want %q preserved", got.Tier, "studio")
+	}
+}
+
 func TestLifecycleError_UnwrapsCause(t *testing.T) {
 	err := internal("failed to delete tenant", errBoom)
 

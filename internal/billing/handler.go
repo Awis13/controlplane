@@ -16,6 +16,7 @@ type TenantStore interface {
 	UpdateBilling(ctx context.Context, tenantID, stripeCustomerID, stripeSubscriptionID, tier string) error
 	GetByStripeCustomerID(ctx context.Context, customerID string) (*TenantBilling, error)
 	GetByOwnerID(ctx context.Context, ownerID string) ([]TenantBilling, error)
+	GetByOwnerIDIncludingDeleted(ctx context.Context, ownerID string) ([]TenantBilling, error)
 }
 
 // TenantBilling is a lightweight struct for billing operations.
@@ -23,6 +24,7 @@ type TenantBilling struct {
 	ID                   string  `json:"id"`
 	Name                 string  `json:"name"`
 	Tier                 string  `json:"tier"`
+	Status               string  `json:"status"`
 	StripeCustomerID     *string `json:"stripe_customer_id,omitempty"`
 	StripeSubscriptionID *string `json:"stripe_subscription_id,omitempty"`
 	OwnerID              *string `json:"owner_id,omitempty"`
@@ -124,7 +126,8 @@ func (h *Handler) CreatePortal(w http.ResponseWriter, r *http.Request) {
 	}
 
 	var req struct {
-		ReturnURL string `json:"return_url"`
+		ReturnURL  string `json:"return_url"`
+		CustomerID string `json:"customer_id"`
 	}
 	if err := response.Decode(r, &req); err != nil {
 		response.Error(w, http.StatusBadRequest, "invalid request body")
@@ -136,20 +139,51 @@ func (h *Handler) CreatePortal(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Find user's tenant to get stripe_customer_id
-	tenants, err := h.tenantStore.GetByOwnerID(r.Context(), u.ID.String())
+	// Find the user's tenants, including soft-deleted ones: a deleted studio
+	// may still carry a live Stripe subscription the owner needs to manage.
+	tenants, err := h.tenantStore.GetByOwnerIDIncludingDeleted(r.Context(), u.ID.String())
 	if err != nil {
 		slog.Error("billing: get tenants by owner", "error", err, "user_id", u.ID)
 		response.Error(w, http.StatusInternalServerError, "failed to look up billing info")
 		return
 	}
 
-	// Find a tenant with a Stripe customer ID
+	// An explicit customer_id must belong to one of the owner's tenants.
+	if req.CustomerID != "" {
+		owned := false
+		for _, t := range tenants {
+			if t.StripeCustomerID != nil && *t.StripeCustomerID == req.CustomerID {
+				owned = true
+				break
+			}
+		}
+		if !owned {
+			response.Error(w, http.StatusForbidden, "customer not owned by user")
+			return
+		}
+	}
+
+	// Pick the customer to manage. With no explicit ID the choice is
+	// deterministic: prefer a non-deleted tenant with a customer ID (the old
+	// behavior), and fall back to any tenant with a customer ID so the portal
+	// still works after the last paid studio was deleted.
 	var customerID string
-	for _, t := range tenants {
-		if t.StripeCustomerID != nil && *t.StripeCustomerID != "" {
-			customerID = *t.StripeCustomerID
-			break
+	if req.CustomerID != "" {
+		customerID = req.CustomerID
+	} else {
+		for _, t := range tenants {
+			if t.Status != "deleted" && t.StripeCustomerID != nil && *t.StripeCustomerID != "" {
+				customerID = *t.StripeCustomerID
+				break
+			}
+		}
+		if customerID == "" {
+			for _, t := range tenants {
+				if t.StripeCustomerID != nil && *t.StripeCustomerID != "" {
+					customerID = *t.StripeCustomerID
+					break
+				}
+			}
 		}
 	}
 
@@ -181,7 +215,10 @@ func (h *Handler) Status(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	tenants, err := h.tenantStore.GetByOwnerID(r.Context(), u.ID.String())
+	// Include soft-deleted tenants so the owner still sees the billing state of
+	// a studio whose subscription outlived it. Deleted studios are shown but
+	// marked, so WEB-3 does not treat them as available for SSO.
+	tenants, err := h.tenantStore.GetByOwnerIDIncludingDeleted(r.Context(), u.ID.String())
 	if err != nil {
 		slog.Error("billing: get tenants by owner", "error", err, "user_id", u.ID)
 		response.Error(w, http.StatusInternalServerError, "failed to look up billing info")
@@ -192,6 +229,7 @@ func (h *Handler) Status(w http.ResponseWriter, r *http.Request) {
 		TenantID   string     `json:"tenant_id"`
 		TenantName string     `json:"tenant_name"`
 		Tier       string     `json:"tier"`
+		Status     string     `json:"status"`
 		Limits     TierLimits `json:"limits"`
 		HasStripe  bool       `json:"has_stripe"`
 	}
@@ -202,6 +240,7 @@ func (h *Handler) Status(w http.ResponseWriter, r *http.Request) {
 			TenantID:   t.ID,
 			TenantName: t.Name,
 			Tier:       t.Tier,
+			Status:     t.Status,
 			Limits:     GetLimits(t.Tier),
 			HasStripe:  t.StripeCustomerID != nil && *t.StripeCustomerID != "",
 		})

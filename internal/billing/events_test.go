@@ -504,3 +504,59 @@ func TestHandleSubscriptionDeleted_UnparseableData(t *testing.T) {
 		t.Errorf("expected no store calls for unparseable data, got %d", store.callCount())
 	}
 }
+
+// TestHandleSubscriptionDeleted_FindsDeletedTenant pins that a subscription
+// deletion still reaches a soft-deleted tenant: GetByStripeCustomerID now
+// includes deleted rows, so the downgrade lands on the record that still holds
+// the subscription reference. UpdateBilling does not touch status, so the
+// deleted tenant is not resurrected.
+func TestHandleSubscriptionDeleted_FindsDeletedTenant(t *testing.T) {
+	h, store := newTestHandler()
+	store.tenantByCustomer = &TenantBilling{ID: "tenant-1", Tier: TierStudio, Status: "deleted"}
+
+	mustHandle(t, h.handleSubscriptionDeleted(context.Background(), objectJSON(t, subscriptionObject("price_studio"))))
+
+	if len(store.byCustomerCalls) != 1 {
+		t.Fatalf("GetByStripeCustomerID calls = %d, want 1", len(store.byCustomerCalls))
+	}
+	if len(store.updateBillingCalls) != 1 {
+		t.Fatalf("UpdateBilling calls = %d, want 1", len(store.updateBillingCalls))
+	}
+	got := store.updateBillingCalls[0]
+	want := updateBillingCall{
+		TenantID:       "tenant-1",
+		CustomerID:     "cus_123",
+		SubscriptionID: "",
+		Tier:           TierFree,
+	}
+	if got != want {
+		t.Errorf("UpdateBilling = %+v, want %+v", got, want)
+	}
+}
+
+// TestHandleSubscriptionUpdated_FindsDeletedTenant pins the same reachability
+// for subscription updates: a late update for a deleted tenant's subscription
+// is applied to the deleted record, and the status is left untouched.
+func TestHandleSubscriptionUpdated_FindsDeletedTenant(t *testing.T) {
+	h, store := newTestHandler()
+	store.tenantByCustomer = &TenantBilling{ID: "tenant-1", Tier: TierPro, Status: "deleted"}
+
+	mustHandle(t, h.handleSubscriptionUpdated(context.Background(), objectJSON(t, subscriptionObject("price_pro"))))
+
+	if len(store.byCustomerCalls) != 1 {
+		t.Fatalf("GetByStripeCustomerID calls = %d, want 1", len(store.byCustomerCalls))
+	}
+	if len(store.updateBillingCalls) != 1 {
+		t.Fatalf("UpdateBilling calls = %d, want 1", len(store.updateBillingCalls))
+	}
+	got := store.updateBillingCalls[0]
+	want := updateBillingCall{
+		TenantID:       "tenant-1",
+		CustomerID:     "cus_123",
+		SubscriptionID: "sub_123",
+		Tier:           TierPro,
+	}
+	if got != want {
+		t.Errorf("UpdateBilling = %+v, want %+v", got, want)
+	}
+}

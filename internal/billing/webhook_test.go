@@ -32,13 +32,16 @@ type mockTenantStore struct {
 	updateBillingCalls []updateBillingCall
 	byCustomerCalls    []string
 	byOwnerCalls       []string
+	byOwnerIncDelCalls []string
 
 	// Configurable responses.
-	tenantByCustomer *TenantBilling
-	tenantsByOwner   []TenantBilling
-	updateBillingErr error
-	byCustomerErr    error
-	byOwnerErr       error
+	tenantByCustomer               *TenantBilling
+	tenantsByOwner                 []TenantBilling
+	tenantsByOwnerIncludingDeleted []TenantBilling
+	updateBillingErr               error
+	byCustomerErr                  error
+	byOwnerErr                     error
+	byOwnerIncludingDeletedErr     error
 }
 
 func (m *mockTenantStore) UpdateBilling(_ context.Context, tenantID, stripeCustomerID, stripeSubscriptionID, tier string) error {
@@ -73,12 +76,22 @@ func (m *mockTenantStore) GetByOwnerID(_ context.Context, ownerID string) ([]Ten
 	return m.tenantsByOwner, nil
 }
 
+func (m *mockTenantStore) GetByOwnerIDIncludingDeleted(_ context.Context, ownerID string) ([]TenantBilling, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.byOwnerIncDelCalls = append(m.byOwnerIncDelCalls, ownerID)
+	if m.byOwnerIncludingDeletedErr != nil {
+		return nil, m.byOwnerIncludingDeletedErr
+	}
+	return m.tenantsByOwnerIncludingDeleted, nil
+}
+
 // callCount returns the total number of store calls, used to assert that a
 // request produced no side effects at all.
 func (m *mockTenantStore) callCount() int {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	return len(m.updateBillingCalls) + len(m.byCustomerCalls) + len(m.byOwnerCalls)
+	return len(m.updateBillingCalls) + len(m.byCustomerCalls) + len(m.byOwnerCalls) + len(m.byOwnerIncDelCalls)
 }
 
 // --- Helpers ---
