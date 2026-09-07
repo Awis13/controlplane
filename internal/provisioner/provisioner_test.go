@@ -85,6 +85,13 @@ func (m *mockTenantStore) SetActive(_ context.Context, id string, lxcID int) err
 	return nil
 }
 
+func (m *mockTenantStore) SetLXCID(_ context.Context, id string, lxcID int) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.lxcIDs[id] = lxcID
+	return nil
+}
+
 func (m *mockTenantStore) SetError(_ context.Context, id string, errMsg string) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -1618,10 +1625,17 @@ func TestProvision_AutoDeploy_HappyPath(t *testing.T) {
 
 	tenantStore.mu.Lock()
 	status := tenantStore.statuses["tenant-1"]
+	lxcID := tenantStore.lxcIDs["tenant-1"]
+	// A successful deploy must not release the reservation: the container is
+	// still running and still holds its RAM.
+	assertReservationNotReleased(t, tenantStore, "tenant-1")
 	tenantStore.mu.Unlock()
 
 	if status != "active" {
 		t.Fatalf("expected tenant status 'active', got %q", status)
+	}
+	if lxcID != 105 {
+		t.Fatalf("expected lxc_id 105, got %d", lxcID)
 	}
 
 	ssh.mu.Lock()
@@ -1679,7 +1693,7 @@ func TestProvision_AutoDeploy_HappyPath(t *testing.T) {
 	}
 }
 
-func TestProvision_AutoDeploy_Failure_DoesNotFailProvisioning(t *testing.T) {
+func TestProvision_AutoDeploy_Failure_LeavesErrorAndKeepsReservation(t *testing.T) {
 	nodeStore := newMockNodeStore()
 	tenantStore := newMockTenantStore()
 	projectStore := newMockProjectStore()
@@ -1705,10 +1719,17 @@ func TestProvision_AutoDeploy_Failure_DoesNotFailProvisioning(t *testing.T) {
 	tenantStore.mu.Lock()
 	defer tenantStore.mu.Unlock()
 
-	// The tenant should still be active — deploy is best-effort
-	if tenantStore.statuses["tenant-1"] != "active" {
-		t.Errorf("expected tenant status 'active' despite deploy failure, got %q", tenantStore.statuses["tenant-1"])
+	// The deploy is mandatory, so a failure must leave the tenant errored, not
+	// falsely active with a broken app.
+	if tenantStore.statuses["tenant-1"] != "error" {
+		t.Errorf("expected tenant status 'error' after deploy failure, got %q", tenantStore.statuses["tenant-1"])
 	}
+	// The container ID must be recorded so cleanup can find it.
+	if tenantStore.lxcIDs["tenant-1"] != 105 {
+		t.Errorf("expected lxc_id 105 to be saved, got %d", tenantStore.lxcIDs["tenant-1"])
+	}
+	// The reservation must NOT be released: the container still exists and holds RAM.
+	assertReservationNotReleased(t, tenantStore, "tenant-1")
 }
 
 func TestProvision_AutoDeploy_SkippedWithoutSSH(t *testing.T) {
@@ -1763,10 +1784,14 @@ func TestProvision_AutoDeploy_ComposeUpFailure(t *testing.T) {
 	tenantStore.mu.Lock()
 	defer tenantStore.mu.Unlock()
 
-	// Tenant is active — deploy is best-effort
-	if tenantStore.statuses["tenant-1"] != "active" {
-		t.Errorf("expected tenant status 'active' despite compose failure, got %q", tenantStore.statuses["tenant-1"])
+	// The deploy is mandatory, so a compose failure leaves the tenant errored.
+	if tenantStore.statuses["tenant-1"] != "error" {
+		t.Errorf("expected tenant status 'error' after compose failure, got %q", tenantStore.statuses["tenant-1"])
 	}
+	if tenantStore.lxcIDs["tenant-1"] != 105 {
+		t.Errorf("expected lxc_id 105 to be saved, got %d", tenantStore.lxcIDs["tenant-1"])
+	}
+	assertReservationNotReleased(t, tenantStore, "tenant-1")
 
 	ssh.mu.Lock()
 	defer ssh.mu.Unlock()
@@ -1775,6 +1800,127 @@ func TestProvision_AutoDeploy_ComposeUpFailure(t *testing.T) {
 	if len(ssh.execInCtrCalls) != 4 {
 		t.Errorf("expected 4 ExecInContainer calls (stopped at compose up), got %d", len(ssh.execInCtrCalls))
 	}
+}
+
+// TestProvision_AutoDeploy_FailureAtEachStage drives a deploy failure at every
+// one of the six deploy stages and asserts the same invariant each time: the
+// tenant is left errored (never falsely active), the container ID is saved so
+// cleanup can find it, and the reservation is kept because the container still
+// exists and holds RAM.
+func TestProvision_AutoDeploy_FailureAtEachStage(t *testing.T) {
+	stages := []struct {
+		name string
+		call int
+	}{
+		{"install docker", 1},
+		{"fetch repo", 2},
+		{"write .env", 3},
+		{"bootstrap certs", 4},
+		{"compose up", 5},
+		{"health check", 6},
+	}
+	for _, st := range stages {
+		t.Run(st.name, func(t *testing.T) {
+			nodeStore := newMockNodeStore()
+			tenantStore := newMockTenantStore()
+			projectStore := newMockProjectStore()
+
+			proj := testProjectNoHealth()
+			n := testNode()
+			projectStore.projects[proj.ID] = proj
+			nodeStore.nodes[n.ID] = n
+
+			mockClient := &mockProxmoxClient{nextID: 105}
+			p := setupProvisioner(nodeStore, tenantStore, projectStore, mockClient, n.ID)
+
+			ssh := &mockSSHExecWithDeployCalls{
+				failOnExecInCtr: st.call,
+				failErr:         fmt.Errorf("stage %d failed", st.call),
+			}
+			p.WithSSHClient(ssh)
+			p.WithFreeRadioRepo("https://github.com/Awis13/freeRadio.git", "dev")
+
+			waitForProvision(p, "tenant-1", n.ID, proj.ID, "myapp")
+
+			tenantStore.mu.Lock()
+			defer tenantStore.mu.Unlock()
+
+			if tenantStore.statuses["tenant-1"] != "error" {
+				t.Errorf("expected status 'error', got %q", tenantStore.statuses["tenant-1"])
+			}
+			if tenantStore.lxcIDs["tenant-1"] != 105 {
+				t.Errorf("expected lxc_id 105 saved, got %d", tenantStore.lxcIDs["tenant-1"])
+			}
+			assertReservationNotReleased(t, tenantStore, "tenant-1")
+		})
+	}
+}
+
+// TestProvision_AutoDeploy_RetryReusesExistingContainer pins the retry path: a
+// tenant that already has a container ID must not be cloned again — the deploy
+// re-runs against the existing container.
+func TestProvision_AutoDeploy_RetryReusesExistingContainer(t *testing.T) {
+	nodeStore := newMockNodeStore()
+	tenantStore := newMockTenantStore()
+	projectStore := newMockProjectStore()
+
+	proj := testProjectNoHealth()
+	n := testNode()
+	projectStore.projects[proj.ID] = proj
+	nodeStore.nodes[n.ID] = n
+
+	// The tenant already has a container from a previous attempt.
+	existingID := 105
+	tenantStore.tenants["tenant-1"] = &tenant.Tenant{
+		ID:     "tenant-1",
+		Status: "provisioning",
+		LXCID:  &existingID,
+	}
+
+	// nextID would be used only if a fresh clone ran; it must not be.
+	mockClient := &mockProxmoxClient{nextID: 999}
+	p := setupProvisioner(nodeStore, tenantStore, projectStore, mockClient, n.ID)
+
+	ssh := &mockSSHExecWithDeployCalls{}
+	p.WithSSHClient(ssh)
+	p.WithFreeRadioRepo("https://github.com/Awis13/freeRadio.git", "dev")
+
+	waitForProvision(p, "tenant-1", n.ID, proj.ID, "myapp")
+
+	mockClient.mu.Lock()
+	if mockClient.cloneCalled {
+		t.Error("expected clone NOT to be called on retry")
+	}
+	mockClient.mu.Unlock()
+
+	tenantStore.mu.Lock()
+	defer tenantStore.mu.Unlock()
+	if tenantStore.lxcIDs["tenant-1"] != 105 {
+		t.Errorf("expected existing lxc_id 105 to be reused, got %d", tenantStore.lxcIDs["tenant-1"])
+	}
+	if tenantStore.statuses["tenant-1"] != "active" {
+		t.Errorf("expected status 'active', got %q", tenantStore.statuses["tenant-1"])
+	}
+}
+
+// TestMarkErrorKeepReservation_DoesNotReleaseReservation pins the helper used
+// for a container that still exists: it marks the tenant errored but must not
+// hand the reservation back, since the container still holds RAM.
+func TestMarkErrorKeepReservation_DoesNotReleaseReservation(t *testing.T) {
+	tenantStore := newMockTenantStore()
+	p := New(newMockNodeStore(), tenantStore, newMockProjectStore(), "test-key")
+
+	p.markErrorKeepReservation(context.Background(), "tenant-1", "boom")
+
+	tenantStore.mu.Lock()
+	defer tenantStore.mu.Unlock()
+	if tenantStore.statuses["tenant-1"] != "error" {
+		t.Errorf("expected status 'error', got %q", tenantStore.statuses["tenant-1"])
+	}
+	if tenantStore.errors["tenant-1"] != "boom" {
+		t.Errorf("expected error message 'boom', got %q", tenantStore.errors["tenant-1"])
+	}
+	assertReservationNotReleased(t, tenantStore, "tenant-1")
 }
 
 // --- Auto-deploy wiring ---
@@ -1973,7 +2119,7 @@ func TestDeploy_FetchesIntoNonEmptyDirectory(t *testing.T) {
 func TestDeploy_EnvCarriesEverySecretTheStackNeeds(t *testing.T) {
 	commands := deployCommands(t, "dev")
 
-	env, ok := findCommand(commands, "ENVEOF")
+	env, ok := findCommand(commands, "TENANT_ID=tenant-1")
 	if !ok {
 		t.Fatalf("no .env written: %v", commands)
 	}
@@ -1986,6 +2132,7 @@ func TestDeploy_EnvCarriesEverySecretTheStackNeeds(t *testing.T) {
 		"ICECAST_ADMIN_PASSWORD=",
 		"ICECAST_PASSWORD=",
 		"ICECAST_RELAY_PASSWORD=",
+		"INGEST_CALLBACK_SECRET=",
 	} {
 		if !strings.Contains(env, required) {
 			t.Errorf(".env is missing %q", required)
@@ -1993,11 +2140,15 @@ func TestDeploy_EnvCarriesEverySecretTheStackNeeds(t *testing.T) {
 	}
 
 	// The secrets must be generated, not placeholders shared between tenants.
-	for _, line := range strings.Split(env, "\n") {
-		name, value, found := strings.Cut(line, "=")
-		if !found || !strings.HasSuffix(name, "SECRET") && !strings.HasSuffix(name, "PASSWORD") {
-			continue
-		}
+	for _, name := range []string{
+		"STREAM_KEYS_SECRET",
+		"ICECAST_SOURCE_PASSWORD",
+		"ICECAST_ADMIN_PASSWORD",
+		"ICECAST_PASSWORD",
+		"ICECAST_RELAY_PASSWORD",
+		"INGEST_CALLBACK_SECRET",
+	} {
+		value := secretValue(t, env, name)
 		if len(value) != 64 {
 			t.Errorf("%s = %q, want a generated 64 character secret", name, value)
 		}
@@ -2007,28 +2158,47 @@ func TestDeploy_EnvCarriesEverySecretTheStackNeeds(t *testing.T) {
 	}
 }
 
+// secretValue extracts the value of a KEY=VALUE pair from an idempotent .env
+// write command, which encodes each pair as echo 'KEY=VALUE' >> file.
+func secretValue(t *testing.T, cmd, key string) string {
+	t.Helper()
+	marker := "echo '" + key + "="
+	idx := strings.Index(cmd, marker)
+	if idx < 0 {
+		return ""
+	}
+	rest := cmd[idx+len(marker):]
+	end := strings.Index(rest, "'")
+	if end < 0 {
+		return ""
+	}
+	return rest[:end]
+}
+
 // TestDeploy_SecretsDifferPerVariableAndPerTenant pins that the generated
 // secrets are independent, so one leaking does not hand over the rest.
 func TestDeploy_SecretsDifferPerVariableAndPerTenant(t *testing.T) {
-	first, _ := findCommand(deployCommands(t, "dev"), "ENVEOF")
-	second, _ := findCommand(deployCommands(t, "dev"), "ENVEOF")
+	first, _ := findCommand(deployCommands(t, "dev"), "TENANT_ID=tenant-1")
+	second, _ := findCommand(deployCommands(t, "dev"), "TENANT_ID=tenant-1")
 
+	names := []string{
+		"STREAM_KEYS_SECRET",
+		"ICECAST_SOURCE_PASSWORD",
+		"ICECAST_ADMIN_PASSWORD",
+		"ICECAST_PASSWORD",
+		"ICECAST_RELAY_PASSWORD",
+		"INGEST_CALLBACK_SECRET",
+	}
 	seen := map[string]string{}
-	for _, line := range strings.Split(first, "\n") {
-		name, value, found := strings.Cut(line, "=")
-		if !found || (!strings.HasSuffix(name, "SECRET") && !strings.HasSuffix(name, "PASSWORD")) {
-			continue
-		}
-		if name == "DASHBOARD_TOKEN" {
-			continue
-		}
+	for _, name := range names {
+		value := secretValue(t, first, name)
 		if prev, dup := seen[value]; dup {
 			t.Errorf("%s reuses the secret already given to %s", name, prev)
 		}
 		seen[value] = name
 	}
-	if len(seen) != 5 {
-		t.Fatalf("found %d generated secrets, want 5", len(seen))
+	if len(seen) != len(names) {
+		t.Fatalf("found %d generated secrets, want %d", len(seen), len(names))
 	}
 
 	for value := range seen {
@@ -2081,7 +2251,7 @@ func TestDeploy_BootstrapsCertsBeforeComposeUp(t *testing.T) {
 func TestDeploy_StepOrder(t *testing.T) {
 	commands := deployCommands(t, "dev")
 
-	want := []string{"which docker", "git fetch", "ENVEOF", "bootstrap-certs.sh", "docker compose up", "/api/health"}
+	want := []string{"which docker", "git fetch", "TENANT_ID=tenant-1", "bootstrap-certs.sh", "docker compose up", "/api/health"}
 	last := -1
 	for _, step := range want {
 		at := indexOfCommand(commands, step)

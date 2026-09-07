@@ -432,6 +432,21 @@ func (s *Store) SetActive(ctx context.Context, id string, lxcID int) error {
 	return nil
 }
 
+// SetLXCID records the confirmed-created container ID while the tenant stays
+// in 'provisioning'. The ID is needed for cleanup even if a later deploy step
+// fails, so it is saved as soon as the container exists.
+func (s *Store) SetLXCID(ctx context.Context, id string, lxcID int) error {
+	tag, err := s.pool.Exec(ctx,
+		`UPDATE tenants SET lxc_id = $2 WHERE id = $1 AND status = 'provisioning'`, id, lxcID)
+	if err != nil {
+		return fmt.Errorf("set tenant lxc_id: %w", err)
+	}
+	if tag.RowsAffected() == 0 {
+		return ErrStateConflict
+	}
+	return nil
+}
+
 // SetError marks a tenant as errored with a message.
 // Allowed from 'provisioning' or 'deleting' status.
 func (s *Store) SetError(ctx context.Context, id string, errMsg string) error {

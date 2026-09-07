@@ -176,6 +176,71 @@ func TestReservationIntegration(t *testing.T) {
 	}
 }
 
+// TestSetLXCIDIntegration verifies that SetLXCID records the container ID while
+// the tenant stays in 'provisioning' and does not change its status. The ID is
+// what lets a later cleanup find the container even when a deploy step fails.
+func TestSetLXCIDIntegration(t *testing.T) {
+	url := integrationDBURL(t)
+	if url == "" {
+		t.Skip("no DATABASE_URL and docker unavailable; skipping SetLXCID integration test")
+	}
+
+	if err := database.Migrate(url); err != nil {
+		t.Fatalf("apply migrations: %v", err)
+	}
+
+	ctx := context.Background()
+	pool, err := pgxpool.New(ctx, url)
+	if err != nil {
+		t.Fatalf("connect: %v", err)
+	}
+	defer pool.Close()
+
+	nodeStore := node.NewStore(pool)
+	projectStore := project.NewStore(pool)
+	store := NewStore(pool)
+
+	n, err := nodeStore.Create(ctx, node.CreateNodeRequest{
+		Name: "setlxcid-node", TailscaleIP: "10.0.0.1", ProxmoxURL: "https://pve",
+		APIToken: "token", TotalRAMMB: 3072,
+	})
+	if err != nil {
+		t.Fatalf("create node: %v", err)
+	}
+	proj, err := projectStore.Create(ctx, project.CreateProjectRequest{
+		Name: "setlxcid-project", TemplateID: 100, RAMMB: 1536,
+	})
+	if err != nil {
+		t.Fatalf("create project: %v", err)
+	}
+
+	tn, err := store.CreateWithReservation(ctx, CreateTenantRequest{
+		Name: "setlxcid-studio", ProjectID: proj.ID, NodeID: n.ID, Subdomain: "setlxcid-studio",
+	}, 1536)
+	if err != nil {
+		t.Fatalf("create tenant: %v", err)
+	}
+	if tn.Status != "provisioning" {
+		t.Fatalf("expected status 'provisioning', got %q", tn.Status)
+	}
+
+	if err := store.SetLXCID(ctx, tn.ID, 105); err != nil {
+		t.Fatalf("set lxc id: %v", err)
+	}
+
+	got, err := store.GetByID(ctx, tn.ID)
+	if err != nil {
+		t.Fatalf("get tenant: %v", err)
+	}
+	if got.LXCID == nil || *got.LXCID != 105 {
+		t.Fatalf("expected lxc_id 105, got %v", got.LXCID)
+	}
+	// The status must be unchanged — SetLXCID only records the ID.
+	if got.Status != "provisioning" {
+		t.Fatalf("expected status 'provisioning' after SetLXCID, got %q", got.Status)
+	}
+}
+
 // integrationDBURL returns a reachable postgres URL, or "" if none is
 // available. It prefers DATABASE_URL (set by CI's postgres service) and falls
 // back to a disposable docker container.

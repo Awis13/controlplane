@@ -49,6 +49,7 @@ type NodeStore interface {
 // TenantStore defines what the provisioner needs from the tenant store.
 type TenantStore interface {
 	SetActive(ctx context.Context, id string, lxcID int) error
+	SetLXCID(ctx context.Context, id string, lxcID int) error
 	SetError(ctx context.Context, id string, errMsg string) error
 	SetDeleting(ctx context.Context, id string) error
 	SetDeleted(ctx context.Context, id string) error
@@ -357,32 +358,47 @@ func (p *Provisioner) doProvision(tenantID, nodeID, projectID, subdomain string)
 		return
 	}
 
-	// Get next VMID
-	newID, err := client.GetNextID(ctx)
+	// Retry: if the tenant already has a container ID, reuse it instead of
+	// cloning a fresh one. A re-run of a failed deploy must continue with the
+	// already-created container rather than leaking a second one.
+	existing, err := p.tenantStore.GetByID(ctx, tenantID)
 	if err != nil {
-		log.Error("provision: get next id", "error", err)
-		p.setError(ctx, tenantID, "provisioning failed: could not allocate container ID")
+		log.Error("provision: get tenant for retry", "error", err)
+		p.setError(ctx, tenantID, "provisioning failed: tenant lookup error")
 		return
+	}
+	var newID int
+	if existing != nil && existing.LXCID != nil {
+		newID = *existing.LXCID
+		log.Info("provision: reusing existing container", "lxc_id", newID)
+	} else {
+		// Get next VMID
+		newID, err = client.GetNextID(ctx)
+		if err != nil {
+			log.Error("provision: get next id", "error", err)
+			p.setError(ctx, tenantID, "provisioning failed: could not allocate container ID")
+			return
+		}
+
+		// Clone container
+		log.Info("provision: cloning container", "template_id", templateID)
+		cloneTask, err := client.CloneContainer(ctx, templateID, proxmox.CloneOptions{
+			NewID:    newID,
+			Hostname: subdomain,
+			Full:     true,
+		})
+		if err != nil {
+			log.Error("provision: clone container", "error", err)
+			p.setError(ctx, tenantID, "provisioning failed: clone error")
+			return
+		}
+		if err := cloneTask.Wait(ctx); err != nil {
+			log.Error("provision: wait for clone", "error", err)
+			p.setError(ctx, tenantID, "provisioning failed: clone did not complete")
+			return
+		}
 	}
 	log = log.With("lxc_id", newID)
-
-	// Clone container
-	log.Info("provision: cloning container", "template_id", templateID)
-	cloneTask, err := client.CloneContainer(ctx, templateID, proxmox.CloneOptions{
-		NewID:    newID,
-		Hostname: subdomain,
-		Full:     true,
-	})
-	if err != nil {
-		log.Error("provision: clone container", "error", err)
-		p.setError(ctx, tenantID, "provisioning failed: clone error")
-		return
-	}
-	if err := cloneTask.Wait(ctx); err != nil {
-		log.Error("provision: wait for clone", "error", err)
-		p.setError(ctx, tenantID, "provisioning failed: clone did not complete")
-		return
-	}
 
 	// Allocate IP and configure network (before start)
 	var lxcIP string
@@ -471,6 +487,15 @@ func (p *Provisioner) doProvision(tenantID, nodeID, projectID, subdomain string)
 		return
 	}
 
+	// Record the confirmed-created container ID while the tenant stays in
+	// 'provisioning'. The ID is needed for cleanup even if a later deploy step
+	// fails, so it is saved as soon as the container exists.
+	if err := p.tenantStore.SetLXCID(ctx, tenantID, newID); err != nil {
+		log.Error("provision: set lxc id", "error", err)
+		p.cleanupAndError(ctx, client, tenantID, newID, "provisioning failed: could not record container ID")
+		return
+	}
+
 	// Generate dashboard token (best-effort, does not block provisioning)
 	var dashToken string
 	if token, err := generateToken(); err != nil {
@@ -479,45 +504,65 @@ func (p *Provisioner) doProvision(tenantID, nodeID, projectID, subdomain string)
 		dashToken = token
 	}
 
-	// Write DASHBOARD_TOKEN to container (legacy path — when auto-deploy is not enabled)
-	if p.sshClient != nil && dashToken != "" && !p.AutoDeployEnabled() {
-		if sshHost, err := sshexec.ExtractHost(nodeInfo.ProxmoxURL); err != nil {
-			log.Warn("provision: extract ssh host from proxmox url", "error", err)
-		} else {
-			// dashToken is not quoted: it is already inside single quotes here,
-			// and generateToken produces hex, which carries no shell meaning.
-			cmd := fmt.Sprintf("sed -i '/^DASHBOARD_TOKEN=/d' %[1]s/.env && echo 'DASHBOARD_TOKEN=%[2]s' >> %[1]s/.env", sshexec.Quote(p.appDir), dashToken)
-			if err := p.sshClient.ExecInContainer(ctx, sshHost, newID, cmd); err != nil {
-				log.Warn("provision: write dashboard token to container", "error", err)
-			} else {
-				log.Info("provision: dashboard token set via legacy path")
-			}
-		}
-	}
-
-	// Save dashboard token to DB
-	if dashToken != "" {
+	if p.AutoDeployEnabled() {
+		// Auto-deploy path: the tenant stays 'provisioning' until the mandatory
+		// token persistence and deploy succeed, so a failed deploy leaves an
+		// 'error' tenant with a valid container ID rather than a falsely
+		// 'active' one with a broken app.
 		if err := p.tenantStore.SetDashboardToken(ctx, tenantID, dashToken); err != nil {
-			log.Warn("provision: save dashboard token to db", "error", err)
+			log.Error("provision: save dashboard token to db", "error", err)
+			p.markErrorKeepReservation(ctx, tenantID, "provisioning failed: could not persist dashboard token")
+			return
 		}
-	}
 
-	// Mark as active
-	if err := p.tenantStore.SetActive(ctx, tenantID, newID); err != nil {
-		log.Error("provision: set active", "error", err)
-		p.cleanupAndError(ctx, client, tenantID, newID, "provisioning failed: could not update status")
-		return
-	}
-
-	// Auto-deploy freeRadio (best-effort, don't fail provisioning)
-	if p.sshClient != nil && p.AutoDeployEnabled() {
-		if sshHost, err := sshexec.ExtractHost(nodeInfo.ProxmoxURL); err != nil {
-			log.Error("provision: extract ssh host for deploy", "error", err)
-		} else {
-			if err := p.deployFreeRadio(ctx, sshHost, newID, tenantID, dashToken); err != nil {
+		if p.sshClient != nil {
+			if sshHost, err := sshexec.ExtractHost(nodeInfo.ProxmoxURL); err != nil {
+				log.Error("provision: extract ssh host for deploy", "error", err)
+				p.markErrorKeepReservation(ctx, tenantID, "provisioning failed: could not resolve ssh host")
+				return
+			} else if err := p.deployFreeRadio(ctx, sshHost, newID, tenantID, dashToken); err != nil {
 				log.Error("provision: auto-deploy freeRadio failed", "error", err)
-				// Best-effort: the tenant is already active, the deploy can be retried manually
+				p.markErrorKeepReservation(ctx, tenantID, "provisioning failed: deploy: "+err.Error())
+				return
 			}
+		}
+
+		// Mark as active only after the deploy succeeded.
+		if err := p.tenantStore.SetActive(ctx, tenantID, newID); err != nil {
+			log.Error("provision: set active", "error", err)
+			p.cleanupAndError(ctx, client, tenantID, newID, "provisioning failed: could not update status")
+			return
+		}
+	} else {
+		// Legacy path (auto-deploy disabled): write DASHBOARD_TOKEN to the
+		// container's .env and persist it, then mark active. All best-effort.
+		if p.sshClient != nil && dashToken != "" {
+			if sshHost, err := sshexec.ExtractHost(nodeInfo.ProxmoxURL); err != nil {
+				log.Warn("provision: extract ssh host from proxmox url", "error", err)
+			} else {
+				// dashToken is not quoted: it is already inside single quotes here,
+				// and generateToken produces hex, which carries no shell meaning.
+				cmd := fmt.Sprintf("sed -i '/^DASHBOARD_TOKEN=/d' %[1]s/.env && echo 'DASHBOARD_TOKEN=%[2]s' >> %[1]s/.env", sshexec.Quote(p.appDir), dashToken)
+				if err := p.sshClient.ExecInContainer(ctx, sshHost, newID, cmd); err != nil {
+					log.Warn("provision: write dashboard token to container", "error", err)
+				} else {
+					log.Info("provision: dashboard token set via legacy path")
+				}
+			}
+		}
+
+		// Save dashboard token to DB (best-effort)
+		if dashToken != "" {
+			if err := p.tenantStore.SetDashboardToken(ctx, tenantID, dashToken); err != nil {
+				log.Warn("provision: save dashboard token to db", "error", err)
+			}
+		}
+
+		// Mark as active
+		if err := p.tenantStore.SetActive(ctx, tenantID, newID); err != nil {
+			log.Error("provision: set active", "error", err)
+			p.cleanupAndError(ctx, client, tenantID, newID, "provisioning failed: could not update status")
+			return
 		}
 	}
 
@@ -722,6 +767,16 @@ func (p *Provisioner) setError(ctx context.Context, tenantID, errMsg string) {
 	}
 }
 
+// markErrorKeepReservation marks a tenant errored but keeps its reservation
+// held. It is for a container that exists and still holds RAM: releasing the
+// reservation here would let the node's accounting drop while the container
+// is still running. The reservation is released later by a successful delete.
+func (p *Provisioner) markErrorKeepReservation(ctx context.Context, tenantID, errMsg string) {
+	if err := p.tenantStore.SetError(ctx, tenantID, errMsg); err != nil {
+		slog.Error("provision: failed to set error status", "tenant_id", tenantID, "error", err)
+	}
+}
+
 // cleanupAndError attempts to delete the created container, then marks error and releases the reservation.
 func (p *Provisioner) cleanupAndError(ctx context.Context, client ProxmoxClient, tenantID string, lxcID int, errMsg string) {
 	slog.Info("provision: attempting cleanup", "tenant_id", tenantID, "lxc_id", lxcID)
@@ -775,33 +830,40 @@ func (p *Provisioner) deployFreeRadio(ctx context.Context, sshHost string, lxcID
 		return fmt.Errorf("fetch repo: %w", err)
 	}
 
-	// Step 3: Write .env.
+	// Step 3: Write .env, idempotently.
 	//
 	// Every variable here is one the stack refuses to start without: the
 	// dashboard throws on boot with no STREAM_KEYS_SECRET, and the four
 	// ICECAST_* variables are interpolated by compose with no default, so an
 	// absent one leaves the broker with an empty password.
+	//
+	// The write only appends keys that are absent rather than overwriting the
+	// whole file, so a re-run of the deploy (a retry after a partial failure)
+	// never replaces valid secrets that a previous run already persisted into a
+	// surviving volume. Values are hex, so they carry no shell meaning, and
+	// appDir is quoted. INGEST_CALLBACK_SECRET is written here for the ingest
+	// callback (FR-3) and is never exposed through the API — it lives only in
+	// the container's .env.
 	log.Info("provision: deploy — writing .env")
 	secrets, err := generateDeploySecrets()
 	if err != nil {
 		return fmt.Errorf("generate deploy secrets: %w", err)
 	}
-	envContent := fmt.Sprintf(
-		"TENANT_ID=%s\n"+
-			"DASHBOARD_TOKEN=%s\n"+
-			"STREAM_KEYS_SECRET=%s\n"+
-			"ICECAST_SOURCE_PASSWORD=%s\n"+
-			"ICECAST_ADMIN_PASSWORD=%s\n"+
-			"ICECAST_PASSWORD=%s\n"+
-			"ICECAST_RELAY_PASSWORD=%s\n"+
-			"S3_ENABLED=false\n"+
-			"NODE_ENV=production\n",
-		tenantID, dashboardToken, secrets.StreamKeys,
-		secrets.IcecastSource, secrets.IcecastAdmin, secrets.IcecastListen, secrets.IcecastRelay)
-	// envContent is not quoted: it is the body of a single-quoted heredoc, so
-	// the shell expands nothing inside it, and the only way out would be a line
-	// reading exactly ENVEOF, which none of these values can produce.
-	writeEnvCmd := fmt.Sprintf("cat > %s/.env << 'ENVEOF'\n%sENVEOF", sshexec.Quote(p.appDir), envContent)
+	appDir := sshexec.Quote(p.appDir)
+	writeEnvCmd := fmt.Sprintf(
+		"touch %[1]s/.env && "+
+			"grep -q '^TENANT_ID=' %[1]s/.env || echo 'TENANT_ID=%[2]s' >> %[1]s/.env; "+
+			"grep -q '^DASHBOARD_TOKEN=' %[1]s/.env || echo 'DASHBOARD_TOKEN=%[3]s' >> %[1]s/.env; "+
+			"grep -q '^STREAM_KEYS_SECRET=' %[1]s/.env || echo 'STREAM_KEYS_SECRET=%[4]s' >> %[1]s/.env; "+
+			"grep -q '^ICECAST_SOURCE_PASSWORD=' %[1]s/.env || echo 'ICECAST_SOURCE_PASSWORD=%[5]s' >> %[1]s/.env; "+
+			"grep -q '^ICECAST_ADMIN_PASSWORD=' %[1]s/.env || echo 'ICECAST_ADMIN_PASSWORD=%[6]s' >> %[1]s/.env; "+
+			"grep -q '^ICECAST_PASSWORD=' %[1]s/.env || echo 'ICECAST_PASSWORD=%[7]s' >> %[1]s/.env; "+
+			"grep -q '^ICECAST_RELAY_PASSWORD=' %[1]s/.env || echo 'ICECAST_RELAY_PASSWORD=%[8]s' >> %[1]s/.env; "+
+			"grep -q '^INGEST_CALLBACK_SECRET=' %[1]s/.env || echo 'INGEST_CALLBACK_SECRET=%[9]s' >> %[1]s/.env; "+
+			"grep -q '^S3_ENABLED=' %[1]s/.env || echo 'S3_ENABLED=false' >> %[1]s/.env; "+
+			"grep -q '^NODE_ENV=' %[1]s/.env || echo 'NODE_ENV=production' >> %[1]s/.env",
+		appDir, tenantID, dashboardToken, secrets.StreamKeys,
+		secrets.IcecastSource, secrets.IcecastAdmin, secrets.IcecastListen, secrets.IcecastRelay, secrets.IngestCallback)
 	if err := p.sshClient.ExecInContainer(ctx, sshHost, lxcID, writeEnvCmd); err != nil {
 		return fmt.Errorf("write .env: %w", err)
 	}
@@ -844,16 +906,17 @@ func (p *Provisioner) deployFreeRadio(ctx context.Context, sshHost string, lxcID
 // They are generated rather than fixed: each tenant gets its own stack, and
 // these are the credentials protecting it.
 type deploySecrets struct {
-	StreamKeys    string
-	IcecastSource string
-	IcecastAdmin  string
-	IcecastListen string
-	IcecastRelay  string
+	StreamKeys     string
+	IcecastSource  string
+	IcecastAdmin   string
+	IcecastListen  string
+	IcecastRelay   string
+	IngestCallback string
 }
 
 func generateDeploySecrets() (deploySecrets, error) {
 	var s deploySecrets
-	for _, target := range []*string{&s.StreamKeys, &s.IcecastSource, &s.IcecastAdmin, &s.IcecastListen, &s.IcecastRelay} {
+	for _, target := range []*string{&s.StreamKeys, &s.IcecastSource, &s.IcecastAdmin, &s.IcecastListen, &s.IcecastRelay, &s.IngestCallback} {
 		token, err := generateToken()
 		if err != nil {
 			return deploySecrets{}, err
