@@ -4,11 +4,13 @@ import (
 	"context"
 	"fmt"
 	"strings"
+	"time"
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"controlplane/internal/ipalloc"
+	"controlplane/internal/node"
 )
 
 // Store handles tenant database operations.
@@ -21,14 +23,15 @@ func NewStore(pool *pgxpool.Pool) *Store {
 }
 
 // tenantColumns is the list of columns selected in all tenant queries.
-const tenantColumns = `id, name, project_id, node_id, lxc_id, lxc_ip, subdomain, status, error_message, owner_id, stripe_subscription_id, stripe_customer_id, tier, dashboard_token, health_status, health_checked_at, created_at, updated_at`
+const tenantColumns = `id, name, project_id, node_id, lxc_id, lxc_ip, subdomain, status, error_message, owner_id, stripe_subscription_id, stripe_customer_id, tier, dashboard_token, health_status, health_checked_at, reserved_ram_mb, reservation_released_at, created_at, updated_at`
 
 // scanTenant scans a single row into a Tenant struct.
 func scanTenant(row pgx.Row) (*Tenant, error) {
 	var t Tenant
 	err := row.Scan(&t.ID, &t.Name, &t.ProjectID, &t.NodeID, &t.LXCID, &t.LXCIP,
 		&t.Subdomain, &t.Status, &t.ErrorMessage, &t.OwnerID, &t.StripeSubscriptionID,
-		&t.StripeCustomerID, &t.Tier, &t.DashboardToken, &t.HealthStatus, &t.HealthCheckedAt, &t.CreatedAt, &t.UpdatedAt)
+		&t.StripeCustomerID, &t.Tier, &t.DashboardToken, &t.HealthStatus, &t.HealthCheckedAt,
+		&t.ReservedRAMMB, &t.ReservationReleasedAt, &t.CreatedAt, &t.UpdatedAt)
 	if err != nil {
 		return nil, err
 	}
@@ -104,7 +107,8 @@ func (s *Store) ListPaginated(ctx context.Context, limit, offset int, status, no
 		var t Tenant
 		err := rows.Scan(&t.ID, &t.Name, &t.ProjectID, &t.NodeID, &t.LXCID, &t.LXCIP,
 			&t.Subdomain, &t.Status, &t.ErrorMessage, &t.OwnerID, &t.StripeSubscriptionID,
-			&t.StripeCustomerID, &t.Tier, &t.DashboardToken, &t.HealthStatus, &t.HealthCheckedAt, &t.CreatedAt, &t.UpdatedAt, &total)
+			&t.StripeCustomerID, &t.Tier, &t.DashboardToken, &t.HealthStatus, &t.HealthCheckedAt,
+			&t.ReservedRAMMB, &t.ReservationReleasedAt, &t.CreatedAt, &t.UpdatedAt, &total)
 		if err != nil {
 			return nil, 0, fmt.Errorf("scan tenant: %w", err)
 		}
@@ -152,6 +156,137 @@ func (s *Store) CreateWithOwner(ctx context.Context, req CreateTenantRequest, ow
 		return nil, fmt.Errorf("insert tenant: %w", err)
 	}
 	return t, nil
+}
+
+// CreateWithReservation inserts a tenant and reserves its RAM on the node in a
+// single transaction. The reservation is recorded on the tenant row itself, so
+// a later release is driven by the tenant record rather than by a caller that
+// happens to remember the project's RAM figure. If the insert fails the whole
+// transaction rolls back and the reservation never leaks.
+func (s *Store) CreateWithReservation(ctx context.Context, req CreateTenantRequest, ramMB int) (*Tenant, error) {
+	return s.createWithReservation(ctx, req, "", ramMB)
+}
+
+// CreateWithOwnerWithReservation is the owner-scoped variant of
+// CreateWithReservation: it records the owner and the reservation together.
+func (s *Store) CreateWithOwnerWithReservation(ctx context.Context, req CreateTenantRequest, ownerID string, ramMB int) (*Tenant, error) {
+	return s.createWithReservation(ctx, req, ownerID, ramMB)
+}
+
+func (s *Store) createWithReservation(ctx context.Context, req CreateTenantRequest, ownerID string, ramMB int) (*Tenant, error) {
+	tx, err := s.pool.BeginTx(ctx, pgx.TxOptions{})
+	if err != nil {
+		return nil, fmt.Errorf("begin reservation tx: %w", err)
+	}
+	defer tx.Rollback(ctx)
+
+	// Reserve capacity on the node atomically. A node that cannot fit the
+	// request is refused here, before any tenant row is written.
+	tag, err := tx.Exec(ctx,
+		`UPDATE nodes SET allocated_ram_mb = allocated_ram_mb + $2
+		 WHERE id = $1 AND total_ram_mb - allocated_ram_mb >= $2`,
+		req.NodeID, ramMB)
+	if err != nil {
+		return nil, fmt.Errorf("reserve ram: %w", err)
+	}
+	if tag.RowsAffected() == 0 {
+		return nil, node.ErrInsufficientCapacity
+	}
+
+	var t Tenant
+	var insertErr error
+	if ownerID == "" {
+		insertErr = tx.QueryRow(ctx,
+			`INSERT INTO tenants (name, project_id, node_id, subdomain, reserved_ram_mb)
+			 VALUES ($1, $2, $3, $4, $5)
+			 RETURNING `+tenantColumns,
+			req.Name, req.ProjectID, req.NodeID, req.Subdomain, ramMB).
+			Scan(&t.ID, &t.Name, &t.ProjectID, &t.NodeID, &t.LXCID, &t.LXCIP,
+				&t.Subdomain, &t.Status, &t.ErrorMessage, &t.OwnerID, &t.StripeSubscriptionID,
+				&t.StripeCustomerID, &t.Tier, &t.DashboardToken, &t.HealthStatus, &t.HealthCheckedAt,
+				&t.ReservedRAMMB, &t.ReservationReleasedAt, &t.CreatedAt, &t.UpdatedAt)
+	} else {
+		insertErr = tx.QueryRow(ctx,
+			`INSERT INTO tenants (name, project_id, node_id, subdomain, owner_id, reserved_ram_mb)
+			 VALUES ($1, $2, $3, $4, $5, $6)
+			 RETURNING `+tenantColumns,
+			req.Name, req.ProjectID, req.NodeID, req.Subdomain, ownerID, ramMB).
+			Scan(&t.ID, &t.Name, &t.ProjectID, &t.NodeID, &t.LXCID, &t.LXCIP,
+				&t.Subdomain, &t.Status, &t.ErrorMessage, &t.OwnerID, &t.StripeSubscriptionID,
+				&t.StripeCustomerID, &t.Tier, &t.DashboardToken, &t.HealthStatus, &t.HealthCheckedAt,
+				&t.ReservedRAMMB, &t.ReservationReleasedAt, &t.CreatedAt, &t.UpdatedAt)
+	}
+	if insertErr != nil {
+		return nil, fmt.Errorf("insert tenant: %w", insertErr)
+	}
+
+	if err := tx.Commit(ctx); err != nil {
+		return nil, fmt.Errorf("commit reservation tx: %w", err)
+	}
+	return &t, nil
+}
+
+// ReleaseReservation hands a tenant's reserved RAM back to its node exactly
+// once. It is idempotent: a tenant whose reservation was already released is a
+// no-op, and a concurrent release is resolved by the row lock so the node
+// counter is decremented at most once. A tenant with a NULL reserved_ram_mb
+// predates this accounting and is refused rather than guessed at.
+func (s *Store) ReleaseReservation(ctx context.Context, tenantID string) error {
+	tx, err := s.pool.BeginTx(ctx, pgx.TxOptions{})
+	if err != nil {
+		return fmt.Errorf("begin release tx: %w", err)
+	}
+	defer tx.Rollback(ctx)
+
+	var reservedRAMMB *int
+	var releasedAt *time.Time
+	var nodeID string
+	err = tx.QueryRow(ctx,
+		`SELECT reserved_ram_mb, reservation_released_at, node_id
+		 FROM tenants WHERE id = $1 FOR UPDATE`,
+		tenantID).Scan(&reservedRAMMB, &releasedAt, &nodeID)
+	if err != nil {
+		if err == pgx.ErrNoRows {
+			return pgx.ErrNoRows
+		}
+		return fmt.Errorf("query tenant reservation: %w", err)
+	}
+
+	if releasedAt != nil {
+		// Already released; nothing to do.
+		return nil
+	}
+
+	if reservedRAMMB == nil {
+		return fmt.Errorf("tenant %s has unknown legacy reservation; manual reconciliation required", tenantID)
+	}
+
+	// CAS: only the first releaser marks the reservation released. The row lock
+	// above already serialises concurrent releasers, so this is a defensive
+	// guard rather than the primary mechanism.
+	tag, err := tx.Exec(ctx,
+		`UPDATE tenants SET reservation_released_at = now()
+		 WHERE id = $1 AND reservation_released_at IS NULL`,
+		tenantID)
+	if err != nil {
+		return fmt.Errorf("mark reservation released: %w", err)
+	}
+	if tag.RowsAffected() == 0 {
+		// A concurrent release won; nothing to do.
+		return nil
+	}
+
+	if _, err := tx.Exec(ctx,
+		`UPDATE nodes SET allocated_ram_mb = GREATEST(allocated_ram_mb - $2, 0)
+		 WHERE id = $1`,
+		nodeID, *reservedRAMMB); err != nil {
+		return fmt.Errorf("release node ram: %w", err)
+	}
+
+	if err := tx.Commit(ctx); err != nil {
+		return fmt.Errorf("commit release tx: %w", err)
+	}
+	return nil
 }
 
 // Count returns the total number of tenants, ignoring every filter. The admin
@@ -290,6 +425,21 @@ func (s *Store) SetActive(ctx context.Context, id string, lxcID int) error {
 		id, lxcID)
 	if err != nil {
 		return fmt.Errorf("set tenant active: %w", err)
+	}
+	if tag.RowsAffected() == 0 {
+		return ErrStateConflict
+	}
+	return nil
+}
+
+// SetLXCID records the confirmed-created container ID while the tenant stays
+// in 'provisioning'. The ID is needed for cleanup even if a later deploy step
+// fails, so it is saved as soon as the container exists.
+func (s *Store) SetLXCID(ctx context.Context, id string, lxcID int) error {
+	tag, err := s.pool.Exec(ctx,
+		`UPDATE tenants SET lxc_id = $2 WHERE id = $1 AND status = 'provisioning'`, id, lxcID)
+	if err != nil {
+		return fmt.Errorf("set tenant lxc_id: %w", err)
 	}
 	if tag.RowsAffected() == 0 {
 		return ErrStateConflict
@@ -482,19 +632,23 @@ type BillingTenant struct {
 	ID                   string  `json:"id"`
 	Name                 string  `json:"name"`
 	Tier                 string  `json:"tier"`
+	Status               string  `json:"status"`
 	StripeCustomerID     *string `json:"stripe_customer_id,omitempty"`
 	StripeSubscriptionID *string `json:"stripe_subscription_id,omitempty"`
 	OwnerID              *string `json:"owner_id,omitempty"`
 }
 
-// GetByStripeCustomerID returns a tenant by its Stripe customer ID.
+// GetByStripeCustomerID returns a tenant by its Stripe customer ID. It includes
+// soft-deleted tenants: a webhook must still find the mapping by customer even
+// after the tenant was deleted, so a late subscription event can downgrade the
+// (already deleted) record instead of being dropped.
 func (s *Store) GetByStripeCustomerID(ctx context.Context, customerID string) (*BillingTenant, error) {
 	var t BillingTenant
 	err := s.pool.QueryRow(ctx,
-		`SELECT id, name, tier, stripe_customer_id, stripe_subscription_id, owner_id
-		 FROM tenants WHERE stripe_customer_id = $1 AND status NOT IN ('deleted')
+		`SELECT id, name, tier, status, stripe_customer_id, stripe_subscription_id, owner_id
+		 FROM tenants WHERE stripe_customer_id = $1
 		 LIMIT 1`, customerID).
-		Scan(&t.ID, &t.Name, &t.Tier, &t.StripeCustomerID, &t.StripeSubscriptionID, &t.OwnerID)
+		Scan(&t.ID, &t.Name, &t.Tier, &t.Status, &t.StripeCustomerID, &t.StripeSubscriptionID, &t.OwnerID)
 	if err != nil {
 		if err == pgx.ErrNoRows {
 			return nil, nil
@@ -507,7 +661,7 @@ func (s *Store) GetByStripeCustomerID(ctx context.Context, customerID string) (*
 // GetBillingByOwnerID returns billing info for all non-deleted tenants belonging to a user.
 func (s *Store) GetBillingByOwnerID(ctx context.Context, ownerID string) ([]BillingTenant, error) {
 	rows, err := s.pool.Query(ctx,
-		`SELECT id, name, tier, stripe_customer_id, stripe_subscription_id, owner_id
+		`SELECT id, name, tier, status, stripe_customer_id, stripe_subscription_id, owner_id
 		 FROM tenants
 		 WHERE owner_id = $1 AND status NOT IN ('deleted')
 		 ORDER BY created_at DESC`, ownerID)
@@ -519,7 +673,37 @@ func (s *Store) GetBillingByOwnerID(ctx context.Context, ownerID string) ([]Bill
 	var tenants []BillingTenant
 	for rows.Next() {
 		var t BillingTenant
-		if err := rows.Scan(&t.ID, &t.Name, &t.Tier, &t.StripeCustomerID, &t.StripeSubscriptionID, &t.OwnerID); err != nil {
+		if err := rows.Scan(&t.ID, &t.Name, &t.Tier, &t.Status, &t.StripeCustomerID, &t.StripeSubscriptionID, &t.OwnerID); err != nil {
+			return nil, fmt.Errorf("scan billing tenant: %w", err)
+		}
+		tenants = append(tenants, t)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("iterate billing tenants: %w", err)
+	}
+
+	return tenants, nil
+}
+
+// GetBillingByOwnerIDIncludingDeleted returns billing info for all tenants
+// belonging to a user, including soft-deleted ones. The billing portal and
+// status endpoints must find billing references even after a tenant was deleted,
+// so the owner can still manage the Stripe subscription that outlived the studio.
+func (s *Store) GetBillingByOwnerIDIncludingDeleted(ctx context.Context, ownerID string) ([]BillingTenant, error) {
+	rows, err := s.pool.Query(ctx,
+		`SELECT id, name, tier, status, stripe_customer_id, stripe_subscription_id, owner_id
+		 FROM tenants
+		 WHERE owner_id = $1
+		 ORDER BY created_at DESC`, ownerID)
+	if err != nil {
+		return nil, fmt.Errorf("query billing tenants by owner including deleted: %w", err)
+	}
+	defer rows.Close()
+
+	var tenants []BillingTenant
+	for rows.Next() {
+		var t BillingTenant
+		if err := rows.Scan(&t.ID, &t.Name, &t.Tier, &t.Status, &t.StripeCustomerID, &t.StripeSubscriptionID, &t.OwnerID); err != nil {
 			return nil, fmt.Errorf("scan billing tenant: %w", err)
 		}
 		tenants = append(tenants, t)

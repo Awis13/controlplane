@@ -44,12 +44,12 @@ const (
 type NodeStore interface {
 	GetByID(ctx context.Context, id string) (*node.Node, error)
 	GetEncryptedTokenByID(ctx context.Context, id string) (string, error)
-	ReleaseRAM(ctx context.Context, nodeID string, ramMB int) error
 }
 
 // TenantStore defines what the provisioner needs from the tenant store.
 type TenantStore interface {
 	SetActive(ctx context.Context, id string, lxcID int) error
+	SetLXCID(ctx context.Context, id string, lxcID int) error
 	SetError(ctx context.Context, id string, errMsg string) error
 	SetDeleting(ctx context.Context, id string) error
 	SetDeleted(ctx context.Context, id string) error
@@ -58,6 +58,7 @@ type TenantStore interface {
 	SetHealthStatus(ctx context.Context, id string, status string) error
 	SetDashboardToken(ctx context.Context, id string, token string) error
 	GetByID(ctx context.Context, id string) (*tenant.Tenant, error)
+	ReleaseReservation(ctx context.Context, tenantID string) error
 }
 
 // ProjectStore defines what the provisioner needs from the project store.
@@ -153,6 +154,7 @@ type Provisioner struct {
 	sshClient           SSHExec                  // optional: SSH exec for writing tokens and mount points
 	freeRadioRepoURL    string                   // freeRadio repository URL for auto-deploy
 	freeRadioRepoBranch string                   // branch to deploy; empty falls back to the default branch
+	ssoPublicKey        string                   // hex Ed25519 public key for SSO assertions, written into tenant env
 	lxcBridge           string                   // Proxmox bridge for tenant NICs
 	mountRoot           string                   // host directory holding tenant content mounts
 	appDir              string                   // application directory inside the container
@@ -237,6 +239,14 @@ func (p *Provisioner) WithFreeRadioRepo(url, branch string) {
 	p.freeRadioRepoBranch = branch
 }
 
+// WithSSOPublicKey sets the hex-encoded Ed25519 public key that tenants use to
+// verify SSO assertions. It is written into each tenant's .env so the tenant
+// can verify tokens signed by the control plane's private key. The private key
+// never leaves the control plane.
+func (p *Provisioner) WithSSOPublicKey(pubKey string) {
+	p.ssoPublicKey = pubKey
+}
+
 // InvalidateClient removes the cached Proxmox client for a node,
 // forcing re-creation with fresh credentials on next use.
 func (p *Provisioner) InvalidateClient(nodeID string) {
@@ -297,14 +307,14 @@ func (p *Provisioner) getClient(ctx context.Context, nodeID string) (ProxmoxClie
 // Provision creates an LXC container for a tenant asynchronously.
 // This method is designed to be called as a goroutine — it creates its own
 // background context with a timeout, independent of the caller's context.
-func (p *Provisioner) Provision(tenantID, nodeID, projectID, subdomain string, ramMB int) {
+func (p *Provisioner) Provision(tenantID, nodeID, projectID, subdomain string) {
 	p.wg.Add(1)
 	go func() {
 		defer p.wg.Done()
 		defer func() {
 			if rec := recover(); rec != nil {
 				slog.Error("provision: panic recovered", "tenant_id", tenantID, "panic", rec)
-				p.setError(context.Background(), tenantID, nodeID, ramMB, "provisioning failed: internal panic")
+				p.setError(context.Background(), tenantID, "provisioning failed: internal panic")
 			}
 		}()
 
@@ -312,11 +322,11 @@ func (p *Provisioner) Provision(tenantID, nodeID, projectID, subdomain string, r
 		p.sem <- struct{}{}
 		defer func() { <-p.sem }()
 
-		p.doProvision(tenantID, nodeID, projectID, subdomain, ramMB)
+		p.doProvision(tenantID, nodeID, projectID, subdomain)
 	}()
 }
 
-func (p *Provisioner) doProvision(tenantID, nodeID, projectID, subdomain string, ramMB int) {
+func (p *Provisioner) doProvision(tenantID, nodeID, projectID, subdomain string) {
 	ctx, cancel := context.WithTimeout(context.Background(), provisionTimeout)
 	defer cancel()
 
@@ -326,12 +336,12 @@ func (p *Provisioner) doProvision(tenantID, nodeID, projectID, subdomain string,
 	proj, err := p.projectStore.GetByID(ctx, projectID)
 	if err != nil {
 		log.Error("provision: get project", "error", err)
-		p.setError(ctx, tenantID, nodeID, ramMB, "provisioning failed: project lookup error")
+		p.setError(ctx, tenantID, "provisioning failed: project lookup error")
 		return
 	}
 	if proj == nil {
 		log.Error("provision: project not found")
-		p.setError(ctx, tenantID, nodeID, ramMB, "provisioning failed: project not found")
+		p.setError(ctx, tenantID, "provisioning failed: project not found")
 		return
 	}
 	templateID := proj.TemplateID
@@ -340,12 +350,12 @@ func (p *Provisioner) doProvision(tenantID, nodeID, projectID, subdomain string,
 	nodeInfo, err := p.nodeStore.GetByID(ctx, nodeID)
 	if err != nil {
 		log.Error("provision: get node", "error", err)
-		p.setError(ctx, tenantID, nodeID, ramMB, "provisioning failed: node lookup error")
+		p.setError(ctx, tenantID, "provisioning failed: node lookup error")
 		return
 	}
 	if nodeInfo == nil {
 		log.Error("provision: node not found")
-		p.setError(ctx, tenantID, nodeID, ramMB, "provisioning failed: node not found")
+		p.setError(ctx, tenantID, "provisioning failed: node not found")
 		return
 	}
 
@@ -353,36 +363,51 @@ func (p *Provisioner) doProvision(tenantID, nodeID, projectID, subdomain string,
 	client, err := p.getClient(ctx, nodeID)
 	if err != nil {
 		log.Error("provision: get client", "error", err)
-		p.setError(ctx, tenantID, nodeID, ramMB, "provisioning failed: node connection error")
+		p.setError(ctx, tenantID, "provisioning failed: node connection error")
 		return
 	}
 
-	// Get next VMID
-	newID, err := client.GetNextID(ctx)
+	// Retry: if the tenant already has a container ID, reuse it instead of
+	// cloning a fresh one. A re-run of a failed deploy must continue with the
+	// already-created container rather than leaking a second one.
+	existing, err := p.tenantStore.GetByID(ctx, tenantID)
 	if err != nil {
-		log.Error("provision: get next id", "error", err)
-		p.setError(ctx, tenantID, nodeID, ramMB, "provisioning failed: could not allocate container ID")
+		log.Error("provision: get tenant for retry", "error", err)
+		p.setError(ctx, tenantID, "provisioning failed: tenant lookup error")
 		return
+	}
+	var newID int
+	if existing != nil && existing.LXCID != nil {
+		newID = *existing.LXCID
+		log.Info("provision: reusing existing container", "lxc_id", newID)
+	} else {
+		// Get next VMID
+		newID, err = client.GetNextID(ctx)
+		if err != nil {
+			log.Error("provision: get next id", "error", err)
+			p.setError(ctx, tenantID, "provisioning failed: could not allocate container ID")
+			return
+		}
+
+		// Clone container
+		log.Info("provision: cloning container", "template_id", templateID)
+		cloneTask, err := client.CloneContainer(ctx, templateID, proxmox.CloneOptions{
+			NewID:    newID,
+			Hostname: subdomain,
+			Full:     true,
+		})
+		if err != nil {
+			log.Error("provision: clone container", "error", err)
+			p.setError(ctx, tenantID, "provisioning failed: clone error")
+			return
+		}
+		if err := cloneTask.Wait(ctx); err != nil {
+			log.Error("provision: wait for clone", "error", err)
+			p.setError(ctx, tenantID, "provisioning failed: clone did not complete")
+			return
+		}
 	}
 	log = log.With("lxc_id", newID)
-
-	// Clone container
-	log.Info("provision: cloning container", "template_id", templateID)
-	cloneTask, err := client.CloneContainer(ctx, templateID, proxmox.CloneOptions{
-		NewID:    newID,
-		Hostname: subdomain,
-		Full:     true,
-	})
-	if err != nil {
-		log.Error("provision: clone container", "error", err)
-		p.setError(ctx, tenantID, nodeID, ramMB, "provisioning failed: clone error")
-		return
-	}
-	if err := cloneTask.Wait(ctx); err != nil {
-		log.Error("provision: wait for clone", "error", err)
-		p.setError(ctx, tenantID, nodeID, ramMB, "provisioning failed: clone did not complete")
-		return
-	}
 
 	// Allocate IP and configure network (before start)
 	var lxcIP string
@@ -390,7 +415,7 @@ func (p *Provisioner) doProvision(tenantID, nodeID, projectID, subdomain string,
 		lxcIP, err = p.tenantStore.GetNextAvailableIP(ctx, proj.NetworkCIDR)
 		if err != nil {
 			log.Error("provision: allocate ip", "error", err)
-			p.cleanupAndError(ctx, client, tenantID, nodeID, ramMB, newID, "provisioning failed: IP allocation error")
+			p.cleanupAndError(ctx, client, tenantID, newID, "provisioning failed: IP allocation error")
 			return
 		}
 		log = log.With("lxc_ip", lxcIP)
@@ -404,7 +429,7 @@ func (p *Provisioner) doProvision(tenantID, nodeID, projectID, subdomain string,
 		log.Info("provision: configuring network", "net0", net0)
 		if err := client.ConfigureNetwork(ctx, newID, net0); err != nil {
 			log.Error("provision: configure network", "error", err)
-			p.cleanupAndError(ctx, client, tenantID, nodeID, ramMB, newID, "provisioning failed: network config error")
+			p.cleanupAndError(ctx, client, tenantID, newID, "provisioning failed: network config error")
 			return
 		}
 
@@ -422,7 +447,7 @@ func (p *Provisioner) doProvision(tenantID, nodeID, projectID, subdomain string,
 		sshHost, err := sshexec.ExtractHost(nodeInfo.ProxmoxURL)
 		if err != nil {
 			log.Error("provision: extract ssh host for mount points", "error", err)
-			p.cleanupAndError(ctx, client, tenantID, nodeID, ramMB, newID, "provisioning failed: mount point config error")
+			p.cleanupAndError(ctx, client, tenantID, newID, "provisioning failed: mount point config error")
 			return
 		}
 
@@ -431,7 +456,7 @@ func (p *Provisioner) doProvision(tenantID, nodeID, projectID, subdomain string,
 		log.Info("provision: creating host directories for mount points", "cmd", mkdirCmd)
 		if err := p.sshClient.ExecOnHost(ctx, sshHost, mkdirCmd); err != nil {
 			log.Error("provision: create host directories", "error", err)
-			p.cleanupAndError(ctx, client, tenantID, nodeID, ramMB, newID, "provisioning failed: mount point config error")
+			p.cleanupAndError(ctx, client, tenantID, newID, "provisioning failed: mount point config error")
 			return
 		}
 
@@ -440,7 +465,7 @@ func (p *Provisioner) doProvision(tenantID, nodeID, projectID, subdomain string,
 		log.Info("provision: configuring mount points via SSH", "cmd", pctCmd)
 		if err := p.sshClient.ExecOnHost(ctx, sshHost, pctCmd); err != nil {
 			log.Error("provision: configure mount points via ssh", "error", err)
-			p.cleanupAndError(ctx, client, tenantID, nodeID, ramMB, newID, "provisioning failed: mount point config error")
+			p.cleanupAndError(ctx, client, tenantID, newID, "provisioning failed: mount point config error")
 			return
 		}
 	} else {
@@ -452,7 +477,7 @@ func (p *Provisioner) doProvision(tenantID, nodeID, projectID, subdomain string,
 		log.Info("provision: configuring mount points via API", "mounts", mounts)
 		if err := client.ConfigureMountPoints(ctx, newID, mounts); err != nil {
 			log.Error("provision: configure mount points", "error", err)
-			p.cleanupAndError(ctx, client, tenantID, nodeID, ramMB, newID, "provisioning failed: mount point config error")
+			p.cleanupAndError(ctx, client, tenantID, newID, "provisioning failed: mount point config error")
 			return
 		}
 	}
@@ -462,12 +487,21 @@ func (p *Provisioner) doProvision(tenantID, nodeID, projectID, subdomain string,
 	startTask, err := client.StartContainer(ctx, newID)
 	if err != nil {
 		log.Error("provision: start container", "error", err)
-		p.cleanupAndError(ctx, client, tenantID, nodeID, ramMB, newID, "provisioning failed: start error")
+		p.cleanupAndError(ctx, client, tenantID, newID, "provisioning failed: start error")
 		return
 	}
 	if err := startTask.Wait(ctx); err != nil {
 		log.Error("provision: wait for start", "error", err)
-		p.cleanupAndError(ctx, client, tenantID, nodeID, ramMB, newID, "provisioning failed: start did not complete")
+		p.cleanupAndError(ctx, client, tenantID, newID, "provisioning failed: start did not complete")
+		return
+	}
+
+	// Record the confirmed-created container ID while the tenant stays in
+	// 'provisioning'. The ID is needed for cleanup even if a later deploy step
+	// fails, so it is saved as soon as the container exists.
+	if err := p.tenantStore.SetLXCID(ctx, tenantID, newID); err != nil {
+		log.Error("provision: set lxc id", "error", err)
+		p.cleanupAndError(ctx, client, tenantID, newID, "provisioning failed: could not record container ID")
 		return
 	}
 
@@ -479,45 +513,65 @@ func (p *Provisioner) doProvision(tenantID, nodeID, projectID, subdomain string,
 		dashToken = token
 	}
 
-	// Write DASHBOARD_TOKEN to container (legacy path — when auto-deploy is not enabled)
-	if p.sshClient != nil && dashToken != "" && !p.AutoDeployEnabled() {
-		if sshHost, err := sshexec.ExtractHost(nodeInfo.ProxmoxURL); err != nil {
-			log.Warn("provision: extract ssh host from proxmox url", "error", err)
-		} else {
-			// dashToken is not quoted: it is already inside single quotes here,
-			// and generateToken produces hex, which carries no shell meaning.
-			cmd := fmt.Sprintf("sed -i '/^DASHBOARD_TOKEN=/d' %[1]s/.env && echo 'DASHBOARD_TOKEN=%[2]s' >> %[1]s/.env", sshexec.Quote(p.appDir), dashToken)
-			if err := p.sshClient.ExecInContainer(ctx, sshHost, newID, cmd); err != nil {
-				log.Warn("provision: write dashboard token to container", "error", err)
-			} else {
-				log.Info("provision: dashboard token set via legacy path")
-			}
-		}
-	}
-
-	// Save dashboard token to DB
-	if dashToken != "" {
+	if p.AutoDeployEnabled() {
+		// Auto-deploy path: the tenant stays 'provisioning' until the mandatory
+		// token persistence and deploy succeed, so a failed deploy leaves an
+		// 'error' tenant with a valid container ID rather than a falsely
+		// 'active' one with a broken app.
 		if err := p.tenantStore.SetDashboardToken(ctx, tenantID, dashToken); err != nil {
-			log.Warn("provision: save dashboard token to db", "error", err)
+			log.Error("provision: save dashboard token to db", "error", err)
+			p.markErrorKeepReservation(ctx, tenantID, "provisioning failed: could not persist dashboard token")
+			return
 		}
-	}
 
-	// Mark as active
-	if err := p.tenantStore.SetActive(ctx, tenantID, newID); err != nil {
-		log.Error("provision: set active", "error", err)
-		p.cleanupAndError(ctx, client, tenantID, nodeID, ramMB, newID, "provisioning failed: could not update status")
-		return
-	}
-
-	// Auto-deploy freeRadio (best-effort, don't fail provisioning)
-	if p.sshClient != nil && p.AutoDeployEnabled() {
-		if sshHost, err := sshexec.ExtractHost(nodeInfo.ProxmoxURL); err != nil {
-			log.Error("provision: extract ssh host for deploy", "error", err)
-		} else {
-			if err := p.deployFreeRadio(ctx, sshHost, newID, tenantID, dashToken); err != nil {
+		if p.sshClient != nil {
+			if sshHost, err := sshexec.ExtractHost(nodeInfo.ProxmoxURL); err != nil {
+				log.Error("provision: extract ssh host for deploy", "error", err)
+				p.markErrorKeepReservation(ctx, tenantID, "provisioning failed: could not resolve ssh host")
+				return
+			} else if err := p.deployFreeRadio(ctx, sshHost, newID, tenantID, dashToken); err != nil {
 				log.Error("provision: auto-deploy freeRadio failed", "error", err)
-				// Best-effort: the tenant is already active, the deploy can be retried manually
+				p.markErrorKeepReservation(ctx, tenantID, "provisioning failed: deploy: "+err.Error())
+				return
 			}
+		}
+
+		// Mark as active only after the deploy succeeded.
+		if err := p.tenantStore.SetActive(ctx, tenantID, newID); err != nil {
+			log.Error("provision: set active", "error", err)
+			p.cleanupAndError(ctx, client, tenantID, newID, "provisioning failed: could not update status")
+			return
+		}
+	} else {
+		// Legacy path (auto-deploy disabled): write DASHBOARD_TOKEN to the
+		// container's .env and persist it, then mark active. All best-effort.
+		if p.sshClient != nil && dashToken != "" {
+			if sshHost, err := sshexec.ExtractHost(nodeInfo.ProxmoxURL); err != nil {
+				log.Warn("provision: extract ssh host from proxmox url", "error", err)
+			} else {
+				// dashToken is not quoted: it is already inside single quotes here,
+				// and generateToken produces hex, which carries no shell meaning.
+				cmd := fmt.Sprintf("sed -i '/^DASHBOARD_TOKEN=/d' %[1]s/.env && echo 'DASHBOARD_TOKEN=%[2]s' >> %[1]s/.env", sshexec.Quote(p.appDir), dashToken)
+				if err := p.sshClient.ExecInContainer(ctx, sshHost, newID, cmd); err != nil {
+					log.Warn("provision: write dashboard token to container", "error", err)
+				} else {
+					log.Info("provision: dashboard token set via legacy path")
+				}
+			}
+		}
+
+		// Save dashboard token to DB (best-effort)
+		if dashToken != "" {
+			if err := p.tenantStore.SetDashboardToken(ctx, tenantID, dashToken); err != nil {
+				log.Warn("provision: save dashboard token to db", "error", err)
+			}
+		}
+
+		// Mark as active
+		if err := p.tenantStore.SetActive(ctx, tenantID, newID); err != nil {
+			log.Error("provision: set active", "error", err)
+			p.cleanupAndError(ctx, client, tenantID, newID, "provisioning failed: could not update status")
+			return
 		}
 	}
 
@@ -588,9 +642,8 @@ func (p *Provisioner) waitForHealth(ctx context.Context, url string) bool {
 }
 
 // Deprovision removes an LXC container for a tenant synchronously.
-// ramMB is passed by the caller (from the project) so we don't need to re-fetch the project.
 // subdomain is used to remove the Caddy route if a CaddyClient is configured.
-func (p *Provisioner) Deprovision(ctx context.Context, tenantID, nodeID, subdomain string, lxcID, ramMB int) error {
+func (p *Provisioner) Deprovision(ctx context.Context, tenantID, nodeID, subdomain string, lxcID int) error {
 	log := slog.With("tenant_id", tenantID, "node_id", nodeID, "lxc_id", lxcID)
 
 	// Atomically transition to deleting — prevents concurrent delete requests
@@ -641,11 +694,10 @@ func (p *Provisioner) Deprovision(ctx context.Context, tenantID, nodeID, subdoma
 		}
 	}
 
-	// Release RAM
-	if ramMB > 0 {
-		if err := p.nodeStore.ReleaseRAM(ctx, nodeID, ramMB); err != nil {
-			log.Error("deprovision: release ram", "error", err)
-		}
+	// Release the tenant's reservation. The amount comes from the tenant's own
+	// record, so no project figure is needed here.
+	if err := p.tenantStore.ReleaseReservation(ctx, tenantID); err != nil {
+		log.Error("deprovision: release reservation", "error", err)
 	}
 
 	// Remove Caddy route (best-effort, don't fail deprovisioning)
@@ -712,20 +764,30 @@ func (p *Provisioner) Resume(ctx context.Context, tenantID, nodeID string, lxcID
 	return nil
 }
 
-// setError marks a tenant as errored (sanitized message) and releases RAM.
-func (p *Provisioner) setError(ctx context.Context, tenantID, nodeID string, ramMB int, errMsg string) {
+// setError marks a tenant as errored (sanitized message) and releases its
+// reservation. The reservation is released through the tenant store so it is
+// driven by the tenant's own record and released at most once.
+func (p *Provisioner) setError(ctx context.Context, tenantID, errMsg string) {
 	if err := p.tenantStore.SetError(ctx, tenantID, errMsg); err != nil {
 		slog.Error("provision: failed to set error status", "tenant_id", tenantID, "error", err)
 	}
-	if ramMB > 0 {
-		if err := p.nodeStore.ReleaseRAM(ctx, nodeID, ramMB); err != nil {
-			slog.Error("provision: failed to release ram", "tenant_id", tenantID, "error", err)
-		}
+	if err := p.tenantStore.ReleaseReservation(ctx, tenantID); err != nil {
+		slog.Error("provision: failed to release reservation", "tenant_id", tenantID, "error", err)
 	}
 }
 
-// cleanupAndError attempts to delete the created container, then marks error and releases RAM.
-func (p *Provisioner) cleanupAndError(ctx context.Context, client ProxmoxClient, tenantID, nodeID string, ramMB, lxcID int, errMsg string) {
+// markErrorKeepReservation marks a tenant errored but keeps its reservation
+// held. It is for a container that exists and still holds RAM: releasing the
+// reservation here would let the node's accounting drop while the container
+// is still running. The reservation is released later by a successful delete.
+func (p *Provisioner) markErrorKeepReservation(ctx context.Context, tenantID, errMsg string) {
+	if err := p.tenantStore.SetError(ctx, tenantID, errMsg); err != nil {
+		slog.Error("provision: failed to set error status", "tenant_id", tenantID, "error", err)
+	}
+}
+
+// cleanupAndError attempts to delete the created container, then marks error and releases the reservation.
+func (p *Provisioner) cleanupAndError(ctx context.Context, client ProxmoxClient, tenantID string, lxcID int, errMsg string) {
 	slog.Info("provision: attempting cleanup", "tenant_id", tenantID, "lxc_id", lxcID)
 	deleteTask, err := client.DeleteContainer(ctx, lxcID, true)
 	if err != nil {
@@ -735,7 +797,7 @@ func (p *Provisioner) cleanupAndError(ctx context.Context, client ProxmoxClient,
 			slog.Error("provision: cleanup delete wait failed", "tenant_id", tenantID, "error", err)
 		}
 	}
-	p.setError(ctx, tenantID, nodeID, ramMB, errMsg)
+	p.setError(ctx, tenantID, errMsg)
 }
 
 // deployFreeRadio clones the repo, writes .env, and starts the Docker services inside the LXC.
@@ -777,33 +839,48 @@ func (p *Provisioner) deployFreeRadio(ctx context.Context, sshHost string, lxcID
 		return fmt.Errorf("fetch repo: %w", err)
 	}
 
-	// Step 3: Write .env.
+	// Step 3: Write .env, idempotently.
 	//
 	// Every variable here is one the stack refuses to start without: the
 	// dashboard throws on boot with no STREAM_KEYS_SECRET, and the four
 	// ICECAST_* variables are interpolated by compose with no default, so an
 	// absent one leaves the broker with an empty password.
+	//
+	// The write only appends keys that are absent rather than overwriting the
+	// whole file, so a re-run of the deploy (a retry after a partial failure)
+	// never replaces valid secrets that a previous run already persisted into a
+	// surviving volume. Values are hex, so they carry no shell meaning, and
+	// appDir is quoted. INGEST_CALLBACK_SECRET is written here for the ingest
+	// callback (FR-3) and is never exposed through the API — it lives only in
+	// the container's .env.
+	//
+	// SSO_PUBLIC_KEY and TENANT_ID land in the tenant env so the tenant can
+	// verify SSO assertions signed by the control plane. The private signing
+	// key stays only in the control plane, so a browser holding the dashboard
+	// token cannot forge a tier upgrade.
 	log.Info("provision: deploy — writing .env")
 	secrets, err := generateDeploySecrets()
 	if err != nil {
 		return fmt.Errorf("generate deploy secrets: %w", err)
 	}
-	envContent := fmt.Sprintf(
-		"TENANT_ID=%s\n"+
-			"DASHBOARD_TOKEN=%s\n"+
-			"STREAM_KEYS_SECRET=%s\n"+
-			"ICECAST_SOURCE_PASSWORD=%s\n"+
-			"ICECAST_ADMIN_PASSWORD=%s\n"+
-			"ICECAST_PASSWORD=%s\n"+
-			"ICECAST_RELAY_PASSWORD=%s\n"+
-			"S3_ENABLED=false\n"+
-			"NODE_ENV=production\n",
-		tenantID, dashboardToken, secrets.StreamKeys,
-		secrets.IcecastSource, secrets.IcecastAdmin, secrets.IcecastListen, secrets.IcecastRelay)
-	// envContent is not quoted: it is the body of a single-quoted heredoc, so
-	// the shell expands nothing inside it, and the only way out would be a line
-	// reading exactly ENVEOF, which none of these values can produce.
-	writeEnvCmd := fmt.Sprintf("cat > %s/.env << 'ENVEOF'\n%sENVEOF", sshexec.Quote(p.appDir), envContent)
+	appDir := sshexec.Quote(p.appDir)
+	writeEnvCmd := fmt.Sprintf(
+		"touch %[1]s/.env && "+
+			"grep -q '^TENANT_ID=' %[1]s/.env || echo 'TENANT_ID=%[2]s' >> %[1]s/.env; "+
+			"grep -q '^DASHBOARD_TOKEN=' %[1]s/.env || echo 'DASHBOARD_TOKEN=%[3]s' >> %[1]s/.env; "+
+			"grep -q '^STREAM_KEYS_SECRET=' %[1]s/.env || echo 'STREAM_KEYS_SECRET=%[4]s' >> %[1]s/.env; "+
+			"grep -q '^ICECAST_SOURCE_PASSWORD=' %[1]s/.env || echo 'ICECAST_SOURCE_PASSWORD=%[5]s' >> %[1]s/.env; "+
+			"grep -q '^ICECAST_ADMIN_PASSWORD=' %[1]s/.env || echo 'ICECAST_ADMIN_PASSWORD=%[6]s' >> %[1]s/.env; "+
+			"grep -q '^ICECAST_PASSWORD=' %[1]s/.env || echo 'ICECAST_PASSWORD=%[7]s' >> %[1]s/.env; "+
+			"grep -q '^ICECAST_RELAY_PASSWORD=' %[1]s/.env || echo 'ICECAST_RELAY_PASSWORD=%[8]s' >> %[1]s/.env; "+
+			"grep -q '^INGEST_CALLBACK_SECRET=' %[1]s/.env || echo 'INGEST_CALLBACK_SECRET=%[9]s' >> %[1]s/.env; "+
+			"grep -q '^S3_ENABLED=' %[1]s/.env || echo 'S3_ENABLED=false' >> %[1]s/.env; "+
+			"grep -q '^NODE_ENV=' %[1]s/.env || echo 'NODE_ENV=production' >> %[1]s/.env",
+		appDir, tenantID, dashboardToken, secrets.StreamKeys,
+		secrets.IcecastSource, secrets.IcecastAdmin, secrets.IcecastListen, secrets.IcecastRelay, secrets.IngestCallback)
+	if p.ssoPublicKey != "" {
+		writeEnvCmd += fmt.Sprintf("; grep -q '^SSO_PUBLIC_KEY=' %[1]s/.env || echo 'SSO_PUBLIC_KEY=%[2]s' >> %[1]s/.env", appDir, p.ssoPublicKey)
+	}
 	if err := p.sshClient.ExecInContainer(ctx, sshHost, lxcID, writeEnvCmd); err != nil {
 		return fmt.Errorf("write .env: %w", err)
 	}
@@ -846,16 +923,17 @@ func (p *Provisioner) deployFreeRadio(ctx context.Context, sshHost string, lxcID
 // They are generated rather than fixed: each tenant gets its own stack, and
 // these are the credentials protecting it.
 type deploySecrets struct {
-	StreamKeys    string
-	IcecastSource string
-	IcecastAdmin  string
-	IcecastListen string
-	IcecastRelay  string
+	StreamKeys     string
+	IcecastSource  string
+	IcecastAdmin   string
+	IcecastListen  string
+	IcecastRelay   string
+	IngestCallback string
 }
 
 func generateDeploySecrets() (deploySecrets, error) {
 	var s deploySecrets
-	for _, target := range []*string{&s.StreamKeys, &s.IcecastSource, &s.IcecastAdmin, &s.IcecastListen, &s.IcecastRelay} {
+	for _, target := range []*string{&s.StreamKeys, &s.IcecastSource, &s.IcecastAdmin, &s.IcecastListen, &s.IcecastRelay, &s.IngestCallback} {
 		token, err := generateToken()
 		if err != nil {
 			return deploySecrets{}, err

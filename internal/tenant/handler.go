@@ -22,6 +22,8 @@ type TenantStore interface {
 	ListPaginated(ctx context.Context, limit, offset int, status, nodeID, projectID string) ([]Tenant, int, error)
 	GetByID(ctx context.Context, id string) (*Tenant, error)
 	Create(ctx context.Context, req CreateTenantRequest) (*Tenant, error)
+	CreateWithReservation(ctx context.Context, req CreateTenantRequest, ramMB int) (*Tenant, error)
+	ReleaseReservation(ctx context.Context, tenantID string) error
 	Update(ctx context.Context, id string, req UpdateTenantRequest) (*Tenant, error)
 	SetDeleting(ctx context.Context, id string) error
 	SetDeleted(ctx context.Context, id string) error
@@ -32,8 +34,6 @@ type TenantStore interface {
 // NodeStore defines node operations needed by the tenant handler.
 type NodeStore interface {
 	GetByID(ctx context.Context, id string) (*node.Node, error)
-	ReserveRAM(ctx context.Context, nodeID string, ramMB int) error
-	ReleaseRAM(ctx context.Context, nodeID string, ramMB int) error
 }
 
 // ProjectStore defines project operations needed by the tenant handler.
@@ -43,8 +43,8 @@ type ProjectStore interface {
 
 // Provisioner defines the provisioning operations.
 type Provisioner interface {
-	Provision(tenantID, nodeID, projectID, subdomain string, ramMB int)
-	Deprovision(ctx context.Context, tenantID, nodeID, subdomain string, lxcID, ramMB int) error
+	Provision(tenantID, nodeID, projectID, subdomain string)
+	Deprovision(ctx context.Context, tenantID, nodeID, subdomain string, lxcID int) error
 	Suspend(ctx context.Context, tenantID, nodeID string, lxcID int) error
 	Resume(ctx context.Context, tenantID, nodeID string, lxcID int) error
 }
@@ -66,7 +66,7 @@ func NewHandler(store TenantStore, nodeStore NodeStore, projectStore ProjectStor
 		projectStore: projectStore,
 		provisioner:  provisioner,
 		auditStore:   auditStore,
-		lifecycle:    NewLifecycleService(store, nodeStore, projectStore, provisioner, auditStore),
+		lifecycle:    NewLifecycleService(store, provisioner, auditStore),
 	}
 }
 

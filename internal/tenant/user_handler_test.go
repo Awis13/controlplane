@@ -3,9 +3,15 @@ package tenant
 import (
 	"bytes"
 	"context"
+	"crypto/ed25519"
+	"crypto/rand"
+	"encoding/base64"
+	"encoding/hex"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
+	"strings"
 	"testing"
 	"time"
 
@@ -15,6 +21,7 @@ import (
 	"controlplane/internal/auth"
 	"controlplane/internal/node"
 	"controlplane/internal/project"
+	"controlplane/internal/sso"
 	"controlplane/internal/user"
 )
 
@@ -50,6 +57,33 @@ func (m *mockUserTenantStore) CreateWithOwner(_ context.Context, req CreateTenan
 		HealthStatus: "unknown",
 		CreatedAt:    time.Now(),
 		UpdatedAt:    time.Now(),
+	}
+	m.tenants[t.ID] = t
+	m.ownerTenants[ownerID] = append(m.ownerTenants[ownerID], *t)
+	return t, nil
+}
+
+// CreateWithOwnerWithReservation is the owner-scoped reservation path the
+// lifecycle drives. It records the owner and the reservation together.
+func (m *mockUserTenantStore) CreateWithOwnerWithReservation(_ context.Context, req CreateTenantRequest, ownerID string, ramMB int) (*Tenant, error) {
+	if m.createWithReservationErr != nil {
+		return nil, m.createWithReservationErr
+	}
+	if m.createErr != nil {
+		return nil, m.createErr
+	}
+	t := &Tenant{
+		ID:            "user-tenant-id",
+		Name:          req.Name,
+		ProjectID:     req.ProjectID,
+		NodeID:        req.NodeID,
+		Subdomain:     req.Subdomain,
+		Status:        "provisioning",
+		OwnerID:       &ownerID,
+		HealthStatus:  "unknown",
+		ReservedRAMMB: &ramMB,
+		CreatedAt:     time.Now(),
+		UpdatedAt:     time.Now(),
 	}
 	m.tenants[t.ID] = t
 	m.ownerTenants[ownerID] = append(m.ownerTenants[ownerID], *t)
@@ -148,8 +182,33 @@ func newTestUserHandler() (*UserHandler, *mockUserTenantStore, *mockUserNodeStor
 	ns := newMockUserNodeStore()
 	ps := newMockUserProjectStore()
 	prov := newMockProvisioner()
-	h := NewUserHandler(ts, ns, ps, prov, nil, "example.com", "")
+	h := NewUserHandler(ts, ns, ps, prov, nil, "example.com", "", nil)
 	return h, ts, ns, ps, prov
+}
+
+// newTestSigner returns an SSO signer backed by a freshly generated key.
+func newTestSigner() *sso.Signer {
+	_, priv, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		panic(err)
+	}
+	signer, err := sso.NewSigner(hex.EncodeToString(priv))
+	if err != nil {
+		panic(err)
+	}
+	return signer
+}
+
+// newTestUserHandlerWithSigner is newTestUserHandler with an SSO signer wired
+// in, so SSOToken tests can exercise the signed path.
+func newTestUserHandlerWithSigner() (*UserHandler, *mockUserTenantStore, *mockUserNodeStore, *mockUserProjectStore, *mockProvisioner, *sso.Signer) {
+	ts := newMockUserTenantStore()
+	ns := newMockUserNodeStore()
+	ps := newMockUserProjectStore()
+	prov := newMockProvisioner()
+	signer := newTestSigner()
+	h := NewUserHandler(ts, ns, ps, prov, nil, "example.com", "", signer)
+	return h, ts, ns, ps, prov, signer
 }
 
 // --- Tests ---
@@ -160,7 +219,7 @@ func TestUserList_Empty(t *testing.T) {
 	ps := newMockUserProjectStore()
 	prov := newMockProvisioner()
 
-	h := NewUserHandler(ts, ns, ps, prov, nil, "example.com", "")
+	h := NewUserHandler(ts, ns, ps, prov, nil, "example.com", "", nil)
 	r := userTenantRouter(h)
 
 	req := httptest.NewRequest("GET", "/tenants", nil)
@@ -195,7 +254,7 @@ func TestUserList_ReturnOwnTenants(t *testing.T) {
 		{ID: "t2", Name: "My Other Radio", OwnerID: &ownerID, Status: "provisioning"},
 	}
 
-	h := NewUserHandler(ts, ns, ps, prov, nil, "example.com", "")
+	h := NewUserHandler(ts, ns, ps, prov, nil, "example.com", "", nil)
 	r := userTenantRouter(h)
 
 	req := httptest.NewRequest("GET", "/tenants", nil)
@@ -224,7 +283,7 @@ func TestUserList_Unauthenticated(t *testing.T) {
 	ps := newMockUserProjectStore()
 	prov := newMockProvisioner()
 
-	h := NewUserHandler(ts, ns, ps, prov, nil, "example.com", "")
+	h := NewUserHandler(ts, ns, ps, prov, nil, "example.com", "", nil)
 	r := userTenantRouterNoAuth(h)
 
 	req := httptest.NewRequest("GET", "/tenants", nil)
@@ -245,7 +304,7 @@ func TestUserCreate_Success(t *testing.T) {
 	ns.leastLoaded = activeNode()
 	ps.defaultProject = testProjectObj()
 
-	h := NewUserHandler(ts, ns, ps, prov, nil, "example.com", "")
+	h := NewUserHandler(ts, ns, ps, prov, nil, "example.com", "", nil)
 	r := userTenantRouter(h)
 
 	body, _ := json.Marshal(UserCreateRequest{Name: "My Radio", Subdomain: "my-radio"})
@@ -281,7 +340,7 @@ func TestUserCreate_MissingName(t *testing.T) {
 	ps := newMockUserProjectStore()
 	prov := newMockProvisioner()
 
-	h := NewUserHandler(ts, ns, ps, prov, nil, "example.com", "")
+	h := NewUserHandler(ts, ns, ps, prov, nil, "example.com", "", nil)
 	r := userTenantRouter(h)
 
 	body, _ := json.Marshal(UserCreateRequest{Subdomain: "my-radio"})
@@ -301,7 +360,7 @@ func TestUserCreate_MissingSubdomain(t *testing.T) {
 	ps := newMockUserProjectStore()
 	prov := newMockProvisioner()
 
-	h := NewUserHandler(ts, ns, ps, prov, nil, "example.com", "")
+	h := NewUserHandler(ts, ns, ps, prov, nil, "example.com", "", nil)
 	r := userTenantRouter(h)
 
 	body, _ := json.Marshal(UserCreateRequest{Name: "My Radio"})
@@ -321,7 +380,7 @@ func TestUserCreate_InvalidSubdomain(t *testing.T) {
 	ps := newMockUserProjectStore()
 	prov := newMockProvisioner()
 
-	h := NewUserHandler(ts, ns, ps, prov, nil, "example.com", "")
+	h := NewUserHandler(ts, ns, ps, prov, nil, "example.com", "", nil)
 	r := userTenantRouter(h)
 
 	invalids := []string{"-bad", "bad-", "A", "a", "has space"}
@@ -344,7 +403,7 @@ func TestUserCreate_ReservedSubdomain(t *testing.T) {
 	ps := newMockUserProjectStore()
 	prov := newMockProvisioner()
 
-	h := NewUserHandler(ts, ns, ps, prov, nil, "example.com", "")
+	h := NewUserHandler(ts, ns, ps, prov, nil, "example.com", "", nil)
 	r := userTenantRouter(h)
 
 	body, _ := json.Marshal(UserCreateRequest{Name: "Admin Radio", Subdomain: "admin"})
@@ -366,7 +425,7 @@ func TestUserCreate_NoProject(t *testing.T) {
 
 	ps.defaultProject = nil // no projects configured
 
-	h := NewUserHandler(ts, ns, ps, prov, nil, "example.com", "")
+	h := NewUserHandler(ts, ns, ps, prov, nil, "example.com", "", nil)
 	r := userTenantRouter(h)
 
 	body, _ := json.Marshal(UserCreateRequest{Name: "My Radio", Subdomain: "my-radio"})
@@ -389,7 +448,7 @@ func TestUserCreate_NoAvailableNode(t *testing.T) {
 	ps.defaultProject = testProjectObj()
 	ns.leastLoaded = nil // no nodes with capacity
 
-	h := NewUserHandler(ts, ns, ps, prov, nil, "example.com", "")
+	h := NewUserHandler(ts, ns, ps, prov, nil, "example.com", "", nil)
 	r := userTenantRouter(h)
 
 	body, _ := json.Marshal(UserCreateRequest{Name: "My Radio", Subdomain: "my-radio"})
@@ -411,9 +470,9 @@ func TestUserCreate_InsufficientCapacity(t *testing.T) {
 
 	ps.defaultProject = testProjectObj()
 	ns.leastLoaded = activeNode()
-	ns.reserveErr = node.ErrInsufficientCapacity
+	ts.createWithReservationErr = node.ErrInsufficientCapacity
 
-	h := NewUserHandler(ts, ns, ps, prov, nil, "example.com", "")
+	h := NewUserHandler(ts, ns, ps, prov, nil, "example.com", "", nil)
 	r := userTenantRouter(h)
 
 	body, _ := json.Marshal(UserCreateRequest{Name: "My Radio", Subdomain: "my-radio"})
@@ -433,7 +492,7 @@ func TestUserCreate_Unauthenticated(t *testing.T) {
 	ps := newMockUserProjectStore()
 	prov := newMockProvisioner()
 
-	h := NewUserHandler(ts, ns, ps, prov, nil, "example.com", "")
+	h := NewUserHandler(ts, ns, ps, prov, nil, "example.com", "", nil)
 	r := userTenantRouterNoAuth(h)
 
 	body, _ := json.Marshal(UserCreateRequest{Name: "My Radio", Subdomain: "my-radio"})
@@ -450,22 +509,20 @@ func TestUserCreate_Unauthenticated(t *testing.T) {
 // --- SSO Token Tests ---
 
 func TestUserSSOToken_Success(t *testing.T) {
-	h, ts, _, _, _ := newTestUserHandler()
+	h, ts, _, _, _, signer := newTestUserHandlerWithSigner()
 
 	ownerID := testUserID.String()
-	dashToken := "secret-dashboard-token"
 	ts.tenants[validTenantID] = &Tenant{
-		ID:             validTenantID,
-		Name:           "test",
-		ProjectID:      validProjectID,
-		NodeID:         validNodeID,
-		Subdomain:      "my-radio",
-		Status:         "active",
-		OwnerID:        &ownerID,
-		DashboardToken: &dashToken,
-		HealthStatus:   "unknown",
-		CreatedAt:      time.Now(),
-		UpdatedAt:      time.Now(),
+		ID:           validTenantID,
+		Name:         "test",
+		ProjectID:    validProjectID,
+		NodeID:       validNodeID,
+		Subdomain:    "my-radio",
+		Status:       "active",
+		OwnerID:      &ownerID,
+		HealthStatus: "unknown",
+		CreatedAt:    time.Now(),
+		UpdatedAt:    time.Now(),
 	}
 
 	r := userTenantRouter(h)
@@ -497,25 +554,81 @@ func TestUserSSOToken_Success(t *testing.T) {
 	if !ok || expiresIn != 60 {
 		t.Errorf("expected expires_in=60, got %v", resp["expires_in"])
 	}
+
+	// The token must be a valid signed assertion: parse it, check the payload
+	// carries the right tier and tenant, and verify the signature with the
+	// signer's public key.
+	token := tokenFromURL(t, ssoURL)
+	payload, sig := decodeToken(t, token)
+	if !ed25519.Verify(signer.PublicKey(), payload, sig) {
+		t.Error("token signature did not verify with the signer's public key")
+	}
+	fields := strings.Split(string(payload), "|")
+	if len(fields) != 8 {
+		t.Fatalf("payload = %q, want 8 pipe-separated fields", payload)
+	}
+	if fields[0] != "v1" {
+		t.Errorf("payload version = %q, want v1", fields[0])
+	}
+	if fields[1] != testUserID.String() {
+		t.Errorf("payload userID = %q, want %s", fields[1], testUserID)
+	}
+	if fields[2] != validTenantID {
+		t.Errorf("payload tenantID = %q, want %s", fields[2], validTenantID)
+	}
+	if fields[3] != "free" {
+		t.Errorf("payload tier = %q, want free", fields[3])
+	}
+	if fields[6] != "controlplane" {
+		t.Errorf("payload issuer = %q, want controlplane", fields[6])
+	}
+	if fields[7] != validTenantID {
+		t.Errorf("payload audience = %q, want %s", fields[7], validTenantID)
+	}
+}
+
+func TestUserSSOToken_NoSigner(t *testing.T) {
+	h, ts, _, _, _ := newTestUserHandler()
+
+	ownerID := testUserID.String()
+	ts.tenants[validTenantID] = &Tenant{
+		ID:           validTenantID,
+		Name:         "test",
+		ProjectID:    validProjectID,
+		NodeID:       validNodeID,
+		Subdomain:    "my-radio",
+		Status:       "active",
+		OwnerID:      &ownerID,
+		HealthStatus: "unknown",
+		CreatedAt:    time.Now(),
+		UpdatedAt:    time.Now(),
+	}
+
+	r := userTenantRouter(h)
+	req := httptest.NewRequest("POST", "/tenants/"+validTenantID+"/sso-token", nil)
+	w := httptest.NewRecorder()
+	r.ServeHTTP(w, req)
+
+	if w.Code != http.StatusServiceUnavailable {
+		t.Errorf("expected 503, got %d: %s", w.Code, w.Body.String())
+	}
 }
 
 func TestUserSSOToken_NonOwner(t *testing.T) {
 	h, ts, _, _, _ := newTestUserHandler()
 
 	otherOwner := "99999999-9999-9999-9999-999999999999"
-	dashToken := "secret-dashboard-token"
 	ts.tenants[validTenantID] = &Tenant{
-		ID:             validTenantID,
-		Name:           "test",
-		ProjectID:      validProjectID,
-		NodeID:         validNodeID,
-		Subdomain:      "other-radio",
-		Status:         "active",
-		OwnerID:        &otherOwner,
-		DashboardToken: &dashToken,
-		HealthStatus:   "unknown",
-		CreatedAt:      time.Now(),
-		UpdatedAt:      time.Now(),
+		ID:           validTenantID,
+		Name:         "test",
+		ProjectID:    validProjectID,
+		NodeID:       validNodeID,
+		Subdomain:    "other-radio",
+		Status:       "active",
+		OwnerID:      &otherOwner,
+		HealthStatus: "unknown",
+		CreatedAt:    time.Now(),
+		UpdatedAt:    time.Now(),
 	}
 
 	r := userTenantRouter(h)
@@ -532,19 +645,17 @@ func TestUserSSOToken_InactiveTenant(t *testing.T) {
 	h, ts, _, _, _ := newTestUserHandler()
 
 	ownerID := testUserID.String()
-	dashToken := "secret-dashboard-token"
 	ts.tenants[validTenantID] = &Tenant{
-		ID:             validTenantID,
-		Name:           "test",
-		ProjectID:      validProjectID,
-		NodeID:         validNodeID,
-		Subdomain:      "my-radio",
-		Status:         "suspended",
-		OwnerID:        &ownerID,
-		DashboardToken: &dashToken,
-		HealthStatus:   "unknown",
-		CreatedAt:      time.Now(),
-		UpdatedAt:      time.Now(),
+		ID:           validTenantID,
+		Name:         "test",
+		ProjectID:    validProjectID,
+		NodeID:       validNodeID,
+		Subdomain:    "my-radio",
+		Status:       "suspended",
+		OwnerID:      &ownerID,
+		HealthStatus: "unknown",
+		CreatedAt:    time.Now(),
+		UpdatedAt:    time.Now(),
 	}
 
 	r := userTenantRouter(h)
@@ -554,34 +665,6 @@ func TestUserSSOToken_InactiveTenant(t *testing.T) {
 
 	if w.Code != http.StatusConflict {
 		t.Errorf("expected 409, got %d: %s", w.Code, w.Body.String())
-	}
-}
-
-func TestUserSSOToken_NoDashboardToken(t *testing.T) {
-	h, ts, _, _, _ := newTestUserHandler()
-
-	ownerID := testUserID.String()
-	ts.tenants[validTenantID] = &Tenant{
-		ID:             validTenantID,
-		Name:           "test",
-		ProjectID:      validProjectID,
-		NodeID:         validNodeID,
-		Subdomain:      "my-radio",
-		Status:         "active",
-		OwnerID:        &ownerID,
-		DashboardToken: nil,
-		HealthStatus:   "unknown",
-		CreatedAt:      time.Now(),
-		UpdatedAt:      time.Now(),
-	}
-
-	r := userTenantRouter(h)
-	req := httptest.NewRequest("POST", "/tenants/"+validTenantID+"/sso-token", nil)
-	w := httptest.NewRecorder()
-	r.ServeHTTP(w, req)
-
-	if w.Code != http.StatusInternalServerError {
-		t.Errorf("expected 500, got %d: %s", w.Code, w.Body.String())
 	}
 }
 
@@ -596,6 +679,38 @@ func TestUserSSOToken_Unauthenticated(t *testing.T) {
 	if w.Code != http.StatusUnauthorized {
 		t.Errorf("expected 401, got %d: %s", w.Code, w.Body.String())
 	}
+}
+
+// tokenFromURL extracts the token query parameter from an SSO URL.
+func tokenFromURL(t *testing.T, ssoURL string) string {
+	t.Helper()
+	u, err := url.Parse(ssoURL)
+	if err != nil {
+		t.Fatalf("parse sso url: %v", err)
+	}
+	token := u.Query().Get("token")
+	if token == "" {
+		t.Fatalf("no token in url: %s", ssoURL)
+	}
+	return token
+}
+
+// decodeToken splits a base64url(payload):base64url(sig) token and decodes both.
+func decodeToken(t *testing.T, token string) (payload, sig []byte) {
+	t.Helper()
+	parts := strings.Split(token, ":")
+	if len(parts) != 2 {
+		t.Fatalf("token = %q, want one ':' separator", token)
+	}
+	payload, err := base64.RawURLEncoding.DecodeString(parts[0])
+	if err != nil {
+		t.Fatalf("decode payload: %v", err)
+	}
+	sig, err = base64.RawURLEncoding.DecodeString(parts[1])
+	if err != nil {
+		t.Fatalf("decode sig: %v", err)
+	}
+	return payload, sig
 }
 
 // --- Delete Tests ---

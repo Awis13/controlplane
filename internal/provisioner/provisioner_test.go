@@ -25,14 +25,12 @@ type mockNodeStore struct {
 	mu     sync.Mutex
 	nodes  map[string]*node.Node
 	tokens map[string]string
-	ram    map[string]int
 }
 
 func newMockNodeStore() *mockNodeStore {
 	return &mockNodeStore{
 		nodes:  make(map[string]*node.Node),
 		tokens: make(map[string]string),
-		ram:    make(map[string]int),
 	}
 }
 
@@ -52,16 +50,6 @@ func (m *mockNodeStore) GetEncryptedTokenByID(_ context.Context, id string) (str
 	return m.tokens[id], nil
 }
 
-func (m *mockNodeStore) ReleaseRAM(_ context.Context, nodeID string, ramMB int) error {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	m.ram[nodeID] -= ramMB
-	if m.ram[nodeID] < 0 {
-		m.ram[nodeID] = 0
-	}
-	return nil
-}
-
 type mockTenantStore struct {
 	mu              sync.Mutex
 	statuses        map[string]string
@@ -73,6 +61,10 @@ type mockTenantStore struct {
 	nextIP          string // overrides the allocated address, for health-check tests
 
 	setDeletingErr error
+
+	// releaseReservationCalls records every reservation release, so tests can
+	// assert that a failed provision or a deprovision handed the RAM back.
+	releaseReservationCalls []string
 }
 
 func newMockTenantStore() *mockTenantStore {
@@ -89,6 +81,13 @@ func (m *mockTenantStore) SetActive(_ context.Context, id string, lxcID int) err
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	m.statuses[id] = "active"
+	m.lxcIDs[id] = lxcID
+	return nil
+}
+
+func (m *mockTenantStore) SetLXCID(_ context.Context, id string, lxcID int) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
 	m.lxcIDs[id] = lxcID
 	return nil
 }
@@ -157,6 +156,36 @@ func (m *mockTenantStore) SetDashboardToken(_ context.Context, id string, token 
 	defer m.mu.Unlock()
 	m.dashboardTokens[id] = token
 	return nil
+}
+
+func (m *mockTenantStore) ReleaseReservation(_ context.Context, tenantID string) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.releaseReservationCalls = append(m.releaseReservationCalls, tenantID)
+	return nil
+}
+
+// assertReservationReleased fails unless the tenant's reservation was released.
+// The caller must hold the tenant store's lock.
+func assertReservationReleased(t *testing.T, ts *mockTenantStore, tenantID string) {
+	t.Helper()
+	for _, id := range ts.releaseReservationCalls {
+		if id == tenantID {
+			return
+		}
+	}
+	t.Errorf("expected reservation for %s to be released, got %v", tenantID, ts.releaseReservationCalls)
+}
+
+// assertReservationNotReleased fails if the tenant's reservation was released.
+// The caller must hold the tenant store's lock.
+func assertReservationNotReleased(t *testing.T, ts *mockTenantStore, tenantID string) {
+	t.Helper()
+	for _, id := range ts.releaseReservationCalls {
+		if id == tenantID {
+			t.Errorf("expected reservation for %s NOT to be released, got %v", tenantID, ts.releaseReservationCalls)
+		}
+	}
 }
 
 type mockProjectStore struct {
@@ -360,8 +389,8 @@ func setupProvisioner(nodeStore *mockNodeStore, tenantStore *mockTenantStore, pr
 }
 
 // waitForProvision calls Provision and waits for the goroutine to complete.
-func waitForProvision(p *Provisioner, tenantID, nodeID, projectID, subdomain string, ramMB int) {
-	p.Provision(tenantID, nodeID, projectID, subdomain, ramMB)
+func waitForProvision(p *Provisioner, tenantID, nodeID, projectID, subdomain string) {
+	p.Provision(tenantID, nodeID, projectID, subdomain)
 	p.wg.Wait()
 }
 
@@ -380,7 +409,7 @@ func TestProvision_HappyPath(t *testing.T) {
 	mockClient := &mockProxmoxClient{nextID: 105}
 	p := setupProvisioner(nodeStore, tenantStore, projectStore, mockClient, n.ID)
 
-	waitForProvision(p, "tenant-1", n.ID, proj.ID, "myapp", proj.RAMMB)
+	waitForProvision(p, "tenant-1", n.ID, proj.ID, "myapp")
 
 	tenantStore.mu.Lock()
 	defer tenantStore.mu.Unlock()
@@ -453,7 +482,7 @@ func TestProvision_HealthyWhenTheTenantAnswers(t *testing.T) {
 	mockClient := &mockProxmoxClient{nextID: 105}
 	p := setupProvisioner(nodeStore, tenantStore, projectStore, mockClient, n.ID)
 
-	waitForProvision(p, "tenant-1", n.ID, proj.ID, "myapp", proj.RAMMB)
+	waitForProvision(p, "tenant-1", n.ID, proj.ID, "myapp")
 
 	tenantStore.mu.Lock()
 	defer tenantStore.mu.Unlock()
@@ -485,7 +514,7 @@ func TestProvision_AutoCreatesStation(t *testing.T) {
 	sc := &mockStationCreator{}
 	p.WithStationCreator(sc, "example.com")
 
-	waitForProvision(p, "tenant-1", n.ID, proj.ID, "my-station", proj.RAMMB)
+	waitForProvision(p, "tenant-1", n.ID, proj.ID, "my-station")
 
 	tenantStore.mu.Lock()
 	status := tenantStore.statuses["tenant-1"]
@@ -540,7 +569,7 @@ func TestProvision_StationCreatorError_DoesNotFailProvisioning(t *testing.T) {
 	sc := &mockStationCreator{err: fmt.Errorf("db error")}
 	p.WithStationCreator(sc, "example.com")
 
-	waitForProvision(p, "tenant-1", n.ID, proj.ID, "fail-station", proj.RAMMB)
+	waitForProvision(p, "tenant-1", n.ID, proj.ID, "fail-station")
 
 	tenantStore.mu.Lock()
 	defer tenantStore.mu.Unlock()
@@ -565,7 +594,7 @@ func TestProvision_NoStationCreator_NoPanic(t *testing.T) {
 	p := setupProvisioner(nodeStore, tenantStore, projectStore, mockClient, n.ID)
 	// No WithStationCreator — should not panic
 
-	waitForProvision(p, "tenant-1", n.ID, proj.ID, "myapp", proj.RAMMB)
+	waitForProvision(p, "tenant-1", n.ID, proj.ID, "myapp")
 
 	tenantStore.mu.Lock()
 	defer tenantStore.mu.Unlock()
@@ -584,12 +613,11 @@ func TestProvision_GetNextIDError(t *testing.T) {
 	n := testNode()
 	projectStore.projects[proj.ID] = proj
 	nodeStore.nodes[n.ID] = n
-	nodeStore.ram[n.ID] = proj.RAMMB // simulate pre-reserved
 
 	mockClient := &mockProxmoxClient{nextIDErr: errors.New("proxmox unreachable")}
 	p := setupProvisioner(nodeStore, tenantStore, projectStore, mockClient, n.ID)
 
-	waitForProvision(p, "tenant-1", n.ID, proj.ID, "myapp", proj.RAMMB)
+	waitForProvision(p, "tenant-1", n.ID, proj.ID, "myapp")
 
 	tenantStore.mu.Lock()
 	defer tenantStore.mu.Unlock()
@@ -604,9 +632,7 @@ func TestProvision_GetNextIDError(t *testing.T) {
 	// RAM should be released
 	nodeStore.mu.Lock()
 	defer nodeStore.mu.Unlock()
-	if nodeStore.ram[n.ID] != 0 {
-		t.Errorf("expected ram to be released, got %d", nodeStore.ram[n.ID])
-	}
+	assertReservationReleased(t, tenantStore, "tenant-1")
 }
 
 func TestProvision_ErrorMessageSanitized(t *testing.T) {
@@ -618,12 +644,11 @@ func TestProvision_ErrorMessageSanitized(t *testing.T) {
 	n := testNode()
 	projectStore.projects[proj.ID] = proj
 	nodeStore.nodes[n.ID] = n
-	nodeStore.ram[n.ID] = proj.RAMMB
 
 	mockClient := &mockProxmoxClient{nextIDErr: errors.New("proxmox api 500 Internal Server Error: connection refused to 10.0.0.1:8006")}
 	p := setupProvisioner(nodeStore, tenantStore, projectStore, mockClient, n.ID)
 
-	waitForProvision(p, "tenant-1", n.ID, proj.ID, "myapp", proj.RAMMB)
+	waitForProvision(p, "tenant-1", n.ID, proj.ID, "myapp")
 
 	tenantStore.mu.Lock()
 	defer tenantStore.mu.Unlock()
@@ -644,7 +669,6 @@ func TestProvision_CloneError(t *testing.T) {
 	n := testNode()
 	projectStore.projects[proj.ID] = proj
 	nodeStore.nodes[n.ID] = n
-	nodeStore.ram[n.ID] = proj.RAMMB
 
 	mockClient := &mockProxmoxClient{
 		nextID:   105,
@@ -652,7 +676,7 @@ func TestProvision_CloneError(t *testing.T) {
 	}
 	p := setupProvisioner(nodeStore, tenantStore, projectStore, mockClient, n.ID)
 
-	waitForProvision(p, "tenant-1", n.ID, proj.ID, "myapp", proj.RAMMB)
+	waitForProvision(p, "tenant-1", n.ID, proj.ID, "myapp")
 
 	tenantStore.mu.Lock()
 	defer tenantStore.mu.Unlock()
@@ -664,9 +688,7 @@ func TestProvision_CloneError(t *testing.T) {
 	// RAM should be released
 	nodeStore.mu.Lock()
 	defer nodeStore.mu.Unlock()
-	if nodeStore.ram[n.ID] != 0 {
-		t.Errorf("expected ram to be released, got %d", nodeStore.ram[n.ID])
-	}
+	assertReservationReleased(t, tenantStore, "tenant-1")
 }
 
 func TestProvision_CloneWaitError(t *testing.T) {
@@ -678,7 +700,6 @@ func TestProvision_CloneWaitError(t *testing.T) {
 	n := testNode()
 	projectStore.projects[proj.ID] = proj
 	nodeStore.nodes[n.ID] = n
-	nodeStore.ram[n.ID] = proj.RAMMB
 
 	mockClient := &mockProxmoxClient{
 		nextID:       105,
@@ -686,7 +707,7 @@ func TestProvision_CloneWaitError(t *testing.T) {
 	}
 	p := setupProvisioner(nodeStore, tenantStore, projectStore, mockClient, n.ID)
 
-	waitForProvision(p, "tenant-1", n.ID, proj.ID, "myapp", proj.RAMMB)
+	waitForProvision(p, "tenant-1", n.ID, proj.ID, "myapp")
 
 	tenantStore.mu.Lock()
 	defer tenantStore.mu.Unlock()
@@ -697,9 +718,7 @@ func TestProvision_CloneWaitError(t *testing.T) {
 
 	nodeStore.mu.Lock()
 	defer nodeStore.mu.Unlock()
-	if nodeStore.ram[n.ID] != 0 {
-		t.Errorf("expected ram to be released, got %d", nodeStore.ram[n.ID])
-	}
+	assertReservationReleased(t, tenantStore, "tenant-1")
 }
 
 func TestProvision_MountPointsError_TriggersCleanup(t *testing.T) {
@@ -711,7 +730,6 @@ func TestProvision_MountPointsError_TriggersCleanup(t *testing.T) {
 	n := testNode()
 	projectStore.projects[proj.ID] = proj
 	nodeStore.nodes[n.ID] = n
-	nodeStore.ram[n.ID] = proj.RAMMB
 
 	mockClient := &mockProxmoxClient{
 		nextID:         105,
@@ -719,7 +737,7 @@ func TestProvision_MountPointsError_TriggersCleanup(t *testing.T) {
 	}
 	p := setupProvisioner(nodeStore, tenantStore, projectStore, mockClient, n.ID)
 
-	waitForProvision(p, "tenant-1", n.ID, proj.ID, "myapp", proj.RAMMB)
+	waitForProvision(p, "tenant-1", n.ID, proj.ID, "myapp")
 
 	tenantStore.mu.Lock()
 	defer tenantStore.mu.Unlock()
@@ -746,9 +764,7 @@ func TestProvision_MountPointsError_TriggersCleanup(t *testing.T) {
 	// RAM should be released
 	nodeStore.mu.Lock()
 	defer nodeStore.mu.Unlock()
-	if nodeStore.ram[n.ID] != 0 {
-		t.Errorf("expected ram to be released, got %d", nodeStore.ram[n.ID])
-	}
+	assertReservationReleased(t, tenantStore, "tenant-1")
 }
 
 func TestProvision_StartError_TriggersCleanup(t *testing.T) {
@@ -760,7 +776,6 @@ func TestProvision_StartError_TriggersCleanup(t *testing.T) {
 	n := testNode()
 	projectStore.projects[proj.ID] = proj
 	nodeStore.nodes[n.ID] = n
-	nodeStore.ram[n.ID] = proj.RAMMB
 
 	mockClient := &mockProxmoxClient{
 		nextID:   105,
@@ -768,7 +783,7 @@ func TestProvision_StartError_TriggersCleanup(t *testing.T) {
 	}
 	p := setupProvisioner(nodeStore, tenantStore, projectStore, mockClient, n.ID)
 
-	waitForProvision(p, "tenant-1", n.ID, proj.ID, "myapp", proj.RAMMB)
+	waitForProvision(p, "tenant-1", n.ID, proj.ID, "myapp")
 
 	tenantStore.mu.Lock()
 	defer tenantStore.mu.Unlock()
@@ -790,9 +805,7 @@ func TestProvision_StartError_TriggersCleanup(t *testing.T) {
 	// RAM should be released
 	nodeStore.mu.Lock()
 	defer nodeStore.mu.Unlock()
-	if nodeStore.ram[n.ID] != 0 {
-		t.Errorf("expected ram to be released, got %d", nodeStore.ram[n.ID])
-	}
+	assertReservationReleased(t, tenantStore, "tenant-1")
 }
 
 func TestProvision_StartWaitError_TriggersCleanup(t *testing.T) {
@@ -804,7 +817,6 @@ func TestProvision_StartWaitError_TriggersCleanup(t *testing.T) {
 	n := testNode()
 	projectStore.projects[proj.ID] = proj
 	nodeStore.nodes[n.ID] = n
-	nodeStore.ram[n.ID] = proj.RAMMB
 
 	mockClient := &mockProxmoxClient{
 		nextID:       105,
@@ -812,7 +824,7 @@ func TestProvision_StartWaitError_TriggersCleanup(t *testing.T) {
 	}
 	p := setupProvisioner(nodeStore, tenantStore, projectStore, mockClient, n.ID)
 
-	waitForProvision(p, "tenant-1", n.ID, proj.ID, "myapp", proj.RAMMB)
+	waitForProvision(p, "tenant-1", n.ID, proj.ID, "myapp")
 
 	tenantStore.mu.Lock()
 	defer tenantStore.mu.Unlock()
@@ -839,7 +851,7 @@ func TestProvision_ProjectNotFound(t *testing.T) {
 	mockClient := &mockProxmoxClient{nextID: 105}
 	p := setupProvisioner(nodeStore, tenantStore, projectStore, mockClient, n.ID)
 
-	waitForProvision(p, "tenant-1", n.ID, "nonexistent-proj", "myapp", 1536)
+	waitForProvision(p, "tenant-1", n.ID, "nonexistent-proj", "myapp")
 
 	tenantStore.mu.Lock()
 	defer tenantStore.mu.Unlock()
@@ -860,12 +872,11 @@ func TestDeprovision_HappyPath(t *testing.T) {
 	n := testNode()
 	projectStore.projects[proj.ID] = proj
 	nodeStore.nodes[n.ID] = n
-	nodeStore.ram[n.ID] = proj.RAMMB
 
 	mockClient := &mockProxmoxClient{}
 	p := setupProvisioner(nodeStore, tenantStore, projectStore, mockClient, n.ID)
 
-	err := p.Deprovision(context.Background(), "tenant-1", n.ID, "myapp", 105, proj.RAMMB)
+	err := p.Deprovision(context.Background(), "tenant-1", n.ID, "myapp", 105)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -888,9 +899,7 @@ func TestDeprovision_HappyPath(t *testing.T) {
 
 	nodeStore.mu.Lock()
 	defer nodeStore.mu.Unlock()
-	if nodeStore.ram[n.ID] != 0 {
-		t.Errorf("expected ram to be released, got %d", nodeStore.ram[n.ID])
-	}
+	assertReservationReleased(t, tenantStore, "tenant-1")
 }
 
 func TestDeprovision_AlreadyStopped(t *testing.T) {
@@ -902,14 +911,13 @@ func TestDeprovision_AlreadyStopped(t *testing.T) {
 	n := testNode()
 	projectStore.projects[proj.ID] = proj
 	nodeStore.nodes[n.ID] = n
-	nodeStore.ram[n.ID] = proj.RAMMB
 
 	mockClient := &mockProxmoxClient{
 		stopErr: errors.New("already stopped"),
 	}
 	p := setupProvisioner(nodeStore, tenantStore, projectStore, mockClient, n.ID)
 
-	err := p.Deprovision(context.Background(), "tenant-1", n.ID, "myapp", 105, proj.RAMMB)
+	err := p.Deprovision(context.Background(), "tenant-1", n.ID, "myapp", 105)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -937,14 +945,13 @@ func TestDeprovision_StopWaitError_ContinuesWithDelete(t *testing.T) {
 	n := testNode()
 	projectStore.projects[proj.ID] = proj
 	nodeStore.nodes[n.ID] = n
-	nodeStore.ram[n.ID] = proj.RAMMB
 
 	mockClient := &mockProxmoxClient{
 		stopWaitErr: errors.New("stop task failed"),
 	}
 	p := setupProvisioner(nodeStore, tenantStore, projectStore, mockClient, n.ID)
 
-	err := p.Deprovision(context.Background(), "tenant-1", n.ID, "myapp", 105, proj.RAMMB)
+	err := p.Deprovision(context.Background(), "tenant-1", n.ID, "myapp", 105)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -966,14 +973,13 @@ func TestDeprovision_DeleteError(t *testing.T) {
 	n := testNode()
 	projectStore.projects[proj.ID] = proj
 	nodeStore.nodes[n.ID] = n
-	nodeStore.ram[n.ID] = proj.RAMMB
 
 	mockClient := &mockProxmoxClient{
 		deleteErr: errors.New("delete failed"),
 	}
 	p := setupProvisioner(nodeStore, tenantStore, projectStore, mockClient, n.ID)
 
-	err := p.Deprovision(context.Background(), "tenant-1", n.ID, "myapp", 105, proj.RAMMB)
+	err := p.Deprovision(context.Background(), "tenant-1", n.ID, "myapp", 105)
 	if err == nil {
 		t.Fatal("expected error from delete failure")
 	}
@@ -985,12 +991,9 @@ func TestDeprovision_DeleteError(t *testing.T) {
 		t.Errorf("expected tenant status 'error', got %q", tenantStore.statuses["tenant-1"])
 	}
 
-	// RAM should NOT be released (manual investigation needed since container may still exist)
-	nodeStore.mu.Lock()
-	defer nodeStore.mu.Unlock()
-	if nodeStore.ram[n.ID] != proj.RAMMB {
-		t.Errorf("expected ram NOT to be released, got %d", nodeStore.ram[n.ID])
-	}
+	// The reservation should NOT be released: the container may still exist, so
+	// the RAM is left for manual investigation.
+	assertReservationNotReleased(t, tenantStore, "tenant-1")
 }
 
 func TestDeprovision_DeleteWaitError(t *testing.T) {
@@ -1002,14 +1005,13 @@ func TestDeprovision_DeleteWaitError(t *testing.T) {
 	n := testNode()
 	projectStore.projects[proj.ID] = proj
 	nodeStore.nodes[n.ID] = n
-	nodeStore.ram[n.ID] = proj.RAMMB
 
 	mockClient := &mockProxmoxClient{
 		deleteWaitErr: errors.New("delete task failed"),
 	}
 	p := setupProvisioner(nodeStore, tenantStore, projectStore, mockClient, n.ID)
 
-	err := p.Deprovision(context.Background(), "tenant-1", n.ID, "myapp", 105, proj.RAMMB)
+	err := p.Deprovision(context.Background(), "tenant-1", n.ID, "myapp", 105)
 	if err == nil {
 		t.Fatal("expected error from delete wait failure")
 	}
@@ -1036,7 +1038,7 @@ func TestDeprovision_StateConflict(t *testing.T) {
 	mockClient := &mockProxmoxClient{}
 	p := setupProvisioner(nodeStore, tenantStore, projectStore, mockClient, n.ID)
 
-	err := p.Deprovision(context.Background(), "tenant-1", n.ID, "myapp", 105, 1536)
+	err := p.Deprovision(context.Background(), "tenant-1", n.ID, "myapp", 105)
 	if err == nil {
 		t.Fatal("expected error from state conflict")
 	}
@@ -1152,7 +1154,6 @@ func TestDeprovision_WithCaddyClient_RemovesRoute(t *testing.T) {
 	n := testNode()
 	projectStore.projects[proj.ID] = proj
 	nodeStore.nodes[n.ID] = n
-	nodeStore.ram[n.ID] = proj.RAMMB
 
 	mockClient := &mockProxmoxClient{}
 	p := setupProvisioner(nodeStore, tenantStore, projectStore, mockClient, n.ID)
@@ -1160,7 +1161,7 @@ func TestDeprovision_WithCaddyClient_RemovesRoute(t *testing.T) {
 	caddyMock := newMockCaddyClient()
 	p.WithCaddyClient(caddyMock)
 
-	err := p.Deprovision(context.Background(), "tenant-1", n.ID, "mystudio", 105, proj.RAMMB)
+	err := p.Deprovision(context.Background(), "tenant-1", n.ID, "mystudio", 105)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -1181,7 +1182,6 @@ func TestDeprovision_CaddyClientError_DoesNotFail(t *testing.T) {
 	n := testNode()
 	projectStore.projects[proj.ID] = proj
 	nodeStore.nodes[n.ID] = n
-	nodeStore.ram[n.ID] = proj.RAMMB
 
 	mockClient := &mockProxmoxClient{}
 	p := setupProvisioner(nodeStore, tenantStore, projectStore, mockClient, n.ID)
@@ -1191,7 +1191,7 @@ func TestDeprovision_CaddyClientError_DoesNotFail(t *testing.T) {
 	p.WithCaddyClient(caddyMock)
 
 	// Deprovision should succeed even if Caddy fails
-	err := p.Deprovision(context.Background(), "tenant-1", n.ID, "mystudio", 105, proj.RAMMB)
+	err := p.Deprovision(context.Background(), "tenant-1", n.ID, "mystudio", 105)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -1212,13 +1212,12 @@ func TestDeprovision_NilCaddyClient_NoPanic(t *testing.T) {
 	n := testNode()
 	projectStore.projects[proj.ID] = proj
 	nodeStore.nodes[n.ID] = n
-	nodeStore.ram[n.ID] = proj.RAMMB
 
 	mockClient := &mockProxmoxClient{}
 	p := setupProvisioner(nodeStore, tenantStore, projectStore, mockClient, n.ID)
 	// No WithCaddyClient — caddyClient is nil
 
-	err := p.Deprovision(context.Background(), "tenant-1", n.ID, "mystudio", 105, proj.RAMMB)
+	err := p.Deprovision(context.Background(), "tenant-1", n.ID, "mystudio", 105)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -1247,7 +1246,7 @@ func TestProvision_BoundedConcurrency(t *testing.T) {
 
 	// Launch multiple provisions
 	for i := 0; i < 5; i++ {
-		p.Provision("tenant-"+string(rune('a'+i)), n.ID, proj.ID, "app"+string(rune('a'+i)), proj.RAMMB)
+		p.Provision("tenant-"+string(rune('a'+i)), n.ID, proj.ID, "app"+string(rune('a'+i)))
 	}
 
 	// Wait for all to complete
@@ -1275,7 +1274,6 @@ func TestDeprovision_ContainerNotFound_DeleteReturnsNotFound(t *testing.T) {
 	n := testNode()
 	projectStore.projects[proj.ID] = proj
 	nodeStore.nodes[n.ID] = n
-	nodeStore.ram[n.ID] = proj.RAMMB
 
 	// Simulate Proxmox returning "does not exist" when container is already gone
 	mockClient := &mockProxmoxClient{
@@ -1287,7 +1285,7 @@ func TestDeprovision_ContainerNotFound_DeleteReturnsNotFound(t *testing.T) {
 	}
 	p := setupProvisioner(nodeStore, tenantStore, projectStore, mockClient, n.ID)
 
-	err := p.Deprovision(context.Background(), "tenant-1", n.ID, "myapp", 105, proj.RAMMB)
+	err := p.Deprovision(context.Background(), "tenant-1", n.ID, "myapp", 105)
 	if err != nil {
 		t.Fatalf("expected no error when container already gone, got: %v", err)
 	}
@@ -1302,9 +1300,7 @@ func TestDeprovision_ContainerNotFound_DeleteReturnsNotFound(t *testing.T) {
 	// RAM should be released
 	nodeStore.mu.Lock()
 	defer nodeStore.mu.Unlock()
-	if nodeStore.ram[n.ID] != 0 {
-		t.Errorf("expected ram to be released, got %d", nodeStore.ram[n.ID])
-	}
+	assertReservationReleased(t, tenantStore, "tenant-1")
 }
 
 func TestDeprovision_ContainerNotFound_OnWait(t *testing.T) {
@@ -1316,7 +1312,6 @@ func TestDeprovision_ContainerNotFound_OnWait(t *testing.T) {
 	n := testNode()
 	projectStore.projects[proj.ID] = proj
 	nodeStore.nodes[n.ID] = n
-	nodeStore.ram[n.ID] = proj.RAMMB
 
 	// DeleteContainer succeeds but Wait returns "not found" (task reports container gone)
 	mockClient := &mockProxmoxClient{
@@ -1328,7 +1323,7 @@ func TestDeprovision_ContainerNotFound_OnWait(t *testing.T) {
 	}
 	p := setupProvisioner(nodeStore, tenantStore, projectStore, mockClient, n.ID)
 
-	err := p.Deprovision(context.Background(), "tenant-1", n.ID, "myapp", 105, proj.RAMMB)
+	err := p.Deprovision(context.Background(), "tenant-1", n.ID, "myapp", 105)
 	if err != nil {
 		t.Fatalf("expected no error when container gone during wait, got: %v", err)
 	}
@@ -1343,9 +1338,7 @@ func TestDeprovision_ContainerNotFound_OnWait(t *testing.T) {
 	// RAM should be released
 	nodeStore.mu.Lock()
 	defer nodeStore.mu.Unlock()
-	if nodeStore.ram[n.ID] != 0 {
-		t.Errorf("expected ram to be released, got %d", nodeStore.ram[n.ID])
-	}
+	assertReservationReleased(t, tenantStore, "tenant-1")
 }
 
 func TestDeprovision_ContainerNotFound_GenericError(t *testing.T) {
@@ -1357,7 +1350,6 @@ func TestDeprovision_ContainerNotFound_GenericError(t *testing.T) {
 	n := testNode()
 	projectStore.projects[proj.ID] = proj
 	nodeStore.nodes[n.ID] = n
-	nodeStore.ram[n.ID] = proj.RAMMB
 
 	// Generic "does not exist" error string (not APIError)
 	mockClient := &mockProxmoxClient{
@@ -1365,7 +1357,7 @@ func TestDeprovision_ContainerNotFound_GenericError(t *testing.T) {
 	}
 	p := setupProvisioner(nodeStore, tenantStore, projectStore, mockClient, n.ID)
 
-	err := p.Deprovision(context.Background(), "tenant-1", n.ID, "myapp", 105, proj.RAMMB)
+	err := p.Deprovision(context.Background(), "tenant-1", n.ID, "myapp", 105)
 	if err != nil {
 		t.Fatalf("expected no error when container not found, got: %v", err)
 	}
@@ -1387,7 +1379,6 @@ func TestDeprovision_RealDeleteError_StillFails(t *testing.T) {
 	n := testNode()
 	projectStore.projects[proj.ID] = proj
 	nodeStore.nodes[n.ID] = n
-	nodeStore.ram[n.ID] = proj.RAMMB
 
 	// A real error (not "not found") should still fail
 	mockClient := &mockProxmoxClient{
@@ -1399,7 +1390,7 @@ func TestDeprovision_RealDeleteError_StillFails(t *testing.T) {
 	}
 	p := setupProvisioner(nodeStore, tenantStore, projectStore, mockClient, n.ID)
 
-	err := p.Deprovision(context.Background(), "tenant-1", n.ID, "myapp", 105, proj.RAMMB)
+	err := p.Deprovision(context.Background(), "tenant-1", n.ID, "myapp", 105)
 	if err == nil {
 		t.Fatal("expected error for real delete failure")
 	}
@@ -1453,7 +1444,7 @@ func TestProvision_MountPointsViaSSH_HappyPath(t *testing.T) {
 	sshMock := &mockSSHExecWithDeployCalls{}
 	p.WithSSHClient(sshMock)
 
-	waitForProvision(p, "tenant-1", n.ID, proj.ID, "myapp", proj.RAMMB)
+	waitForProvision(p, "tenant-1", n.ID, proj.ID, "myapp")
 
 	tenantStore.mu.Lock()
 	defer tenantStore.mu.Unlock()
@@ -1502,7 +1493,6 @@ func TestProvision_MountPointsViaSSH_MkdirError(t *testing.T) {
 	n := testNode()
 	projectStore.projects[proj.ID] = proj
 	nodeStore.nodes[n.ID] = n
-	nodeStore.ram[n.ID] = proj.RAMMB
 
 	mockClient := &mockProxmoxClient{nextID: 105}
 	p := setupProvisioner(nodeStore, tenantStore, projectStore, mockClient, n.ID)
@@ -1510,7 +1500,7 @@ func TestProvision_MountPointsViaSSH_MkdirError(t *testing.T) {
 	sshMock := &mockSSHExecWithDeployCalls{execOnHostErr: fmt.Errorf("ssh: permission denied")}
 	p.WithSSHClient(sshMock)
 
-	waitForProvision(p, "tenant-1", n.ID, proj.ID, "myapp", proj.RAMMB)
+	waitForProvision(p, "tenant-1", n.ID, proj.ID, "myapp")
 
 	tenantStore.mu.Lock()
 	defer tenantStore.mu.Unlock()
@@ -1534,9 +1524,7 @@ func TestProvision_MountPointsViaSSH_MkdirError(t *testing.T) {
 	// RAM should be released
 	nodeStore.mu.Lock()
 	defer nodeStore.mu.Unlock()
-	if nodeStore.ram[n.ID] != 0 {
-		t.Errorf("expected ram to be released, got %d", nodeStore.ram[n.ID])
-	}
+	assertReservationReleased(t, tenantStore, "tenant-1")
 }
 
 func TestProvision_MountPointsViaSSH_PctSetError(t *testing.T) {
@@ -1548,7 +1536,6 @@ func TestProvision_MountPointsViaSSH_PctSetError(t *testing.T) {
 	n := testNode()
 	projectStore.projects[proj.ID] = proj
 	nodeStore.nodes[n.ID] = n
-	nodeStore.ram[n.ID] = proj.RAMMB
 
 	mockClient := &mockProxmoxClient{nextID: 105}
 	p := setupProvisioner(nodeStore, tenantStore, projectStore, mockClient, n.ID)
@@ -1560,7 +1547,7 @@ func TestProvision_MountPointsViaSSH_PctSetError(t *testing.T) {
 	}
 	p.WithSSHClient(dynamicSSH)
 
-	waitForProvision(p, "tenant-1", n.ID, proj.ID, "myapp", proj.RAMMB)
+	waitForProvision(p, "tenant-1", n.ID, proj.ID, "myapp")
 
 	tenantStore.mu.Lock()
 	defer tenantStore.mu.Unlock()
@@ -1634,14 +1621,21 @@ func TestProvision_AutoDeploy_HappyPath(t *testing.T) {
 	p.WithSSHClient(ssh)
 	p.WithFreeRadioRepo("https://github.com/Awis13/freeRadio.git", "dev")
 
-	waitForProvision(p, "tenant-1", n.ID, proj.ID, "myapp", proj.RAMMB)
+	waitForProvision(p, "tenant-1", n.ID, proj.ID, "myapp")
 
 	tenantStore.mu.Lock()
 	status := tenantStore.statuses["tenant-1"]
+	lxcID := tenantStore.lxcIDs["tenant-1"]
+	// A successful deploy must not release the reservation: the container is
+	// still running and still holds its RAM.
+	assertReservationNotReleased(t, tenantStore, "tenant-1")
 	tenantStore.mu.Unlock()
 
 	if status != "active" {
 		t.Fatalf("expected tenant status 'active', got %q", status)
+	}
+	if lxcID != 105 {
+		t.Fatalf("expected lxc_id 105, got %d", lxcID)
 	}
 
 	ssh.mu.Lock()
@@ -1699,7 +1693,7 @@ func TestProvision_AutoDeploy_HappyPath(t *testing.T) {
 	}
 }
 
-func TestProvision_AutoDeploy_Failure_DoesNotFailProvisioning(t *testing.T) {
+func TestProvision_AutoDeploy_Failure_LeavesErrorAndKeepsReservation(t *testing.T) {
 	nodeStore := newMockNodeStore()
 	tenantStore := newMockTenantStore()
 	projectStore := newMockProjectStore()
@@ -1720,15 +1714,22 @@ func TestProvision_AutoDeploy_Failure_DoesNotFailProvisioning(t *testing.T) {
 	p.WithSSHClient(ssh)
 	p.WithFreeRadioRepo("https://github.com/Awis13/freeRadio.git", "dev")
 
-	waitForProvision(p, "tenant-1", n.ID, proj.ID, "myapp", proj.RAMMB)
+	waitForProvision(p, "tenant-1", n.ID, proj.ID, "myapp")
 
 	tenantStore.mu.Lock()
 	defer tenantStore.mu.Unlock()
 
-	// The tenant should still be active — deploy is best-effort
-	if tenantStore.statuses["tenant-1"] != "active" {
-		t.Errorf("expected tenant status 'active' despite deploy failure, got %q", tenantStore.statuses["tenant-1"])
+	// The deploy is mandatory, so a failure must leave the tenant errored, not
+	// falsely active with a broken app.
+	if tenantStore.statuses["tenant-1"] != "error" {
+		t.Errorf("expected tenant status 'error' after deploy failure, got %q", tenantStore.statuses["tenant-1"])
 	}
+	// The container ID must be recorded so cleanup can find it.
+	if tenantStore.lxcIDs["tenant-1"] != 105 {
+		t.Errorf("expected lxc_id 105 to be saved, got %d", tenantStore.lxcIDs["tenant-1"])
+	}
+	// The reservation must NOT be released: the container still exists and holds RAM.
+	assertReservationNotReleased(t, tenantStore, "tenant-1")
 }
 
 func TestProvision_AutoDeploy_SkippedWithoutSSH(t *testing.T) {
@@ -1747,7 +1748,7 @@ func TestProvision_AutoDeploy_SkippedWithoutSSH(t *testing.T) {
 	// Only WithFreeRadioRepo, without WithSSHClient — the deploy should be skipped
 	p.WithFreeRadioRepo("https://github.com/Awis13/freeRadio.git", "dev")
 
-	waitForProvision(p, "tenant-1", n.ID, proj.ID, "myapp", proj.RAMMB)
+	waitForProvision(p, "tenant-1", n.ID, proj.ID, "myapp")
 
 	tenantStore.mu.Lock()
 	defer tenantStore.mu.Unlock()
@@ -1778,15 +1779,19 @@ func TestProvision_AutoDeploy_ComposeUpFailure(t *testing.T) {
 	p.WithSSHClient(ssh)
 	p.WithFreeRadioRepo("https://github.com/Awis13/freeRadio.git", "dev")
 
-	waitForProvision(p, "tenant-1", n.ID, proj.ID, "myapp", proj.RAMMB)
+	waitForProvision(p, "tenant-1", n.ID, proj.ID, "myapp")
 
 	tenantStore.mu.Lock()
 	defer tenantStore.mu.Unlock()
 
-	// Tenant is active — deploy is best-effort
-	if tenantStore.statuses["tenant-1"] != "active" {
-		t.Errorf("expected tenant status 'active' despite compose failure, got %q", tenantStore.statuses["tenant-1"])
+	// The deploy is mandatory, so a compose failure leaves the tenant errored.
+	if tenantStore.statuses["tenant-1"] != "error" {
+		t.Errorf("expected tenant status 'error' after compose failure, got %q", tenantStore.statuses["tenant-1"])
 	}
+	if tenantStore.lxcIDs["tenant-1"] != 105 {
+		t.Errorf("expected lxc_id 105 to be saved, got %d", tenantStore.lxcIDs["tenant-1"])
+	}
+	assertReservationNotReleased(t, tenantStore, "tenant-1")
 
 	ssh.mu.Lock()
 	defer ssh.mu.Unlock()
@@ -1795,6 +1800,127 @@ func TestProvision_AutoDeploy_ComposeUpFailure(t *testing.T) {
 	if len(ssh.execInCtrCalls) != 4 {
 		t.Errorf("expected 4 ExecInContainer calls (stopped at compose up), got %d", len(ssh.execInCtrCalls))
 	}
+}
+
+// TestProvision_AutoDeploy_FailureAtEachStage drives a deploy failure at every
+// one of the six deploy stages and asserts the same invariant each time: the
+// tenant is left errored (never falsely active), the container ID is saved so
+// cleanup can find it, and the reservation is kept because the container still
+// exists and holds RAM.
+func TestProvision_AutoDeploy_FailureAtEachStage(t *testing.T) {
+	stages := []struct {
+		name string
+		call int
+	}{
+		{"install docker", 1},
+		{"fetch repo", 2},
+		{"write .env", 3},
+		{"bootstrap certs", 4},
+		{"compose up", 5},
+		{"health check", 6},
+	}
+	for _, st := range stages {
+		t.Run(st.name, func(t *testing.T) {
+			nodeStore := newMockNodeStore()
+			tenantStore := newMockTenantStore()
+			projectStore := newMockProjectStore()
+
+			proj := testProjectNoHealth()
+			n := testNode()
+			projectStore.projects[proj.ID] = proj
+			nodeStore.nodes[n.ID] = n
+
+			mockClient := &mockProxmoxClient{nextID: 105}
+			p := setupProvisioner(nodeStore, tenantStore, projectStore, mockClient, n.ID)
+
+			ssh := &mockSSHExecWithDeployCalls{
+				failOnExecInCtr: st.call,
+				failErr:         fmt.Errorf("stage %d failed", st.call),
+			}
+			p.WithSSHClient(ssh)
+			p.WithFreeRadioRepo("https://github.com/Awis13/freeRadio.git", "dev")
+
+			waitForProvision(p, "tenant-1", n.ID, proj.ID, "myapp")
+
+			tenantStore.mu.Lock()
+			defer tenantStore.mu.Unlock()
+
+			if tenantStore.statuses["tenant-1"] != "error" {
+				t.Errorf("expected status 'error', got %q", tenantStore.statuses["tenant-1"])
+			}
+			if tenantStore.lxcIDs["tenant-1"] != 105 {
+				t.Errorf("expected lxc_id 105 saved, got %d", tenantStore.lxcIDs["tenant-1"])
+			}
+			assertReservationNotReleased(t, tenantStore, "tenant-1")
+		})
+	}
+}
+
+// TestProvision_AutoDeploy_RetryReusesExistingContainer pins the retry path: a
+// tenant that already has a container ID must not be cloned again — the deploy
+// re-runs against the existing container.
+func TestProvision_AutoDeploy_RetryReusesExistingContainer(t *testing.T) {
+	nodeStore := newMockNodeStore()
+	tenantStore := newMockTenantStore()
+	projectStore := newMockProjectStore()
+
+	proj := testProjectNoHealth()
+	n := testNode()
+	projectStore.projects[proj.ID] = proj
+	nodeStore.nodes[n.ID] = n
+
+	// The tenant already has a container from a previous attempt.
+	existingID := 105
+	tenantStore.tenants["tenant-1"] = &tenant.Tenant{
+		ID:     "tenant-1",
+		Status: "provisioning",
+		LXCID:  &existingID,
+	}
+
+	// nextID would be used only if a fresh clone ran; it must not be.
+	mockClient := &mockProxmoxClient{nextID: 999}
+	p := setupProvisioner(nodeStore, tenantStore, projectStore, mockClient, n.ID)
+
+	ssh := &mockSSHExecWithDeployCalls{}
+	p.WithSSHClient(ssh)
+	p.WithFreeRadioRepo("https://github.com/Awis13/freeRadio.git", "dev")
+
+	waitForProvision(p, "tenant-1", n.ID, proj.ID, "myapp")
+
+	mockClient.mu.Lock()
+	if mockClient.cloneCalled {
+		t.Error("expected clone NOT to be called on retry")
+	}
+	mockClient.mu.Unlock()
+
+	tenantStore.mu.Lock()
+	defer tenantStore.mu.Unlock()
+	if tenantStore.lxcIDs["tenant-1"] != 105 {
+		t.Errorf("expected existing lxc_id 105 to be reused, got %d", tenantStore.lxcIDs["tenant-1"])
+	}
+	if tenantStore.statuses["tenant-1"] != "active" {
+		t.Errorf("expected status 'active', got %q", tenantStore.statuses["tenant-1"])
+	}
+}
+
+// TestMarkErrorKeepReservation_DoesNotReleaseReservation pins the helper used
+// for a container that still exists: it marks the tenant errored but must not
+// hand the reservation back, since the container still holds RAM.
+func TestMarkErrorKeepReservation_DoesNotReleaseReservation(t *testing.T) {
+	tenantStore := newMockTenantStore()
+	p := New(newMockNodeStore(), tenantStore, newMockProjectStore(), "test-key")
+
+	p.markErrorKeepReservation(context.Background(), "tenant-1", "boom")
+
+	tenantStore.mu.Lock()
+	defer tenantStore.mu.Unlock()
+	if tenantStore.statuses["tenant-1"] != "error" {
+		t.Errorf("expected status 'error', got %q", tenantStore.statuses["tenant-1"])
+	}
+	if tenantStore.errors["tenant-1"] != "boom" {
+		t.Errorf("expected error message 'boom', got %q", tenantStore.errors["tenant-1"])
+	}
+	assertReservationNotReleased(t, tenantStore, "tenant-1")
 }
 
 // --- Auto-deploy wiring ---
@@ -1819,7 +1945,7 @@ func TestProvision_LegacyPathWhenRepoUnset(t *testing.T) {
 	p.WithSSHClient(ssh)
 	// WithFreeRadioRepo is deliberately not called.
 
-	waitForProvision(p, "tenant-1", n.ID, proj.ID, "myapp", proj.RAMMB)
+	waitForProvision(p, "tenant-1", n.ID, proj.ID, "myapp")
 
 	ssh.mu.Lock()
 	defer ssh.mu.Unlock()
@@ -1857,7 +1983,7 @@ func TestProvision_DeployPathWhenRepoSet(t *testing.T) {
 	p.WithSSHClient(ssh)
 	p.WithFreeRadioRepo("https://github.com/example/freeRadio.git", "dev")
 
-	waitForProvision(p, "tenant-1", n.ID, proj.ID, "myapp", proj.RAMMB)
+	waitForProvision(p, "tenant-1", n.ID, proj.ID, "myapp")
 
 	ssh.mu.Lock()
 	defer ssh.mu.Unlock()
@@ -1993,7 +2119,7 @@ func TestDeploy_FetchesIntoNonEmptyDirectory(t *testing.T) {
 func TestDeploy_EnvCarriesEverySecretTheStackNeeds(t *testing.T) {
 	commands := deployCommands(t, "dev")
 
-	env, ok := findCommand(commands, "ENVEOF")
+	env, ok := findCommand(commands, "TENANT_ID=tenant-1")
 	if !ok {
 		t.Fatalf("no .env written: %v", commands)
 	}
@@ -2006,6 +2132,7 @@ func TestDeploy_EnvCarriesEverySecretTheStackNeeds(t *testing.T) {
 		"ICECAST_ADMIN_PASSWORD=",
 		"ICECAST_PASSWORD=",
 		"ICECAST_RELAY_PASSWORD=",
+		"INGEST_CALLBACK_SECRET=",
 	} {
 		if !strings.Contains(env, required) {
 			t.Errorf(".env is missing %q", required)
@@ -2013,11 +2140,15 @@ func TestDeploy_EnvCarriesEverySecretTheStackNeeds(t *testing.T) {
 	}
 
 	// The secrets must be generated, not placeholders shared between tenants.
-	for _, line := range strings.Split(env, "\n") {
-		name, value, found := strings.Cut(line, "=")
-		if !found || !strings.HasSuffix(name, "SECRET") && !strings.HasSuffix(name, "PASSWORD") {
-			continue
-		}
+	for _, name := range []string{
+		"STREAM_KEYS_SECRET",
+		"ICECAST_SOURCE_PASSWORD",
+		"ICECAST_ADMIN_PASSWORD",
+		"ICECAST_PASSWORD",
+		"ICECAST_RELAY_PASSWORD",
+		"INGEST_CALLBACK_SECRET",
+	} {
+		value := secretValue(t, env, name)
 		if len(value) != 64 {
 			t.Errorf("%s = %q, want a generated 64 character secret", name, value)
 		}
@@ -2027,28 +2158,90 @@ func TestDeploy_EnvCarriesEverySecretTheStackNeeds(t *testing.T) {
 	}
 }
 
+// TestDeploy_SSOPublicKeyWrittenWhenSet pins that a configured SSO public key
+// is written into the tenant .env so the tenant can verify SSO assertions.
+func TestDeploy_SSOPublicKeyWrittenWhenSet(t *testing.T) {
+	p := New(newMockNodeStore(), newMockTenantStore(), newMockProjectStore(), "test-key")
+	ssh := &mockSSHExecWithDeployCalls{}
+	p.WithSSHClient(ssh)
+	p.WithFreeRadioRepo("https://github.com/example/freeRadio.git", "dev")
+	p.WithSSOPublicKey("aabbccddeeff00112233445566778899aabbccddeeff00112233445566778899")
+
+	if err := p.deployFreeRadio(context.Background(), "10.0.0.1", 105, "tenant-1", "dash-token"); err != nil {
+		t.Fatalf("deployFreeRadio: %v", err)
+	}
+
+	ssh.mu.Lock()
+	defer ssh.mu.Unlock()
+	var envCmd string
+	for _, call := range ssh.execInCtrCalls {
+		if strings.Contains(call.Command, "TENANT_ID=tenant-1") {
+			envCmd = call.Command
+			break
+		}
+	}
+	if envCmd == "" {
+		t.Fatal("no .env write command issued")
+	}
+	if !strings.Contains(envCmd, "SSO_PUBLIC_KEY=aabbccddeeff00112233445566778899aabbccddeeff00112233445566778899") {
+		t.Errorf(".env is missing the configured SSO_PUBLIC_KEY: %s", envCmd)
+	}
+}
+
+// TestDeploy_SSOPublicKeyOmittedWhenEmpty pins that an unset SSO public key
+// leaves the tenant .env without SSO_PUBLIC_KEY, so SSO stays disabled.
+func TestDeploy_SSOPublicKeyOmittedWhenEmpty(t *testing.T) {
+	commands := deployCommands(t, "dev")
+	env, ok := findCommand(commands, "TENANT_ID=tenant-1")
+	if !ok {
+		t.Fatalf("no .env written: %v", commands)
+	}
+	if strings.Contains(env, "SSO_PUBLIC_KEY=") {
+		t.Errorf(".env should not contain SSO_PUBLIC_KEY when none is configured: %s", env)
+	}
+}
+
+// secretValue extracts the value of a KEY=VALUE pair from an idempotent .env
+// write command, which encodes each pair as echo 'KEY=VALUE' >> file.
+func secretValue(t *testing.T, cmd, key string) string {
+	t.Helper()
+	marker := "echo '" + key + "="
+	idx := strings.Index(cmd, marker)
+	if idx < 0 {
+		return ""
+	}
+	rest := cmd[idx+len(marker):]
+	end := strings.Index(rest, "'")
+	if end < 0 {
+		return ""
+	}
+	return rest[:end]
+}
+
 // TestDeploy_SecretsDifferPerVariableAndPerTenant pins that the generated
 // secrets are independent, so one leaking does not hand over the rest.
 func TestDeploy_SecretsDifferPerVariableAndPerTenant(t *testing.T) {
-	first, _ := findCommand(deployCommands(t, "dev"), "ENVEOF")
-	second, _ := findCommand(deployCommands(t, "dev"), "ENVEOF")
+	first, _ := findCommand(deployCommands(t, "dev"), "TENANT_ID=tenant-1")
+	second, _ := findCommand(deployCommands(t, "dev"), "TENANT_ID=tenant-1")
 
+	names := []string{
+		"STREAM_KEYS_SECRET",
+		"ICECAST_SOURCE_PASSWORD",
+		"ICECAST_ADMIN_PASSWORD",
+		"ICECAST_PASSWORD",
+		"ICECAST_RELAY_PASSWORD",
+		"INGEST_CALLBACK_SECRET",
+	}
 	seen := map[string]string{}
-	for _, line := range strings.Split(first, "\n") {
-		name, value, found := strings.Cut(line, "=")
-		if !found || (!strings.HasSuffix(name, "SECRET") && !strings.HasSuffix(name, "PASSWORD")) {
-			continue
-		}
-		if name == "DASHBOARD_TOKEN" {
-			continue
-		}
+	for _, name := range names {
+		value := secretValue(t, first, name)
 		if prev, dup := seen[value]; dup {
 			t.Errorf("%s reuses the secret already given to %s", name, prev)
 		}
 		seen[value] = name
 	}
-	if len(seen) != 5 {
-		t.Fatalf("found %d generated secrets, want 5", len(seen))
+	if len(seen) != len(names) {
+		t.Fatalf("found %d generated secrets, want %d", len(seen), len(names))
 	}
 
 	for value := range seen {
@@ -2101,7 +2294,7 @@ func TestDeploy_BootstrapsCertsBeforeComposeUp(t *testing.T) {
 func TestDeploy_StepOrder(t *testing.T) {
 	commands := deployCommands(t, "dev")
 
-	want := []string{"which docker", "git fetch", "ENVEOF", "bootstrap-certs.sh", "docker compose up", "/api/health"}
+	want := []string{"which docker", "git fetch", "TENANT_ID=tenant-1", "bootstrap-certs.sh", "docker compose up", "/api/health"}
 	last := -1
 	for _, step := range want {
 		at := indexOfCommand(commands, step)
@@ -2136,7 +2329,7 @@ func TestTopology_DefaultsMatchTheOldLiterals(t *testing.T) {
 	mockClient := &mockProxmoxClient{nextID: 105}
 	p := setupProvisioner(nodeStore, tenantStore, projectStore, mockClient, n.ID)
 
-	waitForProvision(p, "tenant-1", n.ID, proj.ID, "myapp", proj.RAMMB)
+	waitForProvision(p, "tenant-1", n.ID, proj.ID, "myapp")
 
 	mockClient.mu.Lock()
 	defer mockClient.mu.Unlock()
@@ -2171,7 +2364,7 @@ func TestTopology_ConfiguredValuesReachEveryCommand(t *testing.T) {
 	ssh := &mockSSHExecWithDeployCalls{}
 	p.WithSSHClient(ssh)
 
-	waitForProvision(p, "tenant-1", n.ID, proj.ID, "myapp", proj.RAMMB)
+	waitForProvision(p, "tenant-1", n.ID, proj.ID, "myapp")
 
 	mockClient.mu.Lock()
 	net0 := mockClient.net0Received
@@ -2290,7 +2483,7 @@ func TestTopology_ConfiguredValuesReachTheAPIMountFallback(t *testing.T) {
 	p.WithTopology("vmbr1", "/srv/tenants", "/opt/app")
 	// No SSH client: this is what selects the API fallback.
 
-	waitForProvision(p, "tenant-1", n.ID, proj.ID, "myapp", proj.RAMMB)
+	waitForProvision(p, "tenant-1", n.ID, proj.ID, "myapp")
 
 	mockClient.mu.Lock()
 	defer mockClient.mu.Unlock()
@@ -2328,7 +2521,7 @@ func TestTopology_HostileValuesCannotReshapeCommands(t *testing.T) {
 	ssh := &mockSSHExecWithDeployCalls{}
 	p.WithSSHClient(ssh)
 
-	waitForProvision(p, "tenant-1", n.ID, proj.ID, "myapp", proj.RAMMB)
+	waitForProvision(p, "tenant-1", n.ID, proj.ID, "myapp")
 
 	ssh.mu.Lock()
 	defer ssh.mu.Unlock()
@@ -2425,7 +2618,7 @@ func TestProvision_LegacyTokenWriteQuotesTheAppDir(t *testing.T) {
 	ssh := &mockSSHExecWithDeployCalls{}
 	p.WithSSHClient(ssh)
 
-	waitForProvision(p, "tenant-1", n.ID, proj.ID, "myapp", proj.RAMMB)
+	waitForProvision(p, "tenant-1", n.ID, proj.ID, "myapp")
 
 	ssh.mu.Lock()
 	defer ssh.mu.Unlock()

@@ -3,6 +3,7 @@ package server
 import (
 	"context"
 	"crypto/subtle"
+	"encoding/hex"
 	"fmt"
 	"log/slog"
 	"net/http"
@@ -28,6 +29,7 @@ import (
 	"controlplane/internal/provisioner"
 	"controlplane/internal/response"
 	"controlplane/internal/sshexec"
+	"controlplane/internal/sso"
 	"controlplane/internal/station"
 	"controlplane/internal/tenant"
 	"controlplane/internal/user"
@@ -86,6 +88,21 @@ func New(pool *pgxpool.Pool, cfg *config.Config) (http.Handler, *provisioner.Pro
 	if cfg.FreeRadioRepoURL != "" {
 		prov.WithFreeRadioRepo(cfg.FreeRadioRepoURL, cfg.FreeRadioRepoBranch)
 		slog.Info("freeRadio auto-deploy: enabled", "repo", cfg.FreeRadioRepoURL, "branch", cfg.FreeRadioRepoBranch)
+	}
+
+	// SSO signing key. When configured, SSO assertions are signed with a
+	// persistent control-plane Ed25519 key and the public key is written into
+	// each tenant's env. Without it, SSO is explicitly unavailable.
+	var ssoSigner *sso.Signer
+	if cfg.SSOSigningKey != "" {
+		signer, err := sso.NewSigner(cfg.SSOSigningKey)
+		if err != nil {
+			slog.Warn("SSO signing key unusable, SSO disabled", "error", err)
+		} else {
+			ssoSigner = signer
+			prov.WithSSOPublicKey(hex.EncodeToString(signer.PublicKey()))
+			slog.Info("SSO signing enabled")
+		}
 	}
 
 	// Station status poller
@@ -224,7 +241,7 @@ func New(pool *pgxpool.Pool, cfg *config.Config) (http.Handler, *provisioner.Pro
 	})
 
 	// User tenant management (JWT-protected, auto-select project+node)
-	userTenantHandler := tenant.NewUserHandler(tenantStore, nodeStore, projectStore, prov, auditStore, cfg.SSODomain, cfg.SSOScheme)
+	userTenantHandler := tenant.NewUserHandler(tenantStore, nodeStore, projectStore, prov, auditStore, cfg.SSODomain, cfg.SSOScheme, ssoSigner)
 	r.Route("/api/v1/user/tenants", func(r chi.Router) {
 		r.Use(httprate.LimitByIP(20, time.Minute))
 		r.Use(auth.JWTAuth(userStore, tokenStore, cfg.JWTSecret))
@@ -370,6 +387,7 @@ func (a *billingTenantStoreAdapter) GetByStripeCustomerID(ctx context.Context, c
 		ID:                   t.ID,
 		Name:                 t.Name,
 		Tier:                 t.Tier,
+		Status:               t.Status,
 		StripeCustomerID:     t.StripeCustomerID,
 		StripeSubscriptionID: t.StripeSubscriptionID,
 		OwnerID:              t.OwnerID,
@@ -387,6 +405,27 @@ func (a *billingTenantStoreAdapter) GetByOwnerID(ctx context.Context, ownerID st
 			ID:                   t.ID,
 			Name:                 t.Name,
 			Tier:                 t.Tier,
+			Status:               t.Status,
+			StripeCustomerID:     t.StripeCustomerID,
+			StripeSubscriptionID: t.StripeSubscriptionID,
+			OwnerID:              t.OwnerID,
+		}
+	}
+	return result, nil
+}
+
+func (a *billingTenantStoreAdapter) GetByOwnerIDIncludingDeleted(ctx context.Context, ownerID string) ([]billing.TenantBilling, error) {
+	tenants, err := a.store.GetBillingByOwnerIDIncludingDeleted(ctx, ownerID)
+	if err != nil {
+		return nil, err
+	}
+	result := make([]billing.TenantBilling, len(tenants))
+	for i, t := range tenants {
+		result[i] = billing.TenantBilling{
+			ID:                   t.ID,
+			Name:                 t.Name,
+			Tier:                 t.Tier,
+			Status:               t.Status,
 			StripeCustomerID:     t.StripeCustomerID,
 			StripeSubscriptionID: t.StripeSubscriptionID,
 			OwnerID:              t.OwnerID,

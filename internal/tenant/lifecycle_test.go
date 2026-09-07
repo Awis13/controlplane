@@ -20,24 +20,18 @@ var errBoom = errors.New("store unavailable")
 type lifecycleFixture struct {
 	service   *LifecycleService
 	store     *mockTenantStore
-	nodes     *mockNodeStore
-	projects  *mockProjectStore
 	provision *mockProvisioner
 }
 
 func newLifecycleFixture() *lifecycleFixture {
 	store := newMockTenantStore()
-	nodes := newMockNodeStore()
-	projects := newMockProjectStore()
 	prov := newMockProvisioner()
 
 	return &lifecycleFixture{
 		// The audit store is a concrete type backed by a database, so it stays
 		// nil here; the lifecycle skips auditing when it is absent.
-		service:   NewLifecycleService(store, nodes, projects, prov, nil),
+		service:   NewLifecycleService(store, prov, nil),
 		store:     store,
-		nodes:     nodes,
-		projects:  projects,
 		provision: prov,
 	}
 }
@@ -95,7 +89,7 @@ func TestLifecycleAudit_Create(t *testing.T) {
 			if tt.ownerID != "" {
 				store = newMockUserTenantStore()
 			}
-			svc := NewLifecycleService(store, newMockNodeStore(), newMockProjectStore(), newMockProvisioner(), logger)
+			svc := NewLifecycleService(store, newMockProvisioner(), logger)
 
 			tn, err := svc.Create(context.Background(), CreateParams{
 				Name: "app", Subdomain: "myapp", Project: testProject(), Node: testNodeRecord(), OwnerID: tt.ownerID,
@@ -141,12 +135,10 @@ func TestLifecycleAudit_Delete(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			logger := &mockAuditLogger{}
 			store := newMockTenantStore()
-			projects := newMockProjectStore()
-			svc := NewLifecycleService(store, newMockNodeStore(), projects, newMockProvisioner(), logger)
+			svc := NewLifecycleService(store, newMockProvisioner(), logger)
 
 			tn := &Tenant{ID: "t-1", ProjectID: "proj-1", NodeID: "node-1", Status: "active"}
 			store.tenants[tn.ID] = tn
-			projects.projects["proj-1"] = testProject()
 
 			if _, err := svc.Delete(context.Background(), tn, tt.actor); err != nil {
 				t.Fatalf("Delete: %v", err)
@@ -181,8 +173,8 @@ func TestLifecycleAudit_Delete(t *testing.T) {
 func TestLifecycleAudit_FailedOperationsAreNotLogged(t *testing.T) {
 	logger := &mockAuditLogger{}
 	store := newMockTenantStore()
-	store.createErr = errBoom
-	svc := NewLifecycleService(store, newMockNodeStore(), newMockProjectStore(), newMockProvisioner(), logger)
+	store.createWithReservationErr = errBoom
+	svc := NewLifecycleService(store, newMockProvisioner(), logger)
 
 	if _, err := svc.Create(context.Background(), CreateParams{
 		Name: "app", Subdomain: "myapp", Project: testProject(), Node: testNodeRecord(),
@@ -210,12 +202,10 @@ func TestLifecycleAudit_NilLoggers(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			store := newMockTenantStore()
-			projects := newMockProjectStore()
-			svc := NewLifecycleService(store, newMockNodeStore(), projects, newMockProvisioner(), tt.logger)
+			svc := NewLifecycleService(store, newMockProvisioner(), tt.logger)
 
 			tn := &Tenant{ID: "t-1", ProjectID: "proj-1", NodeID: "node-1", Status: "active"}
 			store.tenants[tn.ID] = tn
-			projects.projects["proj-1"] = testProject()
 
 			// The operation must still complete: auditing is not load-bearing.
 			if _, err := svc.Delete(context.Background(), tn, Actor{UserID: "owner-1"}); err != nil {
@@ -342,7 +332,7 @@ func TestLifecycleCreate_WithoutOwner(t *testing.T) {
 func TestLifecycleCreate_WithOwner(t *testing.T) {
 	store := newMockUserTenantStore()
 	prov := newMockProvisioner()
-	svc := NewLifecycleService(store, newMockNodeStore(), newMockProjectStore(), prov, nil)
+	svc := NewLifecycleService(store, prov, nil)
 
 	tn, err := svc.Create(context.Background(), CreateParams{
 		Name:      "app",
@@ -365,7 +355,6 @@ func TestLifecycleCreate_WithOwner(t *testing.T) {
 
 func TestLifecycleCreate_RejectsBadSubdomainBeforeReserving(t *testing.T) {
 	f := newLifecycleFixture()
-	f.nodes.reserveErr = errBoom // would fail loudly if reached
 
 	_, err := f.service.Create(context.Background(), CreateParams{
 		Name:      "app",
@@ -382,11 +371,14 @@ func TestLifecycleCreate_RejectsBadSubdomainBeforeReserving(t *testing.T) {
 	if f.provision.wasProvisionCalled() {
 		t.Error("provisioning must not start for an invalid subdomain")
 	}
+	if len(f.store.createWithReservationCalls) != 0 {
+		t.Error("a reservation must not be created for an invalid subdomain")
+	}
 }
 
 func TestLifecycleCreate_InsufficientCapacity(t *testing.T) {
 	f := newLifecycleFixture()
-	f.nodes.reserveErr = node.ErrInsufficientCapacity
+	f.store.createWithReservationErr = node.ErrInsufficientCapacity
 
 	_, err := f.service.Create(context.Background(), CreateParams{
 		Name: "app", Subdomain: "myapp", Project: testProject(), Node: testNodeRecord(),
@@ -407,7 +399,7 @@ func TestLifecycleCreate_InsufficientCapacity(t *testing.T) {
 
 func TestLifecycleCreate_ReserveFailure(t *testing.T) {
 	f := newLifecycleFixture()
-	f.nodes.reserveErr = errBoom
+	f.store.createWithReservationErr = errBoom
 
 	_, err := f.service.Create(context.Background(), CreateParams{
 		Name: "app", Subdomain: "myapp", Project: testProject(), Node: testNodeRecord(),
@@ -418,15 +410,16 @@ func TestLifecycleCreate_ReserveFailure(t *testing.T) {
 	if err.Kind != FailureInternal {
 		t.Errorf("kind = %v, want FailureInternal", err.Kind)
 	}
-	if err.Message != "failed to reserve resources" {
+	if err.Message != "failed to create tenant" {
 		t.Errorf("message = %q", err.Message)
 	}
 }
 
-// TestLifecycleCreate_FailedInsertReleasesRAM is the capacity-leak guard: every
-// way the insert can fail must hand the reserved RAM back, or a node slowly
-// loses capacity to tenants that were never created.
-func TestLifecycleCreate_FailedInsertReleasesRAM(t *testing.T) {
+// TestLifecycleCreate_FailedInsertDoesNotReleaseReservation pins the new
+// semantics: the reservation and the insert happen in one transaction, so a
+// failed insert rolls the reservation back and there is no separate release to
+// perform. The lifecycle must not hand the reservation back a second time.
+func TestLifecycleCreate_FailedInsertDoesNotReleaseReservation(t *testing.T) {
 	tests := []struct {
 		name        string
 		createErr   error
@@ -450,7 +443,7 @@ func TestLifecycleCreate_FailedInsertReleasesRAM(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			f := newLifecycleFixture()
-			f.store.createErr = tt.createErr
+			f.store.createWithReservationErr = tt.createErr
 			proj := testProject()
 
 			_, err := f.service.Create(context.Background(), CreateParams{
@@ -466,15 +459,17 @@ func TestLifecycleCreate_FailedInsertReleasesRAM(t *testing.T) {
 				t.Errorf("message = %q, want %q", err.Message, tt.wantMessage)
 			}
 
-			want := ramCall{NodeID: "node-1", RAMMB: proj.RAMMB}
-			if len(f.nodes.reserveCalls) != 1 || f.nodes.reserveCalls[0] != want {
-				t.Fatalf("reserve calls = %v, want exactly one %+v", f.nodes.reserveCalls, want)
+			// The reservation was attempted with the project's RAM figure, but
+			// the failed insert must not trigger a release: the transaction
+			// rolled the reservation back itself.
+			if len(f.store.createWithReservationCalls) != 1 {
+				t.Fatalf("reservation calls = %d, want exactly one", len(f.store.createWithReservationCalls))
 			}
-			if len(f.nodes.releaseCalls) != 1 {
-				t.Fatalf("release calls = %v, want exactly one: the reservation leaked", f.nodes.releaseCalls)
+			if got := f.store.createWithReservationCalls[0].RAMMB; got != proj.RAMMB {
+				t.Errorf("reserved %d MB, want %d", got, proj.RAMMB)
 			}
-			if f.nodes.releaseCalls[0] != want {
-				t.Errorf("released %+v, want %+v: the wrong node or amount was returned", f.nodes.releaseCalls[0], want)
+			if len(f.store.releaseReservationCalls) != 0 {
+				t.Errorf("release calls = %v, want none: the transaction rolled the reservation back", f.store.releaseReservationCalls)
 			}
 			if f.provision.wasProvisionCalled() {
 				t.Error("provisioning must not start when the record was not created")
@@ -487,7 +482,7 @@ func TestLifecycleCreate_FailedInsertReleasesRAM(t *testing.T) {
 // reachable for logging even though the client sees a generic message.
 func TestLifecycleCreate_StoreFailureWrapsCause(t *testing.T) {
 	f := newLifecycleFixture()
-	f.store.createErr = errBoom
+	f.store.createWithReservationErr = errBoom
 
 	_, err := f.service.Create(context.Background(), CreateParams{
 		Name: "app", Subdomain: "myapp", Project: testProject(), Node: testNodeRecord(),
@@ -512,12 +507,14 @@ func TestLifecycleCreate_SuccessKeepsTheReservation(t *testing.T) {
 		t.Fatalf("Create: %v", err)
 	}
 
-	want := ramCall{NodeID: "node-1", RAMMB: proj.RAMMB}
-	if len(f.nodes.reserveCalls) != 1 || f.nodes.reserveCalls[0] != want {
-		t.Errorf("reserve calls = %v, want exactly one %+v", f.nodes.reserveCalls, want)
+	if len(f.store.createWithReservationCalls) != 1 {
+		t.Fatalf("reservation calls = %d, want exactly one", len(f.store.createWithReservationCalls))
 	}
-	if len(f.nodes.releaseCalls) != 0 {
-		t.Errorf("release calls = %v, want none: the tenant exists and owns that RAM", f.nodes.releaseCalls)
+	if got := f.store.createWithReservationCalls[0].RAMMB; got != proj.RAMMB {
+		t.Errorf("reserved %d MB, want %d", got, proj.RAMMB)
+	}
+	if len(f.store.releaseReservationCalls) != 0 {
+		t.Errorf("release calls = %v, want none: the tenant exists and owns that RAM", f.store.releaseReservationCalls)
 	}
 }
 
@@ -525,7 +522,7 @@ func TestLifecycleCreate_SuccessKeepsTheReservation(t *testing.T) {
 // that never succeeded is not handed back a second time.
 func TestLifecycleCreate_RefusedReservationReleasesNothing(t *testing.T) {
 	f := newLifecycleFixture()
-	f.nodes.reserveErr = node.ErrInsufficientCapacity
+	f.store.createWithReservationErr = node.ErrInsufficientCapacity
 
 	if _, err := f.service.Create(context.Background(), CreateParams{
 		Name: "app", Subdomain: "myapp", Project: testProject(), Node: testNodeRecord(),
@@ -533,8 +530,8 @@ func TestLifecycleCreate_RefusedReservationReleasesNothing(t *testing.T) {
 		t.Fatal("expected an error")
 	}
 
-	if len(f.nodes.releaseCalls) != 0 {
-		t.Errorf("release calls = %v, want none", f.nodes.releaseCalls)
+	if len(f.store.releaseReservationCalls) != 0 {
+		t.Errorf("release calls = %v, want none", f.store.releaseReservationCalls)
 	}
 }
 
@@ -581,7 +578,6 @@ func TestLifecycleDelete_DeletableStatuses(t *testing.T) {
 			f := newLifecycleFixture()
 			tn := &Tenant{ID: "t-1", ProjectID: "proj-1", NodeID: "node-1", Subdomain: "myapp", Status: tt.status}
 			f.store.tenants[tn.ID] = tn
-			f.projects.projects["proj-1"] = testProject()
 
 			_, err := f.service.Delete(context.Background(), tn, Actor{})
 
@@ -613,7 +609,6 @@ func TestLifecycleDelete_WithContainerDeprovisions(t *testing.T) {
 	f := newLifecycleFixture()
 	tn := &Tenant{ID: "t-1", ProjectID: "proj-1", NodeID: "node-1", Subdomain: "myapp", Status: "active", LXCID: lxcPtr(105)}
 	f.store.tenants[tn.ID] = tn
-	f.projects.projects["proj-1"] = testProject()
 
 	if _, err := f.service.Delete(context.Background(), tn, Actor{}); err != nil {
 		t.Fatalf("Delete: %v", err)
@@ -628,7 +623,6 @@ func TestLifecycleDelete_DeprovisionConflict(t *testing.T) {
 	f.provision.deprovisionErr = ErrStateConflict
 	tn := &Tenant{ID: "t-1", ProjectID: "proj-1", NodeID: "node-1", Status: "active", LXCID: lxcPtr(105)}
 	f.store.tenants[tn.ID] = tn
-	f.projects.projects["proj-1"] = testProject()
 
 	_, err := f.service.Delete(context.Background(), tn, Actor{})
 	if err == nil {
@@ -647,7 +641,6 @@ func TestLifecycleDelete_DeprovisionFailure(t *testing.T) {
 	f.provision.deprovisionErr = errBoom
 	tn := &Tenant{ID: "t-1", ProjectID: "proj-1", NodeID: "node-1", Status: "active", LXCID: lxcPtr(105)}
 	f.store.tenants[tn.ID] = tn
-	f.projects.projects["proj-1"] = testProject()
 
 	_, err := f.service.Delete(context.Background(), tn, Actor{})
 	if err == nil {
@@ -666,7 +659,6 @@ func TestLifecycleDelete_SetDeletingConflict(t *testing.T) {
 	f.store.setDeletingErr = ErrStateConflict
 	tn := &Tenant{ID: "t-1", ProjectID: "proj-1", NodeID: "node-1", Status: "active"}
 	f.store.tenants[tn.ID] = tn
-	f.projects.projects["proj-1"] = testProject()
 
 	_, err := f.service.Delete(context.Background(), tn, Actor{})
 	if err == nil {
@@ -677,68 +669,47 @@ func TestLifecycleDelete_SetDeletingConflict(t *testing.T) {
 	}
 }
 
-func TestLifecycleDelete_ProjectLookupFailure(t *testing.T) {
-	f := newLifecycleFixture()
-	f.projects.getErr = errBoom
-	tn := &Tenant{ID: "t-1", ProjectID: "proj-1", NodeID: "node-1", Status: "active"}
-	f.store.tenants[tn.ID] = tn
-
-	_, err := f.service.Delete(context.Background(), tn, Actor{})
-	if err == nil {
-		t.Fatal("expected an error")
-	}
-	if err.Kind != FailureInternal {
-		t.Errorf("kind = %v, want FailureInternal", err.Kind)
-	}
-	if err.Message != "failed to get project" {
-		t.Errorf("message = %q", err.Message)
-	}
-}
-
-// TestLifecycleDelete_ReleasesRAM is the delete-side half of the capacity
-// guard: removing a tenant that has no container must hand its RAM back to the
-// node, or the node keeps accounting for a tenant that no longer exists.
-func TestLifecycleDelete_ReleasesRAM(t *testing.T) {
+// TestLifecycleDelete_ReleasesReservation is the delete-side half of the
+// capacity guard: removing a tenant that has no container must hand its
+// reservation back to the node, or the node keeps accounting for a tenant that
+// no longer exists.
+func TestLifecycleDelete_ReleasesReservation(t *testing.T) {
 	f := newLifecycleFixture()
 	tn := &Tenant{ID: "t-1", ProjectID: "proj-1", NodeID: "node-1", Status: "active"}
 	f.store.tenants[tn.ID] = tn
-	proj := testProject()
-	f.projects.projects["proj-1"] = proj
 
 	if _, err := f.service.Delete(context.Background(), tn, Actor{}); err != nil {
 		t.Fatalf("Delete: %v", err)
 	}
 
-	want := ramCall{NodeID: "node-1", RAMMB: proj.RAMMB}
-	if len(f.nodes.releaseCalls) != 1 {
-		t.Fatalf("release calls = %v, want exactly one: the tenant's RAM leaked", f.nodes.releaseCalls)
+	if len(f.store.releaseReservationCalls) != 1 {
+		t.Fatalf("release calls = %v, want exactly one: the tenant's reservation leaked", f.store.releaseReservationCalls)
 	}
-	if f.nodes.releaseCalls[0] != want {
-		t.Errorf("released %+v, want %+v", f.nodes.releaseCalls[0], want)
+	if f.store.releaseReservationCalls[0] != "t-1" {
+		t.Errorf("released %q, want t-1", f.store.releaseReservationCalls[0])
 	}
 }
 
-// TestLifecycleDelete_ContainerDeleteDoesNotReleaseRAM pins the division of
-// labour: when there is a container, Deprovision releases the RAM itself, so
-// the service must not release it a second time.
-func TestLifecycleDelete_ContainerDeleteDoesNotReleaseRAM(t *testing.T) {
+// TestLifecycleDelete_ContainerDeleteDoesNotReleaseReservation pins the
+// division of labour: when there is a container, Deprovision releases the
+// reservation itself, so the service must not release it a second time.
+func TestLifecycleDelete_ContainerDeleteDoesNotReleaseReservation(t *testing.T) {
 	f := newLifecycleFixture()
 	tn := &Tenant{ID: "t-1", ProjectID: "proj-1", NodeID: "node-1", Status: "active", LXCID: lxcPtr(105)}
 	f.store.tenants[tn.ID] = tn
-	f.projects.projects["proj-1"] = testProject()
 
 	if _, err := f.service.Delete(context.Background(), tn, Actor{}); err != nil {
 		t.Fatalf("Delete: %v", err)
 	}
-	if len(f.nodes.releaseCalls) != 0 {
-		t.Errorf("release calls = %v, want none: Deprovision owns that release", f.nodes.releaseCalls)
+	if len(f.store.releaseReservationCalls) != 0 {
+		t.Errorf("release calls = %v, want none: Deprovision owns that release", f.store.releaseReservationCalls)
 	}
 }
 
-// TestLifecycleDelete_MissingProjectStillDeletes pins that a tenant whose
-// project has vanished is still removed, with no RAM released because there is
-// no figure to release.
-func TestLifecycleDelete_MissingProjectStillDeletes(t *testing.T) {
+// TestLifecycleDelete_NoProjectStillDeletes pins that a tenant whose project
+// has vanished is still removed: the reservation amount comes from the tenant's
+// own record, so no project lookup is needed.
+func TestLifecycleDelete_NoProjectStillDeletes(t *testing.T) {
 	f := newLifecycleFixture()
 	tn := &Tenant{ID: "t-1", ProjectID: "gone", NodeID: "node-1", Status: "active"}
 	f.store.tenants[tn.ID] = tn
@@ -749,25 +720,24 @@ func TestLifecycleDelete_MissingProjectStillDeletes(t *testing.T) {
 	if got := f.store.tenants["t-1"].Status; got != "deleted" {
 		t.Errorf("status = %q, want deleted", got)
 	}
-	if len(f.nodes.releaseCalls) != 0 {
-		t.Errorf("release calls = %v, want none", f.nodes.releaseCalls)
+	if len(f.store.releaseReservationCalls) != 1 {
+		t.Errorf("release calls = %v, want exactly one", f.store.releaseReservationCalls)
 	}
 }
 
-// TestLifecycleDelete_RAMReleaseFailureDoesNotBlock pins that a failing RAM
-// release is attempted, logged, and does not stop the delete.
-func TestLifecycleDelete_RAMReleaseFailureDoesNotBlock(t *testing.T) {
+// TestLifecycleDelete_ReleaseFailureDoesNotBlock pins that a failing release is
+// attempted, logged, and does not stop the delete.
+func TestLifecycleDelete_ReleaseFailureDoesNotBlock(t *testing.T) {
 	f := newLifecycleFixture()
-	f.nodes.releaseErr = errBoom
+	f.store.releaseReservationErr = errBoom
 	tn := &Tenant{ID: "t-1", ProjectID: "proj-1", NodeID: "node-1", Status: "active"}
 	f.store.tenants[tn.ID] = tn
-	f.projects.projects["proj-1"] = testProject()
 
 	if _, err := f.service.Delete(context.Background(), tn, Actor{}); err != nil {
 		t.Fatalf("Delete: %v", err)
 	}
-	if len(f.nodes.releaseCalls) != 1 {
-		t.Errorf("release calls = %v, want exactly one attempt", f.nodes.releaseCalls)
+	if len(f.store.releaseReservationCalls) != 1 {
+		t.Errorf("release calls = %v, want exactly one attempt", f.store.releaseReservationCalls)
 	}
 	if got := f.store.tenants["t-1"].Status; got != "deleted" {
 		t.Errorf("status = %q, want deleted", got)
@@ -779,7 +749,6 @@ func TestLifecycleDelete_SetDeletedFailure(t *testing.T) {
 	f.store.setDeletedErr = errBoom
 	tn := &Tenant{ID: "t-1", ProjectID: "proj-1", NodeID: "node-1", Status: "active"}
 	f.store.tenants[tn.ID] = tn
-	f.projects.projects["proj-1"] = testProject()
 
 	_, err := f.service.Delete(context.Background(), tn, Actor{})
 	if err == nil {
@@ -799,7 +768,6 @@ func TestLifecycleDelete_ReturnsRefreshedTenant(t *testing.T) {
 	f := newLifecycleFixture()
 	tn := &Tenant{ID: "t-1", ProjectID: "proj-1", NodeID: "node-1", Status: "active"}
 	f.store.tenants[tn.ID] = tn
-	f.projects.projects["proj-1"] = testProject()
 
 	updated, err := f.service.Delete(context.Background(), tn, Actor{})
 	if err != nil {
@@ -814,6 +782,41 @@ func TestLifecycleDelete_ReturnsRefreshedTenant(t *testing.T) {
 }
 
 // --- Error plumbing ---
+
+// TestLifecycleDelete_DoesNotCancelStripe pins SEC-05: deleting a tenant is a
+// soft delete that must not cancel its Stripe subscription. The lifecycle has
+// no Stripe dependency at all, so the only external side effect is deprovisioning
+// the container; the tenant's Stripe customer and subscription references are
+// left untouched so the billing portal can still manage the subscription that
+// outlived the studio.
+func TestLifecycleDelete_DoesNotCancelStripe(t *testing.T) {
+	f := newLifecycleFixture()
+	customer := "cus_123"
+	sub := "sub_123"
+	tn := &Tenant{ID: "t-1", ProjectID: "proj-1", NodeID: "node-1", Subdomain: "myapp",
+		Status:           "active",
+		StripeCustomerID: &customer, StripeSubscriptionID: &sub, Tier: "studio"}
+	f.store.tenants[tn.ID] = tn
+
+	if _, err := f.service.Delete(context.Background(), tn, Actor{}); err != nil {
+		t.Fatalf("Delete: %v", err)
+	}
+
+	got := f.store.tenants["t-1"]
+	if got.Status != "deleted" {
+		t.Fatalf("status = %q, want deleted", got.Status)
+	}
+	// The Stripe references must survive the delete: no cancel, no clearing.
+	if got.StripeCustomerID == nil || *got.StripeCustomerID != customer {
+		t.Errorf("stripe customer = %v, want %q preserved", got.StripeCustomerID, customer)
+	}
+	if got.StripeSubscriptionID == nil || *got.StripeSubscriptionID != sub {
+		t.Errorf("stripe subscription = %v, want %q preserved", got.StripeSubscriptionID, sub)
+	}
+	if got.Tier != "studio" {
+		t.Errorf("tier = %q, want %q preserved", got.Tier, "studio")
+	}
+}
 
 func TestLifecycleError_UnwrapsCause(t *testing.T) {
 	err := internal("failed to delete tenant", errBoom)

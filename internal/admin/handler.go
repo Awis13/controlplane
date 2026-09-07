@@ -48,6 +48,8 @@ type TenantStore interface {
 	Count(ctx context.Context) (int, error)
 	GetByID(ctx context.Context, id string) (*tenant.Tenant, error)
 	Create(ctx context.Context, req tenant.CreateTenantRequest) (*tenant.Tenant, error)
+	CreateWithReservation(ctx context.Context, req tenant.CreateTenantRequest, ramMB int) (*tenant.Tenant, error)
+	ReleaseReservation(ctx context.Context, tenantID string) error
 	SetDeleting(ctx context.Context, id string) error
 	SetDeleted(ctx context.Context, id string) error
 	SetSuspended(ctx context.Context, id string) error
@@ -55,8 +57,8 @@ type TenantStore interface {
 }
 
 type Provisioner interface {
-	Provision(tenantID, nodeID, projectID, subdomain string, ramMB int)
-	Deprovision(ctx context.Context, tenantID, nodeID, subdomain string, lxcID, ramMB int) error
+	Provision(tenantID, nodeID, projectID, subdomain string)
+	Deprovision(ctx context.Context, tenantID, nodeID, subdomain string, lxcID int) error
 	Suspend(ctx context.Context, tenantID, nodeID string, lxcID int) error
 	Resume(ctx context.Context, tenantID, nodeID string, lxcID int) error
 	InvalidateClient(nodeID string)
@@ -98,7 +100,7 @@ func NewHandler(nodes NodeStore, projects ProjectStore, tenants TenantStore, aud
 		webauthn:         wa,
 		webauthnStore:    waStore,
 		webauthnSessions: newWebAuthnSessions(),
-		lifecycle:        tenant.NewLifecycleService(tenants, nodes, projects, provisioner, auditStore),
+		lifecycle:        tenant.NewLifecycleService(tenants, provisioner, auditStore),
 	}, nil
 }
 

@@ -47,6 +47,7 @@ type Config struct {
 	FreeRadioRepoBranch string            // optional: branch to deploy (default: dev)
 	SSODomain           string            // optional: domain for SSO token URLs (default: example.com)
 	SSOScheme           string            // optional: http or https for SSO URLs (default: https)
+	SSOSigningKey       string            // optional: hex Ed25519 private key for SSO tier assertions; empty disables SSO
 	StripeSecretKey     string            // optional: Stripe API secret key
 	StripeWebhookSecret string            // optional: Stripe webhook signing secret
 	StripePrices        map[string]string // optional: tier name -> Stripe price ID
@@ -110,6 +111,7 @@ func Load() (*Config, error) {
 		FreeRadioRepoBranch: getEnv("FREERADIO_REPO_BRANCH", "dev"),
 		SSODomain:           getEnv("SSO_DOMAIN", "example.com"),
 		SSOScheme:           getEnv("SSO_SCHEME", "https"),
+		SSOSigningKey:       os.Getenv("SSO_SIGNING_KEY"),
 		StripeSecretKey:     os.Getenv("STRIPE_SECRET_KEY"),
 		StripeWebhookSecret: os.Getenv("STRIPE_WEBHOOK_SECRET"),
 		StripePrices:        parseStripePrices(),
