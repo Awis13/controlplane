@@ -186,8 +186,20 @@ type dashboardStatusResponse struct {
 	} `json:"bpm"`
 }
 
+// statusURL builds the dashboard status URL for a tenant. LXCIP is normally a
+// bare IP and port 80 is implied, but tests pass an IP:port to point at an
+// httptest server, so an already-present port must not be duplicated. Go 1.26
+// rejects the malformed "host:port:80" form that the old unconditional append
+// produced.
+func statusURL(lxcIP string) string {
+	if _, _, err := net.SplitHostPort(lxcIP); err == nil {
+		return fmt.Sprintf("http://%s/api/status", lxcIP)
+	}
+	return fmt.Sprintf("http://%s:80/api/status", lxcIP)
+}
+
 func (p *Poller) fetchStatus(ctx context.Context, t tenant.PollableTenant) *StationStatus {
-	url := fmt.Sprintf("http://%s:80/api/status", t.LXCIP)
+	url := statusURL(t.LXCIP)
 
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
 	if err != nil {
