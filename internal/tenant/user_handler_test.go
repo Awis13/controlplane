@@ -56,6 +56,33 @@ func (m *mockUserTenantStore) CreateWithOwner(_ context.Context, req CreateTenan
 	return t, nil
 }
 
+// CreateWithOwnerWithReservation is the owner-scoped reservation path the
+// lifecycle drives. It records the owner and the reservation together.
+func (m *mockUserTenantStore) CreateWithOwnerWithReservation(_ context.Context, req CreateTenantRequest, ownerID string, ramMB int) (*Tenant, error) {
+	if m.createWithReservationErr != nil {
+		return nil, m.createWithReservationErr
+	}
+	if m.createErr != nil {
+		return nil, m.createErr
+	}
+	t := &Tenant{
+		ID:            "user-tenant-id",
+		Name:          req.Name,
+		ProjectID:     req.ProjectID,
+		NodeID:        req.NodeID,
+		Subdomain:     req.Subdomain,
+		Status:        "provisioning",
+		OwnerID:       &ownerID,
+		HealthStatus:  "unknown",
+		ReservedRAMMB: &ramMB,
+		CreatedAt:     time.Now(),
+		UpdatedAt:     time.Now(),
+	}
+	m.tenants[t.ID] = t
+	m.ownerTenants[ownerID] = append(m.ownerTenants[ownerID], *t)
+	return t, nil
+}
+
 func (m *mockUserTenantStore) ListByOwnerID(_ context.Context, ownerID string) ([]Tenant, error) {
 	return m.ownerTenants[ownerID], nil
 }
@@ -411,7 +438,7 @@ func TestUserCreate_InsufficientCapacity(t *testing.T) {
 
 	ps.defaultProject = testProjectObj()
 	ns.leastLoaded = activeNode()
-	ns.reserveErr = node.ErrInsufficientCapacity
+	ts.createWithReservationErr = node.ErrInsufficientCapacity
 
 	h := NewUserHandler(ts, ns, ps, prov, nil, "example.com", "")
 	r := userTenantRouter(h)

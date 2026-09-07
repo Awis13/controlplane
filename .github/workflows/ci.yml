@@ -9,6 +9,22 @@ on:
 jobs:
   build:
     runs-on: ubuntu-latest
+    # A disposable PostgreSQL for the reservation integration test. The test
+    # reads DATABASE_URL and skips when it is absent, so this service is what
+    # makes the real-database path run in CI.
+    services:
+      postgres:
+        image: postgres:17
+        env:
+          POSTGRES_PASSWORD: test
+          POSTGRES_DB: controlplane
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
     steps:
       - uses: actions/checkout@v4
 
@@ -65,6 +81,8 @@ jobs:
       # provisioner, the janitor and the poller all run goroutines, and a data
       # race in them is invisible to a plain test run.
       - name: Test
+        env:
+          DATABASE_URL: postgres://postgres:test@localhost:5432/controlplane?sslmode=disable
         run: go test -race -covermode=atomic -coverprofile=coverage.out ./...
 
       # Reported, not gated. A threshold needs a baseline everyone has agreed

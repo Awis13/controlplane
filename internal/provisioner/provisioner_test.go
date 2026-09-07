@@ -25,14 +25,12 @@ type mockNodeStore struct {
 	mu     sync.Mutex
 	nodes  map[string]*node.Node
 	tokens map[string]string
-	ram    map[string]int
 }
 
 func newMockNodeStore() *mockNodeStore {
 	return &mockNodeStore{
 		nodes:  make(map[string]*node.Node),
 		tokens: make(map[string]string),
-		ram:    make(map[string]int),
 	}
 }
 
@@ -52,16 +50,6 @@ func (m *mockNodeStore) GetEncryptedTokenByID(_ context.Context, id string) (str
 	return m.tokens[id], nil
 }
 
-func (m *mockNodeStore) ReleaseRAM(_ context.Context, nodeID string, ramMB int) error {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	m.ram[nodeID] -= ramMB
-	if m.ram[nodeID] < 0 {
-		m.ram[nodeID] = 0
-	}
-	return nil
-}
-
 type mockTenantStore struct {
 	mu              sync.Mutex
 	statuses        map[string]string
@@ -73,6 +61,10 @@ type mockTenantStore struct {
 	nextIP          string // overrides the allocated address, for health-check tests
 
 	setDeletingErr error
+
+	// releaseReservationCalls records every reservation release, so tests can
+	// assert that a failed provision or a deprovision handed the RAM back.
+	releaseReservationCalls []string
 }
 
 func newMockTenantStore() *mockTenantStore {
@@ -157,6 +149,36 @@ func (m *mockTenantStore) SetDashboardToken(_ context.Context, id string, token 
 	defer m.mu.Unlock()
 	m.dashboardTokens[id] = token
 	return nil
+}
+
+func (m *mockTenantStore) ReleaseReservation(_ context.Context, tenantID string) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.releaseReservationCalls = append(m.releaseReservationCalls, tenantID)
+	return nil
+}
+
+// assertReservationReleased fails unless the tenant's reservation was released.
+// The caller must hold the tenant store's lock.
+func assertReservationReleased(t *testing.T, ts *mockTenantStore, tenantID string) {
+	t.Helper()
+	for _, id := range ts.releaseReservationCalls {
+		if id == tenantID {
+			return
+		}
+	}
+	t.Errorf("expected reservation for %s to be released, got %v", tenantID, ts.releaseReservationCalls)
+}
+
+// assertReservationNotReleased fails if the tenant's reservation was released.
+// The caller must hold the tenant store's lock.
+func assertReservationNotReleased(t *testing.T, ts *mockTenantStore, tenantID string) {
+	t.Helper()
+	for _, id := range ts.releaseReservationCalls {
+		if id == tenantID {
+			t.Errorf("expected reservation for %s NOT to be released, got %v", tenantID, ts.releaseReservationCalls)
+		}
+	}
 }
 
 type mockProjectStore struct {
@@ -360,8 +382,8 @@ func setupProvisioner(nodeStore *mockNodeStore, tenantStore *mockTenantStore, pr
 }
 
 // waitForProvision calls Provision and waits for the goroutine to complete.
-func waitForProvision(p *Provisioner, tenantID, nodeID, projectID, subdomain string, ramMB int) {
-	p.Provision(tenantID, nodeID, projectID, subdomain, ramMB)
+func waitForProvision(p *Provisioner, tenantID, nodeID, projectID, subdomain string) {
+	p.Provision(tenantID, nodeID, projectID, subdomain)
 	p.wg.Wait()
 }
 
@@ -380,7 +402,7 @@ func TestProvision_HappyPath(t *testing.T) {
 	mockClient := &mockProxmoxClient{nextID: 105}
 	p := setupProvisioner(nodeStore, tenantStore, projectStore, mockClient, n.ID)
 
-	waitForProvision(p, "tenant-1", n.ID, proj.ID, "myapp", proj.RAMMB)
+	waitForProvision(p, "tenant-1", n.ID, proj.ID, "myapp")
 
 	tenantStore.mu.Lock()
 	defer tenantStore.mu.Unlock()
@@ -453,7 +475,7 @@ func TestProvision_HealthyWhenTheTenantAnswers(t *testing.T) {
 	mockClient := &mockProxmoxClient{nextID: 105}
 	p := setupProvisioner(nodeStore, tenantStore, projectStore, mockClient, n.ID)
 
-	waitForProvision(p, "tenant-1", n.ID, proj.ID, "myapp", proj.RAMMB)
+	waitForProvision(p, "tenant-1", n.ID, proj.ID, "myapp")
 
 	tenantStore.mu.Lock()
 	defer tenantStore.mu.Unlock()
@@ -485,7 +507,7 @@ func TestProvision_AutoCreatesStation(t *testing.T) {
 	sc := &mockStationCreator{}
 	p.WithStationCreator(sc, "example.com")
 
-	waitForProvision(p, "tenant-1", n.ID, proj.ID, "my-station", proj.RAMMB)
+	waitForProvision(p, "tenant-1", n.ID, proj.ID, "my-station")
 
 	tenantStore.mu.Lock()
 	status := tenantStore.statuses["tenant-1"]
@@ -540,7 +562,7 @@ func TestProvision_StationCreatorError_DoesNotFailProvisioning(t *testing.T) {
 	sc := &mockStationCreator{err: fmt.Errorf("db error")}
 	p.WithStationCreator(sc, "example.com")
 
-	waitForProvision(p, "tenant-1", n.ID, proj.ID, "fail-station", proj.RAMMB)
+	waitForProvision(p, "tenant-1", n.ID, proj.ID, "fail-station")
 
 	tenantStore.mu.Lock()
 	defer tenantStore.mu.Unlock()
@@ -565,7 +587,7 @@ func TestProvision_NoStationCreator_NoPanic(t *testing.T) {
 	p := setupProvisioner(nodeStore, tenantStore, projectStore, mockClient, n.ID)
 	// No WithStationCreator — should not panic
 
-	waitForProvision(p, "tenant-1", n.ID, proj.ID, "myapp", proj.RAMMB)
+	waitForProvision(p, "tenant-1", n.ID, proj.ID, "myapp")
 
 	tenantStore.mu.Lock()
 	defer tenantStore.mu.Unlock()
@@ -584,12 +606,11 @@ func TestProvision_GetNextIDError(t *testing.T) {
 	n := testNode()
 	projectStore.projects[proj.ID] = proj
 	nodeStore.nodes[n.ID] = n
-	nodeStore.ram[n.ID] = proj.RAMMB // simulate pre-reserved
 
 	mockClient := &mockProxmoxClient{nextIDErr: errors.New("proxmox unreachable")}
 	p := setupProvisioner(nodeStore, tenantStore, projectStore, mockClient, n.ID)
 
-	waitForProvision(p, "tenant-1", n.ID, proj.ID, "myapp", proj.RAMMB)
+	waitForProvision(p, "tenant-1", n.ID, proj.ID, "myapp")
 
 	tenantStore.mu.Lock()
 	defer tenantStore.mu.Unlock()
@@ -604,9 +625,7 @@ func TestProvision_GetNextIDError(t *testing.T) {
 	// RAM should be released
 	nodeStore.mu.Lock()
 	defer nodeStore.mu.Unlock()
-	if nodeStore.ram[n.ID] != 0 {
-		t.Errorf("expected ram to be released, got %d", nodeStore.ram[n.ID])
-	}
+	assertReservationReleased(t, tenantStore, "tenant-1")
 }
 
 func TestProvision_ErrorMessageSanitized(t *testing.T) {
@@ -618,12 +637,11 @@ func TestProvision_ErrorMessageSanitized(t *testing.T) {
 	n := testNode()
 	projectStore.projects[proj.ID] = proj
 	nodeStore.nodes[n.ID] = n
-	nodeStore.ram[n.ID] = proj.RAMMB
 
 	mockClient := &mockProxmoxClient{nextIDErr: errors.New("proxmox api 500 Internal Server Error: connection refused to 10.0.0.1:8006")}
 	p := setupProvisioner(nodeStore, tenantStore, projectStore, mockClient, n.ID)
 
-	waitForProvision(p, "tenant-1", n.ID, proj.ID, "myapp", proj.RAMMB)
+	waitForProvision(p, "tenant-1", n.ID, proj.ID, "myapp")
 
 	tenantStore.mu.Lock()
 	defer tenantStore.mu.Unlock()
@@ -644,7 +662,6 @@ func TestProvision_CloneError(t *testing.T) {
 	n := testNode()
 	projectStore.projects[proj.ID] = proj
 	nodeStore.nodes[n.ID] = n
-	nodeStore.ram[n.ID] = proj.RAMMB
 
 	mockClient := &mockProxmoxClient{
 		nextID:   105,
@@ -652,7 +669,7 @@ func TestProvision_CloneError(t *testing.T) {
 	}
 	p := setupProvisioner(nodeStore, tenantStore, projectStore, mockClient, n.ID)
 
-	waitForProvision(p, "tenant-1", n.ID, proj.ID, "myapp", proj.RAMMB)
+	waitForProvision(p, "tenant-1", n.ID, proj.ID, "myapp")
 
 	tenantStore.mu.Lock()
 	defer tenantStore.mu.Unlock()
@@ -664,9 +681,7 @@ func TestProvision_CloneError(t *testing.T) {
 	// RAM should be released
 	nodeStore.mu.Lock()
 	defer nodeStore.mu.Unlock()
-	if nodeStore.ram[n.ID] != 0 {
-		t.Errorf("expected ram to be released, got %d", nodeStore.ram[n.ID])
-	}
+	assertReservationReleased(t, tenantStore, "tenant-1")
 }
 
 func TestProvision_CloneWaitError(t *testing.T) {
@@ -678,7 +693,6 @@ func TestProvision_CloneWaitError(t *testing.T) {
 	n := testNode()
 	projectStore.projects[proj.ID] = proj
 	nodeStore.nodes[n.ID] = n
-	nodeStore.ram[n.ID] = proj.RAMMB
 
 	mockClient := &mockProxmoxClient{
 		nextID:       105,
@@ -686,7 +700,7 @@ func TestProvision_CloneWaitError(t *testing.T) {
 	}
 	p := setupProvisioner(nodeStore, tenantStore, projectStore, mockClient, n.ID)
 
-	waitForProvision(p, "tenant-1", n.ID, proj.ID, "myapp", proj.RAMMB)
+	waitForProvision(p, "tenant-1", n.ID, proj.ID, "myapp")
 
 	tenantStore.mu.Lock()
 	defer tenantStore.mu.Unlock()
@@ -697,9 +711,7 @@ func TestProvision_CloneWaitError(t *testing.T) {
 
 	nodeStore.mu.Lock()
 	defer nodeStore.mu.Unlock()
-	if nodeStore.ram[n.ID] != 0 {
-		t.Errorf("expected ram to be released, got %d", nodeStore.ram[n.ID])
-	}
+	assertReservationReleased(t, tenantStore, "tenant-1")
 }
 
 func TestProvision_MountPointsError_TriggersCleanup(t *testing.T) {
@@ -711,7 +723,6 @@ func TestProvision_MountPointsError_TriggersCleanup(t *testing.T) {
 	n := testNode()
 	projectStore.projects[proj.ID] = proj
 	nodeStore.nodes[n.ID] = n
-	nodeStore.ram[n.ID] = proj.RAMMB
 
 	mockClient := &mockProxmoxClient{
 		nextID:         105,
@@ -719,7 +730,7 @@ func TestProvision_MountPointsError_TriggersCleanup(t *testing.T) {
 	}
 	p := setupProvisioner(nodeStore, tenantStore, projectStore, mockClient, n.ID)
 
-	waitForProvision(p, "tenant-1", n.ID, proj.ID, "myapp", proj.RAMMB)
+	waitForProvision(p, "tenant-1", n.ID, proj.ID, "myapp")
 
 	tenantStore.mu.Lock()
 	defer tenantStore.mu.Unlock()
@@ -746,9 +757,7 @@ func TestProvision_MountPointsError_TriggersCleanup(t *testing.T) {
 	// RAM should be released
 	nodeStore.mu.Lock()
 	defer nodeStore.mu.Unlock()
-	if nodeStore.ram[n.ID] != 0 {
-		t.Errorf("expected ram to be released, got %d", nodeStore.ram[n.ID])
-	}
+	assertReservationReleased(t, tenantStore, "tenant-1")
 }
 
 func TestProvision_StartError_TriggersCleanup(t *testing.T) {
@@ -760,7 +769,6 @@ func TestProvision_StartError_TriggersCleanup(t *testing.T) {
 	n := testNode()
 	projectStore.projects[proj.ID] = proj
 	nodeStore.nodes[n.ID] = n
-	nodeStore.ram[n.ID] = proj.RAMMB
 
 	mockClient := &mockProxmoxClient{
 		nextID:   105,
@@ -768,7 +776,7 @@ func TestProvision_StartError_TriggersCleanup(t *testing.T) {
 	}
 	p := setupProvisioner(nodeStore, tenantStore, projectStore, mockClient, n.ID)
 
-	waitForProvision(p, "tenant-1", n.ID, proj.ID, "myapp", proj.RAMMB)
+	waitForProvision(p, "tenant-1", n.ID, proj.ID, "myapp")
 
 	tenantStore.mu.Lock()
 	defer tenantStore.mu.Unlock()
@@ -790,9 +798,7 @@ func TestProvision_StartError_TriggersCleanup(t *testing.T) {
 	// RAM should be released
 	nodeStore.mu.Lock()
 	defer nodeStore.mu.Unlock()
-	if nodeStore.ram[n.ID] != 0 {
-		t.Errorf("expected ram to be released, got %d", nodeStore.ram[n.ID])
-	}
+	assertReservationReleased(t, tenantStore, "tenant-1")
 }
 
 func TestProvision_StartWaitError_TriggersCleanup(t *testing.T) {
@@ -804,7 +810,6 @@ func TestProvision_StartWaitError_TriggersCleanup(t *testing.T) {
 	n := testNode()
 	projectStore.projects[proj.ID] = proj
 	nodeStore.nodes[n.ID] = n
-	nodeStore.ram[n.ID] = proj.RAMMB
 
 	mockClient := &mockProxmoxClient{
 		nextID:       105,
@@ -812,7 +817,7 @@ func TestProvision_StartWaitError_TriggersCleanup(t *testing.T) {
 	}
 	p := setupProvisioner(nodeStore, tenantStore, projectStore, mockClient, n.ID)
 
-	waitForProvision(p, "tenant-1", n.ID, proj.ID, "myapp", proj.RAMMB)
+	waitForProvision(p, "tenant-1", n.ID, proj.ID, "myapp")
 
 	tenantStore.mu.Lock()
 	defer tenantStore.mu.Unlock()
@@ -839,7 +844,7 @@ func TestProvision_ProjectNotFound(t *testing.T) {
 	mockClient := &mockProxmoxClient{nextID: 105}
 	p := setupProvisioner(nodeStore, tenantStore, projectStore, mockClient, n.ID)
 
-	waitForProvision(p, "tenant-1", n.ID, "nonexistent-proj", "myapp", 1536)
+	waitForProvision(p, "tenant-1", n.ID, "nonexistent-proj", "myapp")
 
 	tenantStore.mu.Lock()
 	defer tenantStore.mu.Unlock()
@@ -860,12 +865,11 @@ func TestDeprovision_HappyPath(t *testing.T) {
 	n := testNode()
 	projectStore.projects[proj.ID] = proj
 	nodeStore.nodes[n.ID] = n
-	nodeStore.ram[n.ID] = proj.RAMMB
 
 	mockClient := &mockProxmoxClient{}
 	p := setupProvisioner(nodeStore, tenantStore, projectStore, mockClient, n.ID)
 
-	err := p.Deprovision(context.Background(), "tenant-1", n.ID, "myapp", 105, proj.RAMMB)
+	err := p.Deprovision(context.Background(), "tenant-1", n.ID, "myapp", 105)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -888,9 +892,7 @@ func TestDeprovision_HappyPath(t *testing.T) {
 
 	nodeStore.mu.Lock()
 	defer nodeStore.mu.Unlock()
-	if nodeStore.ram[n.ID] != 0 {
-		t.Errorf("expected ram to be released, got %d", nodeStore.ram[n.ID])
-	}
+	assertReservationReleased(t, tenantStore, "tenant-1")
 }
 
 func TestDeprovision_AlreadyStopped(t *testing.T) {
@@ -902,14 +904,13 @@ func TestDeprovision_AlreadyStopped(t *testing.T) {
 	n := testNode()
 	projectStore.projects[proj.ID] = proj
 	nodeStore.nodes[n.ID] = n
-	nodeStore.ram[n.ID] = proj.RAMMB
 
 	mockClient := &mockProxmoxClient{
 		stopErr: errors.New("already stopped"),
 	}
 	p := setupProvisioner(nodeStore, tenantStore, projectStore, mockClient, n.ID)
 
-	err := p.Deprovision(context.Background(), "tenant-1", n.ID, "myapp", 105, proj.RAMMB)
+	err := p.Deprovision(context.Background(), "tenant-1", n.ID, "myapp", 105)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -937,14 +938,13 @@ func TestDeprovision_StopWaitError_ContinuesWithDelete(t *testing.T) {
 	n := testNode()
 	projectStore.projects[proj.ID] = proj
 	nodeStore.nodes[n.ID] = n
-	nodeStore.ram[n.ID] = proj.RAMMB
 
 	mockClient := &mockProxmoxClient{
 		stopWaitErr: errors.New("stop task failed"),
 	}
 	p := setupProvisioner(nodeStore, tenantStore, projectStore, mockClient, n.ID)
 
-	err := p.Deprovision(context.Background(), "tenant-1", n.ID, "myapp", 105, proj.RAMMB)
+	err := p.Deprovision(context.Background(), "tenant-1", n.ID, "myapp", 105)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -966,14 +966,13 @@ func TestDeprovision_DeleteError(t *testing.T) {
 	n := testNode()
 	projectStore.projects[proj.ID] = proj
 	nodeStore.nodes[n.ID] = n
-	nodeStore.ram[n.ID] = proj.RAMMB
 
 	mockClient := &mockProxmoxClient{
 		deleteErr: errors.New("delete failed"),
 	}
 	p := setupProvisioner(nodeStore, tenantStore, projectStore, mockClient, n.ID)
 
-	err := p.Deprovision(context.Background(), "tenant-1", n.ID, "myapp", 105, proj.RAMMB)
+	err := p.Deprovision(context.Background(), "tenant-1", n.ID, "myapp", 105)
 	if err == nil {
 		t.Fatal("expected error from delete failure")
 	}
@@ -985,12 +984,9 @@ func TestDeprovision_DeleteError(t *testing.T) {
 		t.Errorf("expected tenant status 'error', got %q", tenantStore.statuses["tenant-1"])
 	}
 
-	// RAM should NOT be released (manual investigation needed since container may still exist)
-	nodeStore.mu.Lock()
-	defer nodeStore.mu.Unlock()
-	if nodeStore.ram[n.ID] != proj.RAMMB {
-		t.Errorf("expected ram NOT to be released, got %d", nodeStore.ram[n.ID])
-	}
+	// The reservation should NOT be released: the container may still exist, so
+	// the RAM is left for manual investigation.
+	assertReservationNotReleased(t, tenantStore, "tenant-1")
 }
 
 func TestDeprovision_DeleteWaitError(t *testing.T) {
@@ -1002,14 +998,13 @@ func TestDeprovision_DeleteWaitError(t *testing.T) {
 	n := testNode()
 	projectStore.projects[proj.ID] = proj
 	nodeStore.nodes[n.ID] = n
-	nodeStore.ram[n.ID] = proj.RAMMB
 
 	mockClient := &mockProxmoxClient{
 		deleteWaitErr: errors.New("delete task failed"),
 	}
 	p := setupProvisioner(nodeStore, tenantStore, projectStore, mockClient, n.ID)
 
-	err := p.Deprovision(context.Background(), "tenant-1", n.ID, "myapp", 105, proj.RAMMB)
+	err := p.Deprovision(context.Background(), "tenant-1", n.ID, "myapp", 105)
 	if err == nil {
 		t.Fatal("expected error from delete wait failure")
 	}
@@ -1036,7 +1031,7 @@ func TestDeprovision_StateConflict(t *testing.T) {
 	mockClient := &mockProxmoxClient{}
 	p := setupProvisioner(nodeStore, tenantStore, projectStore, mockClient, n.ID)
 
-	err := p.Deprovision(context.Background(), "tenant-1", n.ID, "myapp", 105, 1536)
+	err := p.Deprovision(context.Background(), "tenant-1", n.ID, "myapp", 105)
 	if err == nil {
 		t.Fatal("expected error from state conflict")
 	}
@@ -1152,7 +1147,6 @@ func TestDeprovision_WithCaddyClient_RemovesRoute(t *testing.T) {
 	n := testNode()
 	projectStore.projects[proj.ID] = proj
 	nodeStore.nodes[n.ID] = n
-	nodeStore.ram[n.ID] = proj.RAMMB
 
 	mockClient := &mockProxmoxClient{}
 	p := setupProvisioner(nodeStore, tenantStore, projectStore, mockClient, n.ID)
@@ -1160,7 +1154,7 @@ func TestDeprovision_WithCaddyClient_RemovesRoute(t *testing.T) {
 	caddyMock := newMockCaddyClient()
 	p.WithCaddyClient(caddyMock)
 
-	err := p.Deprovision(context.Background(), "tenant-1", n.ID, "mystudio", 105, proj.RAMMB)
+	err := p.Deprovision(context.Background(), "tenant-1", n.ID, "mystudio", 105)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -1181,7 +1175,6 @@ func TestDeprovision_CaddyClientError_DoesNotFail(t *testing.T) {
 	n := testNode()
 	projectStore.projects[proj.ID] = proj
 	nodeStore.nodes[n.ID] = n
-	nodeStore.ram[n.ID] = proj.RAMMB
 
 	mockClient := &mockProxmoxClient{}
 	p := setupProvisioner(nodeStore, tenantStore, projectStore, mockClient, n.ID)
@@ -1191,7 +1184,7 @@ func TestDeprovision_CaddyClientError_DoesNotFail(t *testing.T) {
 	p.WithCaddyClient(caddyMock)
 
 	// Deprovision should succeed even if Caddy fails
-	err := p.Deprovision(context.Background(), "tenant-1", n.ID, "mystudio", 105, proj.RAMMB)
+	err := p.Deprovision(context.Background(), "tenant-1", n.ID, "mystudio", 105)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -1212,13 +1205,12 @@ func TestDeprovision_NilCaddyClient_NoPanic(t *testing.T) {
 	n := testNode()
 	projectStore.projects[proj.ID] = proj
 	nodeStore.nodes[n.ID] = n
-	nodeStore.ram[n.ID] = proj.RAMMB
 
 	mockClient := &mockProxmoxClient{}
 	p := setupProvisioner(nodeStore, tenantStore, projectStore, mockClient, n.ID)
 	// No WithCaddyClient — caddyClient is nil
 
-	err := p.Deprovision(context.Background(), "tenant-1", n.ID, "mystudio", 105, proj.RAMMB)
+	err := p.Deprovision(context.Background(), "tenant-1", n.ID, "mystudio", 105)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -1247,7 +1239,7 @@ func TestProvision_BoundedConcurrency(t *testing.T) {
 
 	// Launch multiple provisions
 	for i := 0; i < 5; i++ {
-		p.Provision("tenant-"+string(rune('a'+i)), n.ID, proj.ID, "app"+string(rune('a'+i)), proj.RAMMB)
+		p.Provision("tenant-"+string(rune('a'+i)), n.ID, proj.ID, "app"+string(rune('a'+i)))
 	}
 
 	// Wait for all to complete
@@ -1275,7 +1267,6 @@ func TestDeprovision_ContainerNotFound_DeleteReturnsNotFound(t *testing.T) {
 	n := testNode()
 	projectStore.projects[proj.ID] = proj
 	nodeStore.nodes[n.ID] = n
-	nodeStore.ram[n.ID] = proj.RAMMB
 
 	// Simulate Proxmox returning "does not exist" when container is already gone
 	mockClient := &mockProxmoxClient{
@@ -1287,7 +1278,7 @@ func TestDeprovision_ContainerNotFound_DeleteReturnsNotFound(t *testing.T) {
 	}
 	p := setupProvisioner(nodeStore, tenantStore, projectStore, mockClient, n.ID)
 
-	err := p.Deprovision(context.Background(), "tenant-1", n.ID, "myapp", 105, proj.RAMMB)
+	err := p.Deprovision(context.Background(), "tenant-1", n.ID, "myapp", 105)
 	if err != nil {
 		t.Fatalf("expected no error when container already gone, got: %v", err)
 	}
@@ -1302,9 +1293,7 @@ func TestDeprovision_ContainerNotFound_DeleteReturnsNotFound(t *testing.T) {
 	// RAM should be released
 	nodeStore.mu.Lock()
 	defer nodeStore.mu.Unlock()
-	if nodeStore.ram[n.ID] != 0 {
-		t.Errorf("expected ram to be released, got %d", nodeStore.ram[n.ID])
-	}
+	assertReservationReleased(t, tenantStore, "tenant-1")
 }
 
 func TestDeprovision_ContainerNotFound_OnWait(t *testing.T) {
@@ -1316,7 +1305,6 @@ func TestDeprovision_ContainerNotFound_OnWait(t *testing.T) {
 	n := testNode()
 	projectStore.projects[proj.ID] = proj
 	nodeStore.nodes[n.ID] = n
-	nodeStore.ram[n.ID] = proj.RAMMB
 
 	// DeleteContainer succeeds but Wait returns "not found" (task reports container gone)
 	mockClient := &mockProxmoxClient{
@@ -1328,7 +1316,7 @@ func TestDeprovision_ContainerNotFound_OnWait(t *testing.T) {
 	}
 	p := setupProvisioner(nodeStore, tenantStore, projectStore, mockClient, n.ID)
 
-	err := p.Deprovision(context.Background(), "tenant-1", n.ID, "myapp", 105, proj.RAMMB)
+	err := p.Deprovision(context.Background(), "tenant-1", n.ID, "myapp", 105)
 	if err != nil {
 		t.Fatalf("expected no error when container gone during wait, got: %v", err)
 	}
@@ -1343,9 +1331,7 @@ func TestDeprovision_ContainerNotFound_OnWait(t *testing.T) {
 	// RAM should be released
 	nodeStore.mu.Lock()
 	defer nodeStore.mu.Unlock()
-	if nodeStore.ram[n.ID] != 0 {
-		t.Errorf("expected ram to be released, got %d", nodeStore.ram[n.ID])
-	}
+	assertReservationReleased(t, tenantStore, "tenant-1")
 }
 
 func TestDeprovision_ContainerNotFound_GenericError(t *testing.T) {
@@ -1357,7 +1343,6 @@ func TestDeprovision_ContainerNotFound_GenericError(t *testing.T) {
 	n := testNode()
 	projectStore.projects[proj.ID] = proj
 	nodeStore.nodes[n.ID] = n
-	nodeStore.ram[n.ID] = proj.RAMMB
 
 	// Generic "does not exist" error string (not APIError)
 	mockClient := &mockProxmoxClient{
@@ -1365,7 +1350,7 @@ func TestDeprovision_ContainerNotFound_GenericError(t *testing.T) {
 	}
 	p := setupProvisioner(nodeStore, tenantStore, projectStore, mockClient, n.ID)
 
-	err := p.Deprovision(context.Background(), "tenant-1", n.ID, "myapp", 105, proj.RAMMB)
+	err := p.Deprovision(context.Background(), "tenant-1", n.ID, "myapp", 105)
 	if err != nil {
 		t.Fatalf("expected no error when container not found, got: %v", err)
 	}
@@ -1387,7 +1372,6 @@ func TestDeprovision_RealDeleteError_StillFails(t *testing.T) {
 	n := testNode()
 	projectStore.projects[proj.ID] = proj
 	nodeStore.nodes[n.ID] = n
-	nodeStore.ram[n.ID] = proj.RAMMB
 
 	// A real error (not "not found") should still fail
 	mockClient := &mockProxmoxClient{
@@ -1399,7 +1383,7 @@ func TestDeprovision_RealDeleteError_StillFails(t *testing.T) {
 	}
 	p := setupProvisioner(nodeStore, tenantStore, projectStore, mockClient, n.ID)
 
-	err := p.Deprovision(context.Background(), "tenant-1", n.ID, "myapp", 105, proj.RAMMB)
+	err := p.Deprovision(context.Background(), "tenant-1", n.ID, "myapp", 105)
 	if err == nil {
 		t.Fatal("expected error for real delete failure")
 	}
@@ -1453,7 +1437,7 @@ func TestProvision_MountPointsViaSSH_HappyPath(t *testing.T) {
 	sshMock := &mockSSHExecWithDeployCalls{}
 	p.WithSSHClient(sshMock)
 
-	waitForProvision(p, "tenant-1", n.ID, proj.ID, "myapp", proj.RAMMB)
+	waitForProvision(p, "tenant-1", n.ID, proj.ID, "myapp")
 
 	tenantStore.mu.Lock()
 	defer tenantStore.mu.Unlock()
@@ -1502,7 +1486,6 @@ func TestProvision_MountPointsViaSSH_MkdirError(t *testing.T) {
 	n := testNode()
 	projectStore.projects[proj.ID] = proj
 	nodeStore.nodes[n.ID] = n
-	nodeStore.ram[n.ID] = proj.RAMMB
 
 	mockClient := &mockProxmoxClient{nextID: 105}
 	p := setupProvisioner(nodeStore, tenantStore, projectStore, mockClient, n.ID)
@@ -1510,7 +1493,7 @@ func TestProvision_MountPointsViaSSH_MkdirError(t *testing.T) {
 	sshMock := &mockSSHExecWithDeployCalls{execOnHostErr: fmt.Errorf("ssh: permission denied")}
 	p.WithSSHClient(sshMock)
 
-	waitForProvision(p, "tenant-1", n.ID, proj.ID, "myapp", proj.RAMMB)
+	waitForProvision(p, "tenant-1", n.ID, proj.ID, "myapp")
 
 	tenantStore.mu.Lock()
 	defer tenantStore.mu.Unlock()
@@ -1534,9 +1517,7 @@ func TestProvision_MountPointsViaSSH_MkdirError(t *testing.T) {
 	// RAM should be released
 	nodeStore.mu.Lock()
 	defer nodeStore.mu.Unlock()
-	if nodeStore.ram[n.ID] != 0 {
-		t.Errorf("expected ram to be released, got %d", nodeStore.ram[n.ID])
-	}
+	assertReservationReleased(t, tenantStore, "tenant-1")
 }
 
 func TestProvision_MountPointsViaSSH_PctSetError(t *testing.T) {
@@ -1548,7 +1529,6 @@ func TestProvision_MountPointsViaSSH_PctSetError(t *testing.T) {
 	n := testNode()
 	projectStore.projects[proj.ID] = proj
 	nodeStore.nodes[n.ID] = n
-	nodeStore.ram[n.ID] = proj.RAMMB
 
 	mockClient := &mockProxmoxClient{nextID: 105}
 	p := setupProvisioner(nodeStore, tenantStore, projectStore, mockClient, n.ID)
@@ -1560,7 +1540,7 @@ func TestProvision_MountPointsViaSSH_PctSetError(t *testing.T) {
 	}
 	p.WithSSHClient(dynamicSSH)
 
-	waitForProvision(p, "tenant-1", n.ID, proj.ID, "myapp", proj.RAMMB)
+	waitForProvision(p, "tenant-1", n.ID, proj.ID, "myapp")
 
 	tenantStore.mu.Lock()
 	defer tenantStore.mu.Unlock()
@@ -1634,7 +1614,7 @@ func TestProvision_AutoDeploy_HappyPath(t *testing.T) {
 	p.WithSSHClient(ssh)
 	p.WithFreeRadioRepo("https://github.com/Awis13/freeRadio.git", "dev")
 
-	waitForProvision(p, "tenant-1", n.ID, proj.ID, "myapp", proj.RAMMB)
+	waitForProvision(p, "tenant-1", n.ID, proj.ID, "myapp")
 
 	tenantStore.mu.Lock()
 	status := tenantStore.statuses["tenant-1"]
@@ -1720,7 +1700,7 @@ func TestProvision_AutoDeploy_Failure_DoesNotFailProvisioning(t *testing.T) {
 	p.WithSSHClient(ssh)
 	p.WithFreeRadioRepo("https://github.com/Awis13/freeRadio.git", "dev")
 
-	waitForProvision(p, "tenant-1", n.ID, proj.ID, "myapp", proj.RAMMB)
+	waitForProvision(p, "tenant-1", n.ID, proj.ID, "myapp")
 
 	tenantStore.mu.Lock()
 	defer tenantStore.mu.Unlock()
@@ -1747,7 +1727,7 @@ func TestProvision_AutoDeploy_SkippedWithoutSSH(t *testing.T) {
 	// Only WithFreeRadioRepo, without WithSSHClient — the deploy should be skipped
 	p.WithFreeRadioRepo("https://github.com/Awis13/freeRadio.git", "dev")
 
-	waitForProvision(p, "tenant-1", n.ID, proj.ID, "myapp", proj.RAMMB)
+	waitForProvision(p, "tenant-1", n.ID, proj.ID, "myapp")
 
 	tenantStore.mu.Lock()
 	defer tenantStore.mu.Unlock()
@@ -1778,7 +1758,7 @@ func TestProvision_AutoDeploy_ComposeUpFailure(t *testing.T) {
 	p.WithSSHClient(ssh)
 	p.WithFreeRadioRepo("https://github.com/Awis13/freeRadio.git", "dev")
 
-	waitForProvision(p, "tenant-1", n.ID, proj.ID, "myapp", proj.RAMMB)
+	waitForProvision(p, "tenant-1", n.ID, proj.ID, "myapp")
 
 	tenantStore.mu.Lock()
 	defer tenantStore.mu.Unlock()
@@ -1819,7 +1799,7 @@ func TestProvision_LegacyPathWhenRepoUnset(t *testing.T) {
 	p.WithSSHClient(ssh)
 	// WithFreeRadioRepo is deliberately not called.
 
-	waitForProvision(p, "tenant-1", n.ID, proj.ID, "myapp", proj.RAMMB)
+	waitForProvision(p, "tenant-1", n.ID, proj.ID, "myapp")
 
 	ssh.mu.Lock()
 	defer ssh.mu.Unlock()
@@ -1857,7 +1837,7 @@ func TestProvision_DeployPathWhenRepoSet(t *testing.T) {
 	p.WithSSHClient(ssh)
 	p.WithFreeRadioRepo("https://github.com/example/freeRadio.git", "dev")
 
-	waitForProvision(p, "tenant-1", n.ID, proj.ID, "myapp", proj.RAMMB)
+	waitForProvision(p, "tenant-1", n.ID, proj.ID, "myapp")
 
 	ssh.mu.Lock()
 	defer ssh.mu.Unlock()
@@ -2136,7 +2116,7 @@ func TestTopology_DefaultsMatchTheOldLiterals(t *testing.T) {
 	mockClient := &mockProxmoxClient{nextID: 105}
 	p := setupProvisioner(nodeStore, tenantStore, projectStore, mockClient, n.ID)
 
-	waitForProvision(p, "tenant-1", n.ID, proj.ID, "myapp", proj.RAMMB)
+	waitForProvision(p, "tenant-1", n.ID, proj.ID, "myapp")
 
 	mockClient.mu.Lock()
 	defer mockClient.mu.Unlock()
@@ -2171,7 +2151,7 @@ func TestTopology_ConfiguredValuesReachEveryCommand(t *testing.T) {
 	ssh := &mockSSHExecWithDeployCalls{}
 	p.WithSSHClient(ssh)
 
-	waitForProvision(p, "tenant-1", n.ID, proj.ID, "myapp", proj.RAMMB)
+	waitForProvision(p, "tenant-1", n.ID, proj.ID, "myapp")
 
 	mockClient.mu.Lock()
 	net0 := mockClient.net0Received
@@ -2290,7 +2270,7 @@ func TestTopology_ConfiguredValuesReachTheAPIMountFallback(t *testing.T) {
 	p.WithTopology("vmbr1", "/srv/tenants", "/opt/app")
 	// No SSH client: this is what selects the API fallback.
 
-	waitForProvision(p, "tenant-1", n.ID, proj.ID, "myapp", proj.RAMMB)
+	waitForProvision(p, "tenant-1", n.ID, proj.ID, "myapp")
 
 	mockClient.mu.Lock()
 	defer mockClient.mu.Unlock()
@@ -2328,7 +2308,7 @@ func TestTopology_HostileValuesCannotReshapeCommands(t *testing.T) {
 	ssh := &mockSSHExecWithDeployCalls{}
 	p.WithSSHClient(ssh)
 
-	waitForProvision(p, "tenant-1", n.ID, proj.ID, "myapp", proj.RAMMB)
+	waitForProvision(p, "tenant-1", n.ID, proj.ID, "myapp")
 
 	ssh.mu.Lock()
 	defer ssh.mu.Unlock()
@@ -2425,7 +2405,7 @@ func TestProvision_LegacyTokenWriteQuotesTheAppDir(t *testing.T) {
 	ssh := &mockSSHExecWithDeployCalls{}
 	p.WithSSHClient(ssh)
 
-	waitForProvision(p, "tenant-1", n.ID, proj.ID, "myapp", proj.RAMMB)
+	waitForProvision(p, "tenant-1", n.ID, proj.ID, "myapp")
 
 	ssh.mu.Lock()
 	defer ssh.mu.Unlock()

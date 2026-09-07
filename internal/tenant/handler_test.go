@@ -30,6 +30,20 @@ type mockTenantStore struct {
 	setSuspendedErr error
 	setResumedErr   error
 	updateErr       error
+
+	// Reservation accounting, so lifecycle tests can assert that a reservation
+	// was created or released rather than merely that an error came back.
+	createWithReservationErr   error
+	createWithReservationCalls []createWithReservationCall
+	releaseReservationErr      error
+	releaseReservationCalls    []string
+}
+
+// createWithReservationCall records a reservation request, so tests can pin the
+// node and the amount a tenant was created with.
+type createWithReservationCall struct {
+	Req   CreateTenantRequest
+	RAMMB int
 }
 
 func newMockTenantStore() *mockTenantStore {
@@ -110,6 +124,32 @@ func (m *mockTenantStore) Create(_ context.Context, req CreateTenantRequest) (*T
 	return t, nil
 }
 
+func (m *mockTenantStore) CreateWithReservation(_ context.Context, req CreateTenantRequest, ramMB int) (*Tenant, error) {
+	m.createWithReservationCalls = append(m.createWithReservationCalls, createWithReservationCall{Req: req, RAMMB: ramMB})
+	if m.createWithReservationErr != nil {
+		return nil, m.createWithReservationErr
+	}
+	t := &Tenant{
+		ID:            "new-tenant-id",
+		Name:          req.Name,
+		ProjectID:     req.ProjectID,
+		NodeID:        req.NodeID,
+		Subdomain:     req.Subdomain,
+		Status:        "provisioning",
+		HealthStatus:  "unknown",
+		ReservedRAMMB: &ramMB,
+		CreatedAt:     time.Now(),
+		UpdatedAt:     time.Now(),
+	}
+	m.tenants[t.ID] = t
+	return t, nil
+}
+
+func (m *mockTenantStore) ReleaseReservation(_ context.Context, tenantID string) error {
+	m.releaseReservationCalls = append(m.releaseReservationCalls, tenantID)
+	return m.releaseReservationErr
+}
+
 func (m *mockTenantStore) SetActive(_ context.Context, id string, lxcID int) error {
 	if m.setActiveErr != nil {
 		return m.setActiveErr
@@ -174,19 +214,8 @@ func (m *mockTenantStore) SetResumed(_ context.Context, id string) error {
 
 // --- Mock node store ---
 
-// ramCall records a RAM reservation or release, so tests can assert that
-// capacity was actually returned rather than merely that an error came back.
-type ramCall struct {
-	NodeID string
-	RAMMB  int
-}
-
 type mockNodeStore struct {
-	nodes        map[string]*node.Node
-	reserveErr   error
-	releaseErr   error
-	reserveCalls []ramCall
-	releaseCalls []ramCall
+	nodes map[string]*node.Node
 }
 
 func newMockNodeStore() *mockNodeStore {
@@ -199,16 +228,6 @@ func (m *mockNodeStore) GetByID(_ context.Context, id string) (*node.Node, error
 		return nil, nil
 	}
 	return n, nil
-}
-
-func (m *mockNodeStore) ReserveRAM(_ context.Context, nodeID string, ramMB int) error {
-	m.reserveCalls = append(m.reserveCalls, ramCall{NodeID: nodeID, RAMMB: ramMB})
-	return m.reserveErr
-}
-
-func (m *mockNodeStore) ReleaseRAM(_ context.Context, nodeID string, ramMB int) error {
-	m.releaseCalls = append(m.releaseCalls, ramCall{NodeID: nodeID, RAMMB: ramMB})
-	return m.releaseErr
 }
 
 // --- Mock project store ---
@@ -253,7 +272,7 @@ func newMockProvisioner() *mockProvisioner {
 	}
 }
 
-func (m *mockProvisioner) Provision(_, _, _, _ string, _ int) {
+func (m *mockProvisioner) Provision(_, _, _, _ string) {
 	m.mu.Lock()
 	m.provisionCalled = true
 	m.mu.Unlock()
@@ -263,7 +282,7 @@ func (m *mockProvisioner) Provision(_, _, _, _ string, _ int) {
 	}
 }
 
-func (m *mockProvisioner) Deprovision(_ context.Context, _, _, _ string, _, _ int) error {
+func (m *mockProvisioner) Deprovision(_ context.Context, _, _, _ string, _ int) error {
 	m.mu.Lock()
 	m.deprovisionCalled = true
 	m.mu.Unlock()
@@ -438,7 +457,7 @@ func TestCreate_InsufficientCapacity(t *testing.T) {
 
 	ns.nodes[validNodeID] = activeNode()
 	ps.projects[validProjectID] = testProjectObj()
-	ns.reserveErr = node.ErrInsufficientCapacity
+	ts.createWithReservationErr = node.ErrInsufficientCapacity
 
 	h := NewHandler(ts, ns, ps, prov, nil)
 	r := testRouter(h)

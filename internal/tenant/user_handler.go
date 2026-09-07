@@ -93,7 +93,7 @@ func NewUserHandler(store UserTenantStore, nodeStore UserNodeStore, projectStore
 		projectStore: projectStore,
 		provisioner:  provisioner,
 		auditStore:   auditStore,
-		lifecycle:    NewLifecycleService(store, nodeStore, projectStore, provisioner, auditStore),
+		lifecycle:    NewLifecycleService(store, provisioner, auditStore),
 		ssoDomain:    ssoDomain,
 		ssoScheme:    ssoScheme,
 	}

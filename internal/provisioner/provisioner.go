@@ -44,7 +44,6 @@ const (
 type NodeStore interface {
 	GetByID(ctx context.Context, id string) (*node.Node, error)
 	GetEncryptedTokenByID(ctx context.Context, id string) (string, error)
-	ReleaseRAM(ctx context.Context, nodeID string, ramMB int) error
 }
 
 // TenantStore defines what the provisioner needs from the tenant store.
@@ -58,6 +57,7 @@ type TenantStore interface {
 	SetHealthStatus(ctx context.Context, id string, status string) error
 	SetDashboardToken(ctx context.Context, id string, token string) error
 	GetByID(ctx context.Context, id string) (*tenant.Tenant, error)
+	ReleaseReservation(ctx context.Context, tenantID string) error
 }
 
 // ProjectStore defines what the provisioner needs from the project store.
@@ -297,14 +297,14 @@ func (p *Provisioner) getClient(ctx context.Context, nodeID string) (ProxmoxClie
 // Provision creates an LXC container for a tenant asynchronously.
 // This method is designed to be called as a goroutine — it creates its own
 // background context with a timeout, independent of the caller's context.
-func (p *Provisioner) Provision(tenantID, nodeID, projectID, subdomain string, ramMB int) {
+func (p *Provisioner) Provision(tenantID, nodeID, projectID, subdomain string) {
 	p.wg.Add(1)
 	go func() {
 		defer p.wg.Done()
 		defer func() {
 			if rec := recover(); rec != nil {
 				slog.Error("provision: panic recovered", "tenant_id", tenantID, "panic", rec)
-				p.setError(context.Background(), tenantID, nodeID, ramMB, "provisioning failed: internal panic")
+				p.setError(context.Background(), tenantID, "provisioning failed: internal panic")
 			}
 		}()
 
@@ -312,11 +312,11 @@ func (p *Provisioner) Provision(tenantID, nodeID, projectID, subdomain string, r
 		p.sem <- struct{}{}
 		defer func() { <-p.sem }()
 
-		p.doProvision(tenantID, nodeID, projectID, subdomain, ramMB)
+		p.doProvision(tenantID, nodeID, projectID, subdomain)
 	}()
 }
 
-func (p *Provisioner) doProvision(tenantID, nodeID, projectID, subdomain string, ramMB int) {
+func (p *Provisioner) doProvision(tenantID, nodeID, projectID, subdomain string) {
 	ctx, cancel := context.WithTimeout(context.Background(), provisionTimeout)
 	defer cancel()
 
@@ -326,12 +326,12 @@ func (p *Provisioner) doProvision(tenantID, nodeID, projectID, subdomain string,
 	proj, err := p.projectStore.GetByID(ctx, projectID)
 	if err != nil {
 		log.Error("provision: get project", "error", err)
-		p.setError(ctx, tenantID, nodeID, ramMB, "provisioning failed: project lookup error")
+		p.setError(ctx, tenantID, "provisioning failed: project lookup error")
 		return
 	}
 	if proj == nil {
 		log.Error("provision: project not found")
-		p.setError(ctx, tenantID, nodeID, ramMB, "provisioning failed: project not found")
+		p.setError(ctx, tenantID, "provisioning failed: project not found")
 		return
 	}
 	templateID := proj.TemplateID
@@ -340,12 +340,12 @@ func (p *Provisioner) doProvision(tenantID, nodeID, projectID, subdomain string,
 	nodeInfo, err := p.nodeStore.GetByID(ctx, nodeID)
 	if err != nil {
 		log.Error("provision: get node", "error", err)
-		p.setError(ctx, tenantID, nodeID, ramMB, "provisioning failed: node lookup error")
+		p.setError(ctx, tenantID, "provisioning failed: node lookup error")
 		return
 	}
 	if nodeInfo == nil {
 		log.Error("provision: node not found")
-		p.setError(ctx, tenantID, nodeID, ramMB, "provisioning failed: node not found")
+		p.setError(ctx, tenantID, "provisioning failed: node not found")
 		return
 	}
 
@@ -353,7 +353,7 @@ func (p *Provisioner) doProvision(tenantID, nodeID, projectID, subdomain string,
 	client, err := p.getClient(ctx, nodeID)
 	if err != nil {
 		log.Error("provision: get client", "error", err)
-		p.setError(ctx, tenantID, nodeID, ramMB, "provisioning failed: node connection error")
+		p.setError(ctx, tenantID, "provisioning failed: node connection error")
 		return
 	}
 
@@ -361,7 +361,7 @@ func (p *Provisioner) doProvision(tenantID, nodeID, projectID, subdomain string,
 	newID, err := client.GetNextID(ctx)
 	if err != nil {
 		log.Error("provision: get next id", "error", err)
-		p.setError(ctx, tenantID, nodeID, ramMB, "provisioning failed: could not allocate container ID")
+		p.setError(ctx, tenantID, "provisioning failed: could not allocate container ID")
 		return
 	}
 	log = log.With("lxc_id", newID)
@@ -375,12 +375,12 @@ func (p *Provisioner) doProvision(tenantID, nodeID, projectID, subdomain string,
 	})
 	if err != nil {
 		log.Error("provision: clone container", "error", err)
-		p.setError(ctx, tenantID, nodeID, ramMB, "provisioning failed: clone error")
+		p.setError(ctx, tenantID, "provisioning failed: clone error")
 		return
 	}
 	if err := cloneTask.Wait(ctx); err != nil {
 		log.Error("provision: wait for clone", "error", err)
-		p.setError(ctx, tenantID, nodeID, ramMB, "provisioning failed: clone did not complete")
+		p.setError(ctx, tenantID, "provisioning failed: clone did not complete")
 		return
 	}
 
@@ -390,7 +390,7 @@ func (p *Provisioner) doProvision(tenantID, nodeID, projectID, subdomain string,
 		lxcIP, err = p.tenantStore.GetNextAvailableIP(ctx, proj.NetworkCIDR)
 		if err != nil {
 			log.Error("provision: allocate ip", "error", err)
-			p.cleanupAndError(ctx, client, tenantID, nodeID, ramMB, newID, "provisioning failed: IP allocation error")
+			p.cleanupAndError(ctx, client, tenantID, newID, "provisioning failed: IP allocation error")
 			return
 		}
 		log = log.With("lxc_ip", lxcIP)
@@ -404,7 +404,7 @@ func (p *Provisioner) doProvision(tenantID, nodeID, projectID, subdomain string,
 		log.Info("provision: configuring network", "net0", net0)
 		if err := client.ConfigureNetwork(ctx, newID, net0); err != nil {
 			log.Error("provision: configure network", "error", err)
-			p.cleanupAndError(ctx, client, tenantID, nodeID, ramMB, newID, "provisioning failed: network config error")
+			p.cleanupAndError(ctx, client, tenantID, newID, "provisioning failed: network config error")
 			return
 		}
 
@@ -422,7 +422,7 @@ func (p *Provisioner) doProvision(tenantID, nodeID, projectID, subdomain string,
 		sshHost, err := sshexec.ExtractHost(nodeInfo.ProxmoxURL)
 		if err != nil {
 			log.Error("provision: extract ssh host for mount points", "error", err)
-			p.cleanupAndError(ctx, client, tenantID, nodeID, ramMB, newID, "provisioning failed: mount point config error")
+			p.cleanupAndError(ctx, client, tenantID, newID, "provisioning failed: mount point config error")
 			return
 		}
 
@@ -431,7 +431,7 @@ func (p *Provisioner) doProvision(tenantID, nodeID, projectID, subdomain string,
 		log.Info("provision: creating host directories for mount points", "cmd", mkdirCmd)
 		if err := p.sshClient.ExecOnHost(ctx, sshHost, mkdirCmd); err != nil {
 			log.Error("provision: create host directories", "error", err)
-			p.cleanupAndError(ctx, client, tenantID, nodeID, ramMB, newID, "provisioning failed: mount point config error")
+			p.cleanupAndError(ctx, client, tenantID, newID, "provisioning failed: mount point config error")
 			return
 		}
 
@@ -440,7 +440,7 @@ func (p *Provisioner) doProvision(tenantID, nodeID, projectID, subdomain string,
 		log.Info("provision: configuring mount points via SSH", "cmd", pctCmd)
 		if err := p.sshClient.ExecOnHost(ctx, sshHost, pctCmd); err != nil {
 			log.Error("provision: configure mount points via ssh", "error", err)
-			p.cleanupAndError(ctx, client, tenantID, nodeID, ramMB, newID, "provisioning failed: mount point config error")
+			p.cleanupAndError(ctx, client, tenantID, newID, "provisioning failed: mount point config error")
 			return
 		}
 	} else {
@@ -452,7 +452,7 @@ func (p *Provisioner) doProvision(tenantID, nodeID, projectID, subdomain string,
 		log.Info("provision: configuring mount points via API", "mounts", mounts)
 		if err := client.ConfigureMountPoints(ctx, newID, mounts); err != nil {
 			log.Error("provision: configure mount points", "error", err)
-			p.cleanupAndError(ctx, client, tenantID, nodeID, ramMB, newID, "provisioning failed: mount point config error")
+			p.cleanupAndError(ctx, client, tenantID, newID, "provisioning failed: mount point config error")
 			return
 		}
 	}
@@ -462,12 +462,12 @@ func (p *Provisioner) doProvision(tenantID, nodeID, projectID, subdomain string,
 	startTask, err := client.StartContainer(ctx, newID)
 	if err != nil {
 		log.Error("provision: start container", "error", err)
-		p.cleanupAndError(ctx, client, tenantID, nodeID, ramMB, newID, "provisioning failed: start error")
+		p.cleanupAndError(ctx, client, tenantID, newID, "provisioning failed: start error")
 		return
 	}
 	if err := startTask.Wait(ctx); err != nil {
 		log.Error("provision: wait for start", "error", err)
-		p.cleanupAndError(ctx, client, tenantID, nodeID, ramMB, newID, "provisioning failed: start did not complete")
+		p.cleanupAndError(ctx, client, tenantID, newID, "provisioning failed: start did not complete")
 		return
 	}
 
@@ -505,7 +505,7 @@ func (p *Provisioner) doProvision(tenantID, nodeID, projectID, subdomain string,
 	// Mark as active
 	if err := p.tenantStore.SetActive(ctx, tenantID, newID); err != nil {
 		log.Error("provision: set active", "error", err)
-		p.cleanupAndError(ctx, client, tenantID, nodeID, ramMB, newID, "provisioning failed: could not update status")
+		p.cleanupAndError(ctx, client, tenantID, newID, "provisioning failed: could not update status")
 		return
 	}
 
@@ -588,9 +588,8 @@ func (p *Provisioner) waitForHealth(ctx context.Context, url string) bool {
 }
 
 // Deprovision removes an LXC container for a tenant synchronously.
-// ramMB is passed by the caller (from the project) so we don't need to re-fetch the project.
 // subdomain is used to remove the Caddy route if a CaddyClient is configured.
-func (p *Provisioner) Deprovision(ctx context.Context, tenantID, nodeID, subdomain string, lxcID, ramMB int) error {
+func (p *Provisioner) Deprovision(ctx context.Context, tenantID, nodeID, subdomain string, lxcID int) error {
 	log := slog.With("tenant_id", tenantID, "node_id", nodeID, "lxc_id", lxcID)
 
 	// Atomically transition to deleting — prevents concurrent delete requests
@@ -641,11 +640,10 @@ func (p *Provisioner) Deprovision(ctx context.Context, tenantID, nodeID, subdoma
 		}
 	}
 
-	// Release RAM
-	if ramMB > 0 {
-		if err := p.nodeStore.ReleaseRAM(ctx, nodeID, ramMB); err != nil {
-			log.Error("deprovision: release ram", "error", err)
-		}
+	// Release the tenant's reservation. The amount comes from the tenant's own
+	// record, so no project figure is needed here.
+	if err := p.tenantStore.ReleaseReservation(ctx, tenantID); err != nil {
+		log.Error("deprovision: release reservation", "error", err)
 	}
 
 	// Remove Caddy route (best-effort, don't fail deprovisioning)
@@ -712,20 +710,20 @@ func (p *Provisioner) Resume(ctx context.Context, tenantID, nodeID string, lxcID
 	return nil
 }
 
-// setError marks a tenant as errored (sanitized message) and releases RAM.
-func (p *Provisioner) setError(ctx context.Context, tenantID, nodeID string, ramMB int, errMsg string) {
+// setError marks a tenant as errored (sanitized message) and releases its
+// reservation. The reservation is released through the tenant store so it is
+// driven by the tenant's own record and released at most once.
+func (p *Provisioner) setError(ctx context.Context, tenantID, errMsg string) {
 	if err := p.tenantStore.SetError(ctx, tenantID, errMsg); err != nil {
 		slog.Error("provision: failed to set error status", "tenant_id", tenantID, "error", err)
 	}
-	if ramMB > 0 {
-		if err := p.nodeStore.ReleaseRAM(ctx, nodeID, ramMB); err != nil {
-			slog.Error("provision: failed to release ram", "tenant_id", tenantID, "error", err)
-		}
+	if err := p.tenantStore.ReleaseReservation(ctx, tenantID); err != nil {
+		slog.Error("provision: failed to release reservation", "tenant_id", tenantID, "error", err)
 	}
 }
 
-// cleanupAndError attempts to delete the created container, then marks error and releases RAM.
-func (p *Provisioner) cleanupAndError(ctx context.Context, client ProxmoxClient, tenantID, nodeID string, ramMB, lxcID int, errMsg string) {
+// cleanupAndError attempts to delete the created container, then marks error and releases the reservation.
+func (p *Provisioner) cleanupAndError(ctx context.Context, client ProxmoxClient, tenantID string, lxcID int, errMsg string) {
 	slog.Info("provision: attempting cleanup", "tenant_id", tenantID, "lxc_id", lxcID)
 	deleteTask, err := client.DeleteContainer(ctx, lxcID, true)
 	if err != nil {
@@ -735,7 +733,7 @@ func (p *Provisioner) cleanupAndError(ctx context.Context, client ProxmoxClient,
 			slog.Error("provision: cleanup delete wait failed", "tenant_id", tenantID, "error", err)
 		}
 	}
-	p.setError(ctx, tenantID, nodeID, ramMB, errMsg)
+	p.setError(ctx, tenantID, errMsg)
 }
 
 // deployFreeRadio clones the repo, writes .env, and starts the Docker services inside the LXC.

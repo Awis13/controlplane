@@ -203,14 +203,15 @@ func (m *mockProjectStore) CountTenants(_ context.Context, _ string) (int, error
 // ---
 
 type mockTenantStore struct {
-	tenants          map[string]*tenant.Tenant
-	createErr        error
-	setDeletingErr   error
-	setDeletedErr    error
-	setSuspendedErr  error
-	setResumedErr    error
-	countErr         error
-	listPaginatedErr error
+	tenants                  map[string]*tenant.Tenant
+	createErr                error
+	createWithReservationErr error
+	setDeletingErr           error
+	setDeletedErr            error
+	setSuspendedErr          error
+	setResumedErr            error
+	countErr                 error
+	listPaginatedErr         error
 
 	// lastListPaginated records the arguments the handler passed, so a test can
 	// pin that filtering was delegated to the query instead of done afterwards.
@@ -315,6 +316,33 @@ func (m *mockTenantStore) Create(_ context.Context, req tenant.CreateTenantReque
 	return t, nil
 }
 
+func (m *mockTenantStore) CreateWithReservation(_ context.Context, req tenant.CreateTenantRequest, ramMB int) (*tenant.Tenant, error) {
+	if m.createWithReservationErr != nil {
+		return nil, m.createWithReservationErr
+	}
+	if m.createErr != nil {
+		return nil, m.createErr
+	}
+	t := &tenant.Tenant{
+		ID:            "new-tenant-id",
+		Name:          req.Name,
+		ProjectID:     req.ProjectID,
+		NodeID:        req.NodeID,
+		Subdomain:     req.Subdomain,
+		Status:        "provisioning",
+		HealthStatus:  "unknown",
+		ReservedRAMMB: &ramMB,
+		CreatedAt:     time.Now(),
+		UpdatedAt:     time.Now(),
+	}
+	m.tenants[t.ID] = t
+	return t, nil
+}
+
+func (m *mockTenantStore) ReleaseReservation(_ context.Context, tenantID string) error {
+	return nil
+}
+
 func (m *mockTenantStore) SetDeleting(_ context.Context, id string) error {
 	if m.setDeletingErr != nil {
 		return m.setDeletingErr
@@ -372,11 +400,11 @@ func newMockProvisioner() *mockProvisioner {
 	return &mockProvisioner{}
 }
 
-func (m *mockProvisioner) Provision(_, _, _, _ string, _ int) {
+func (m *mockProvisioner) Provision(_, _, _, _ string) {
 	m.provisionCalled = true
 }
 
-func (m *mockProvisioner) Deprovision(_ context.Context, _, _, _ string, _, _ int) error {
+func (m *mockProvisioner) Deprovision(_ context.Context, _, _, _ string, _ int) error {
 	m.deprovisionCalled = true
 	return m.deprovisionErr
 }
@@ -1158,12 +1186,12 @@ func TestCreateTenant_InactiveNode(t *testing.T) {
 }
 
 func TestCreateTenant_InsufficientRAM(t *testing.T) {
-	h, ns, ps, _, _ := testHandler(t)
+	h, ns, ps, ts, _ := testHandler(t)
 	ns.nodes[testNodeID] = &node.Node{
 		ID: testNodeID, Name: "node-1", Status: "active",
 		CreatedAt: time.Now(), UpdatedAt: time.Now(),
 	}
-	ns.reserveErr = node.ErrInsufficientCapacity
+	ts.createWithReservationErr = node.ErrInsufficientCapacity
 	ps.projects[testProjectID] = &project.Project{
 		ID: testProjectID, Name: "project-1", RAMMB: 1536,
 		CreatedAt: time.Now(), UpdatedAt: time.Now(),
@@ -1308,8 +1336,8 @@ func TestAdminFlashWording(t *testing.T) {
 		},
 		{
 			name: "insufficient capacity",
-			setup: func(ns *mockNodeStore, _ *mockProjectStore, _ *mockTenantStore) {
-				ns.reserveErr = node.ErrInsufficientCapacity
+			setup: func(_ *mockNodeStore, _ *mockProjectStore, ts *mockTenantStore) {
+				ts.createWithReservationErr = node.ErrInsufficientCapacity
 			},
 			method: "POST", target: "/tenants",
 			form: url.Values{"name": {"t"}, "subdomain": {"ok"}, "project_id": {testProjectID}, "node_id": {testNodeID}},
@@ -1375,28 +1403,6 @@ func TestDeleteTenant_WrongStatusWording(t *testing.T) {
 
 	if !strings.Contains(w.Body.String(), "Cannot delete tenant in status: provisioning") {
 		t.Errorf("body = %q, want the admin phrasing with the status appended", w.Body.String())
-	}
-}
-
-// TestDeleteTenant_ProjectLookupFailure pins a delta from the cutover: a failed
-// project lookup now renders a flash where the handler used to send a bare
-// "internal error" page with 500.
-func TestDeleteTenant_ProjectLookupFailure(t *testing.T) {
-	h, _, ps, ts, _ := testHandler(t)
-	ts.tenants[testTenantID] = &tenant.Tenant{
-		ID: testTenantID, Name: "tenant-1", Status: "active",
-		ProjectID: testProjectID, NodeID: testNodeID, Subdomain: "test",
-		CreatedAt: time.Now(), UpdatedAt: time.Now(),
-	}
-	ps.getErr = errors.New("boom")
-
-	w := doRequest(t, h, "DELETE", "/tenants/"+testTenantID, nil)
-
-	if w.Code != http.StatusOK {
-		t.Errorf("status = %d, want 200", w.Code)
-	}
-	if !strings.Contains(w.Body.String(), "Failed to get project") {
-		t.Errorf("body = %q, want a flash naming the project lookup", w.Body.String())
 	}
 }
 

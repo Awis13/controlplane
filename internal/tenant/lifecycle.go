@@ -20,29 +20,21 @@ import (
 // are chosen, and how a result is rendered -- and delegates the rest.
 
 // LifecycleTenantStore is the tenant store surface the lifecycle needs. It is
-// deliberately narrow so every caller's store satisfies it.
+// deliberately narrow so every caller's store satisfies it. The reservation is
+// created and released through the store so the RAM a tenant holds belongs to
+// the tenant record, not to the provisioning flow.
 type LifecycleTenantStore interface {
-	Create(ctx context.Context, req CreateTenantRequest) (*Tenant, error)
+	CreateWithReservation(ctx context.Context, req CreateTenantRequest, ramMB int) (*Tenant, error)
 	GetByID(ctx context.Context, id string) (*Tenant, error)
 	SetDeleting(ctx context.Context, id string) error
 	SetDeleted(ctx context.Context, id string) error
-}
-
-// LifecycleNodeStore covers the RAM accounting the lifecycle performs.
-type LifecycleNodeStore interface {
-	ReserveRAM(ctx context.Context, nodeID string, ramMB int) error
-	ReleaseRAM(ctx context.Context, nodeID string, ramMB int) error
-}
-
-// LifecycleProjectStore is used to look up how much RAM to release on delete.
-type LifecycleProjectStore interface {
-	GetByID(ctx context.Context, id string) (*project.Project, error)
+	ReleaseReservation(ctx context.Context, tenantID string) error
 }
 
 // LifecycleProvisioner is the provisioning surface the lifecycle drives.
 type LifecycleProvisioner interface {
-	Provision(tenantID, nodeID, projectID, subdomain string, ramMB int)
-	Deprovision(ctx context.Context, tenantID, nodeID, subdomain string, lxcID, ramMB int) error
+	Provision(tenantID, nodeID, projectID, subdomain string)
+	Deprovision(ctx context.Context, tenantID, nodeID, subdomain string, lxcID int) error
 }
 
 // AuditLogger records lifecycle actions. *audit.Store implements it; tests
@@ -68,7 +60,7 @@ func normalizeAuditLogger(a AuditLogger) AuditLogger {
 // Only the user path needs it; the real store implements it, so a caller that
 // passes an owner without an owner-capable store is a programming error.
 type OwnerCreator interface {
-	CreateWithOwner(ctx context.Context, req CreateTenantRequest, ownerID string) (*Tenant, error)
+	CreateWithOwnerWithReservation(ctx context.Context, req CreateTenantRequest, ownerID string, ramMB int) (*Tenant, error)
 }
 
 // FailureKind classifies a lifecycle failure so each entry point can translate
@@ -129,22 +121,18 @@ var deletableStatuses = map[string]bool{
 
 // LifecycleService creates and deletes tenants.
 type LifecycleService struct {
-	store        LifecycleTenantStore
-	nodeStore    LifecycleNodeStore
-	projectStore LifecycleProjectStore
-	provisioner  LifecycleProvisioner
-	auditStore   AuditLogger
+	store       LifecycleTenantStore
+	provisioner LifecycleProvisioner
+	auditStore  AuditLogger
 }
 
 // NewLifecycleService creates a lifecycle service. auditStore may be nil, in
 // which case actions are not audited.
-func NewLifecycleService(store LifecycleTenantStore, nodeStore LifecycleNodeStore, projectStore LifecycleProjectStore, provisioner LifecycleProvisioner, auditStore AuditLogger) *LifecycleService {
+func NewLifecycleService(store LifecycleTenantStore, provisioner LifecycleProvisioner, auditStore AuditLogger) *LifecycleService {
 	return &LifecycleService{
-		store:        store,
-		nodeStore:    nodeStore,
-		projectStore: projectStore,
-		provisioner:  provisioner,
-		auditStore:   normalizeAuditLogger(auditStore),
+		store:       store,
+		provisioner: provisioner,
+		auditStore:  normalizeAuditLogger(auditStore),
 	}
 }
 
@@ -182,18 +170,12 @@ type CreateParams struct {
 	OwnerID   string // empty for tenants created without an owner
 }
 
-// Create reserves capacity, records the tenant and starts provisioning. On a
-// failed insert the reserved RAM is released before the error is returned.
+// Create reserves capacity, records the tenant and starts provisioning. The
+// reservation and the insert happen in one transaction, so a failed insert
+// rolls the reservation back rather than leaking it.
 func (s *LifecycleService) Create(ctx context.Context, params CreateParams, actor Actor) (*Tenant, *LifecycleError) {
 	if err := ValidateSubdomain(params.Subdomain); err != nil {
 		return nil, err
-	}
-
-	if err := s.nodeStore.ReserveRAM(ctx, params.Node.ID, params.Project.RAMMB); err != nil {
-		if errors.Is(err, node.ErrInsufficientCapacity) {
-			return nil, conflict("insufficient capacity on node", err)
-		}
-		return nil, internal("failed to reserve resources", err)
 	}
 
 	req := CreateTenantRequest{
@@ -203,12 +185,11 @@ func (s *LifecycleService) Create(ctx context.Context, params CreateParams, acto
 		Subdomain: params.Subdomain,
 	}
 
-	t, err := s.createRecord(ctx, req, params.OwnerID)
+	t, err := s.createRecord(ctx, req, params.OwnerID, params.Project.RAMMB)
 	if err != nil {
-		if releaseErr := s.nodeStore.ReleaseRAM(ctx, params.Node.ID, params.Project.RAMMB); releaseErr != nil {
-			slog.Error("release ram after tenant creation failure", "error", releaseErr)
+		if errors.Is(err, node.ErrInsufficientCapacity) {
+			return nil, conflict("insufficient capacity on node", err)
 		}
-
 		var pgErr *pgconn.PgError
 		if errors.As(err, &pgErr) && pgErr.Code == "23505" {
 			return nil, conflict("name or subdomain already exists", err)
@@ -218,7 +199,7 @@ func (s *LifecycleService) Create(ctx context.Context, params CreateParams, acto
 
 	// Provisioning runs asynchronously and reports progress through the tenant
 	// status, so a failure here cannot be surfaced to the caller.
-	s.provisioner.Provision(t.ID, params.Node.ID, params.Project.ID, params.Subdomain, params.Project.RAMMB)
+	s.provisioner.Provision(t.ID, params.Node.ID, params.Project.ID, params.Subdomain)
 
 	meta := map[string]string{"name": params.Name, "subdomain": params.Subdomain}
 	if actor.UserID != "" {
@@ -229,15 +210,15 @@ func (s *LifecycleService) Create(ctx context.Context, params CreateParams, acto
 	return t, nil
 }
 
-func (s *LifecycleService) createRecord(ctx context.Context, req CreateTenantRequest, ownerID string) (*Tenant, error) {
+func (s *LifecycleService) createRecord(ctx context.Context, req CreateTenantRequest, ownerID string, ramMB int) (*Tenant, error) {
 	if ownerID == "" {
-		return s.store.Create(ctx, req)
+		return s.store.CreateWithReservation(ctx, req, ramMB)
 	}
 	creator, ok := s.store.(OwnerCreator)
 	if !ok {
 		return nil, fmt.Errorf("tenant store cannot create owner-scoped tenants")
 	}
-	return creator.CreateWithOwner(ctx, req, ownerID)
+	return creator.CreateWithOwnerWithReservation(ctx, req, ownerID, ramMB)
 }
 
 // Delete tears a tenant down and returns its refreshed record. The caller is
@@ -247,38 +228,28 @@ func (s *LifecycleService) Delete(ctx context.Context, t *Tenant, actor Actor) (
 		return nil, conflict("tenant cannot be deleted in current status: "+t.Status, nil)
 	}
 
-	// The project is only needed for the RAM figure, so a missing project is
-	// not fatal: the tenant is still removed, just without releasing RAM.
-	proj, err := s.projectStore.GetByID(ctx, t.ProjectID)
-	if err != nil {
-		return nil, internal("failed to get project", err)
-	}
-	ramMB := 0
-	if proj != nil {
-		ramMB = proj.RAMMB
-	}
-
 	if t.LXCID != nil {
-		// Deprovision performs the status transition and releases RAM itself.
-		if err := s.provisioner.Deprovision(ctx, t.ID, t.NodeID, t.Subdomain, *t.LXCID, ramMB); err != nil {
+		// Deprovision performs the status transition and releases the
+		// reservation itself.
+		if err := s.provisioner.Deprovision(ctx, t.ID, t.NodeID, t.Subdomain, *t.LXCID); err != nil {
 			if errors.Is(err, ErrStateConflict) {
 				return nil, conflict("tenant is already being deleted", err)
 			}
 			return nil, internal("failed to deprovision tenant", err)
 		}
 	} else {
-		// No container to remove: transition directly, releasing RAM in between.
+		// No container to remove: transition directly, releasing the
+		// reservation in between. The amount comes from the tenant's own
+		// reserved_ram_mb, so no project lookup is needed.
 		if err := s.store.SetDeleting(ctx, t.ID); err != nil {
 			if errors.Is(err, ErrStateConflict) {
 				return nil, conflict("tenant is already being deleted", err)
 			}
 			return nil, internal("failed to delete tenant", err)
 		}
-		if ramMB > 0 {
-			// Best effort: a leaked reservation is better than a stuck delete.
-			if err := s.nodeStore.ReleaseRAM(ctx, t.NodeID, ramMB); err != nil {
-				slog.Error("release ram on tenant deletion", "error", err)
-			}
+		// Best effort: a leaked reservation is better than a stuck delete.
+		if err := s.store.ReleaseReservation(ctx, t.ID); err != nil {
+			slog.Error("release reservation on tenant deletion", "error", err)
 		}
 		if err := s.store.SetDeleted(ctx, t.ID); err != nil {
 			return nil, internal("failed to delete tenant", err)
