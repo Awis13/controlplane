@@ -2,9 +2,6 @@ package tenant
 
 import (
 	"context"
-	"crypto/hmac"
-	"crypto/sha256"
-	"encoding/base64"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -20,6 +17,7 @@ import (
 	"controlplane/internal/node"
 	"controlplane/internal/project"
 	"controlplane/internal/response"
+	"controlplane/internal/sso"
 )
 
 // UserNodeStore extends NodeStore with auto-selection capabilities.
@@ -52,6 +50,7 @@ type UserHandler struct {
 	lifecycle    *LifecycleService
 	ssoDomain    string
 	ssoScheme    string
+	ssoSigner    *sso.Signer
 }
 
 // respondLifecycle turns a lifecycle failure into an HTTP response, logging the
@@ -80,7 +79,7 @@ type UserCreateRequest struct {
 	Subdomain string `json:"subdomain"`
 }
 
-func NewUserHandler(store UserTenantStore, nodeStore UserNodeStore, projectStore UserProjectStore, provisioner Provisioner, auditStore *audit.Store, ssoDomain, ssoScheme string) *UserHandler {
+func NewUserHandler(store UserTenantStore, nodeStore UserNodeStore, projectStore UserProjectStore, provisioner Provisioner, auditStore *audit.Store, ssoDomain, ssoScheme string, ssoSigner *sso.Signer) *UserHandler {
 	if ssoDomain == "" {
 		ssoDomain = "example.com"
 	}
@@ -96,6 +95,7 @@ func NewUserHandler(store UserTenantStore, nodeStore UserNodeStore, projectStore
 		lifecycle:    NewLifecycleService(store, provisioner, auditStore),
 		ssoDomain:    ssoDomain,
 		ssoScheme:    ssoScheme,
+		ssoSigner:    ssoSigner,
 	}
 }
 
@@ -248,6 +248,11 @@ func (h *UserHandler) Create(w http.ResponseWriter, r *http.Request) {
 }
 
 // SSOToken generates a short-lived SSO token for accessing the tenant dashboard.
+//
+// The token is an Ed25519-signed assertion (see internal/sso) using a
+// persistent control-plane key, not the tenant's dashboard token. The browser
+// knows the dashboard token, so signing with it would let a studio owner forge
+// a tier upgrade; the private signing key never leaves the control plane.
 func (h *UserHandler) SSOToken(w http.ResponseWriter, r *http.Request) {
 	u := auth.UserFromContext(r.Context())
 	if u == nil {
@@ -277,9 +282,10 @@ func (h *UserHandler) SSOToken(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if t.DashboardToken == nil || *t.DashboardToken == "" {
-		slog.Error("tenant has no dashboard token", "tenant_id", id)
-		response.Error(w, http.StatusInternalServerError, "dashboard token not configured")
+	// SSO is explicitly unavailable when no signing key is configured. This
+	// keeps manual token authentication from silently becoming an open door.
+	if h.ssoSigner == nil {
+		response.Error(w, http.StatusServiceUnavailable, "SSO is not configured")
 		return
 	}
 
@@ -289,17 +295,23 @@ func (h *UserHandler) SSOToken(w http.ResponseWriter, r *http.Request) {
 		tier = "free"
 	}
 
-	// Generate HMAC-SHA256 signed token
-	timestamp := time.Now().Unix()
-	payload := fmt.Sprintf("%s:%s:%s:%d", u.ID.String(), t.ID, tier, timestamp)
-	payloadB64 := base64.RawURLEncoding.EncodeToString([]byte(payload))
+	// Build and sign the v1 assertion. audience is the tenant ID, matching the
+	// public key and TENANT_ID written into the tenant env by the provisioner;
+	// FR-2 in Node verifies the same fields.
+	issued := time.Now().Unix()
+	expires := issued + 60
+	issuer := "controlplane"
+	audience := t.ID
+	payload := sso.BuildAssertion(u.ID.String(), t.ID, tier, issued, expires, issuer, audience)
 
-	mac := hmac.New(sha256.New, []byte(*t.DashboardToken))
-	mac.Write([]byte(payload))
-	sig := mac.Sum(nil)
-	sigB64 := base64.RawURLEncoding.EncodeToString(sig)
+	sig, err := h.ssoSigner.Sign(payload)
+	if err != nil {
+		slog.Error("sign sso token", "error", err, "tenant_id", id)
+		response.Error(w, http.StatusInternalServerError, "failed to sign SSO token")
+		return
+	}
 
-	token := payloadB64 + ":" + sigB64
+	token := sso.EncodeToken(payload, sig)
 
 	ssoURL := fmt.Sprintf("%s://%s.%s/auth/sso?token=%s", h.ssoScheme, t.Subdomain, h.ssoDomain, url.QueryEscape(token))
 

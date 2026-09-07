@@ -216,6 +216,40 @@ func TestLoad_Defaults(t *testing.T) {
 	}
 }
 
+// --- SSO signing key ---
+
+func TestLoad_SSOSigningKeyFromEnv(t *testing.T) {
+	t.Setenv("DATABASE_URL", "postgres://localhost/test")
+	t.Setenv("API_TOKEN", "test-token")
+	t.Setenv("ENCRYPTION_KEY", "test-key")
+	t.Setenv("JWT_SECRET", "test-jwt-secret")
+	t.Setenv("SSO_SIGNING_KEY", "deadbeef")
+
+	cfg, err := Load()
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if cfg.SSOSigningKey != "deadbeef" {
+		t.Errorf("SSOSigningKey = %q, want %q", cfg.SSOSigningKey, "deadbeef")
+	}
+}
+
+func TestLoad_SSOSigningKeyEmptyByDefault(t *testing.T) {
+	t.Setenv("DATABASE_URL", "postgres://localhost/test")
+	t.Setenv("API_TOKEN", "test-token")
+	t.Setenv("ENCRYPTION_KEY", "test-key")
+	t.Setenv("JWT_SECRET", "test-jwt-secret")
+	t.Setenv("SSO_SIGNING_KEY", "")
+
+	cfg, err := Load()
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if cfg.SSOSigningKey != "" {
+		t.Errorf("SSOSigningKey = %q, want empty so SSO stays disabled", cfg.SSOSigningKey)
+	}
+}
+
 // --- freeRadio auto-deploy ---
 
 func TestLoad_FreeRadioDefaults(t *testing.T) {

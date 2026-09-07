@@ -154,6 +154,7 @@ type Provisioner struct {
 	sshClient           SSHExec                  // optional: SSH exec for writing tokens and mount points
 	freeRadioRepoURL    string                   // freeRadio repository URL for auto-deploy
 	freeRadioRepoBranch string                   // branch to deploy; empty falls back to the default branch
+	ssoPublicKey        string                   // hex Ed25519 public key for SSO assertions, written into tenant env
 	lxcBridge           string                   // Proxmox bridge for tenant NICs
 	mountRoot           string                   // host directory holding tenant content mounts
 	appDir              string                   // application directory inside the container
@@ -236,6 +237,14 @@ func (p *Provisioner) AutoDeployEnabled() bool {
 func (p *Provisioner) WithFreeRadioRepo(url, branch string) {
 	p.freeRadioRepoURL = url
 	p.freeRadioRepoBranch = branch
+}
+
+// WithSSOPublicKey sets the hex-encoded Ed25519 public key that tenants use to
+// verify SSO assertions. It is written into each tenant's .env so the tenant
+// can verify tokens signed by the control plane's private key. The private key
+// never leaves the control plane.
+func (p *Provisioner) WithSSOPublicKey(pubKey string) {
+	p.ssoPublicKey = pubKey
 }
 
 // InvalidateClient removes the cached Proxmox client for a node,
@@ -844,6 +853,11 @@ func (p *Provisioner) deployFreeRadio(ctx context.Context, sshHost string, lxcID
 	// appDir is quoted. INGEST_CALLBACK_SECRET is written here for the ingest
 	// callback (FR-3) and is never exposed through the API — it lives only in
 	// the container's .env.
+	//
+	// SSO_PUBLIC_KEY and TENANT_ID land in the tenant env so the tenant can
+	// verify SSO assertions signed by the control plane. The private signing
+	// key stays only in the control plane, so a browser holding the dashboard
+	// token cannot forge a tier upgrade.
 	log.Info("provision: deploy — writing .env")
 	secrets, err := generateDeploySecrets()
 	if err != nil {
@@ -864,6 +878,9 @@ func (p *Provisioner) deployFreeRadio(ctx context.Context, sshHost string, lxcID
 			"grep -q '^NODE_ENV=' %[1]s/.env || echo 'NODE_ENV=production' >> %[1]s/.env",
 		appDir, tenantID, dashboardToken, secrets.StreamKeys,
 		secrets.IcecastSource, secrets.IcecastAdmin, secrets.IcecastListen, secrets.IcecastRelay, secrets.IngestCallback)
+	if p.ssoPublicKey != "" {
+		writeEnvCmd += fmt.Sprintf("; grep -q '^SSO_PUBLIC_KEY=' %[1]s/.env || echo 'SSO_PUBLIC_KEY=%[2]s' >> %[1]s/.env", appDir, p.ssoPublicKey)
+	}
 	if err := p.sshClient.ExecInContainer(ctx, sshHost, lxcID, writeEnvCmd); err != nil {
 		return fmt.Errorf("write .env: %w", err)
 	}

@@ -2158,6 +2158,49 @@ func TestDeploy_EnvCarriesEverySecretTheStackNeeds(t *testing.T) {
 	}
 }
 
+// TestDeploy_SSOPublicKeyWrittenWhenSet pins that a configured SSO public key
+// is written into the tenant .env so the tenant can verify SSO assertions.
+func TestDeploy_SSOPublicKeyWrittenWhenSet(t *testing.T) {
+	p := New(newMockNodeStore(), newMockTenantStore(), newMockProjectStore(), "test-key")
+	ssh := &mockSSHExecWithDeployCalls{}
+	p.WithSSHClient(ssh)
+	p.WithFreeRadioRepo("https://github.com/example/freeRadio.git", "dev")
+	p.WithSSOPublicKey("aabbccddeeff00112233445566778899aabbccddeeff00112233445566778899")
+
+	if err := p.deployFreeRadio(context.Background(), "10.0.0.1", 105, "tenant-1", "dash-token"); err != nil {
+		t.Fatalf("deployFreeRadio: %v", err)
+	}
+
+	ssh.mu.Lock()
+	defer ssh.mu.Unlock()
+	var envCmd string
+	for _, call := range ssh.execInCtrCalls {
+		if strings.Contains(call.Command, "TENANT_ID=tenant-1") {
+			envCmd = call.Command
+			break
+		}
+	}
+	if envCmd == "" {
+		t.Fatal("no .env write command issued")
+	}
+	if !strings.Contains(envCmd, "SSO_PUBLIC_KEY=aabbccddeeff00112233445566778899aabbccddeeff00112233445566778899") {
+		t.Errorf(".env is missing the configured SSO_PUBLIC_KEY: %s", envCmd)
+	}
+}
+
+// TestDeploy_SSOPublicKeyOmittedWhenEmpty pins that an unset SSO public key
+// leaves the tenant .env without SSO_PUBLIC_KEY, so SSO stays disabled.
+func TestDeploy_SSOPublicKeyOmittedWhenEmpty(t *testing.T) {
+	commands := deployCommands(t, "dev")
+	env, ok := findCommand(commands, "TENANT_ID=tenant-1")
+	if !ok {
+		t.Fatalf("no .env written: %v", commands)
+	}
+	if strings.Contains(env, "SSO_PUBLIC_KEY=") {
+		t.Errorf(".env should not contain SSO_PUBLIC_KEY when none is configured: %s", env)
+	}
+}
+
 // secretValue extracts the value of a KEY=VALUE pair from an idempotent .env
 // write command, which encodes each pair as echo 'KEY=VALUE' >> file.
 func secretValue(t *testing.T, cmd, key string) string {
